@@ -3,6 +3,8 @@ package users
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/iancoleman/orderedmap"
 )
 
 func TestBuildInboundUsersUsesSingboxProtocolCredentials(t *testing.T) {
@@ -175,5 +177,76 @@ func TestDeleteField(t *testing.T) {
 	}
 	if cleaned["tag"] != "vless-in" {
 		t.Fatalf("expected tag to be preserved, got %v", cleaned["tag"])
+	}
+}
+
+func TestRenderNodeConfigFromPrepared(t *testing.T) {
+	base := orderedmap.New()
+	base.Set("log", map[string]any{"level": "info"})
+
+	hash1 := deployInboundHash{Tag: "vless-in", Hash: "abcdef1234567890", UsersCount: 1}
+	hash2 := deployInboundHash{Tag: "ss-in", Hash: "1234567890abcdef", UsersCount: 2}
+
+	prep := &preparedProfileData{
+		profileUUID: "profile-1",
+		baseParsed:  base,
+		inbounds: []preparedInbound{
+			{
+				tag:          "vless-in",
+				normTag:      "vless-in",
+				inboundType:  "vless",
+				rawWithUsers: map[string]any{"tag": "vless-in", "type": "vless", "users": []any{"user1"}},
+				rawEmpty:     map[string]any{"tag": "vless-in", "type": "vless"},
+				hash:         &hash1,
+				isUnsecure:   false,
+			},
+			{
+				tag:          "ss-in",
+				normTag:      "ss-in",
+				inboundType:  "shadowsocks",
+				rawWithUsers: map[string]any{"tag": "ss-in", "type": "shadowsocks", "users": []any{"user2", "user3"}},
+				rawEmpty:     map[string]any{"tag": "ss-in", "type": "shadowsocks"},
+				hash:         &hash2,
+				isUnsecure:   false,
+			},
+		},
+	}
+
+	nm := &NodeMonitor{}
+
+	// Node 1 only has vless-in
+	cfgJSON, internals, profileUUID, inbCount, err := nm.renderNodeConfigFromPrepared("node-1", prep, map[string]struct{}{"vless-in": {}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if profileUUID != "profile-1" {
+		t.Fatalf("expected profile-1, got %s", profileUUID)
+	}
+	if inbCount != 1 {
+		t.Fatalf("expected 1 inbound, got %d", inbCount)
+	}
+	if len(internals.Hashes.Inbounds) != 1 || internals.Hashes.Inbounds[0].Tag != "vless-in" {
+		t.Fatalf("expected 1 inbound hash for vless-in, got %v", internals.Hashes.Inbounds)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(cfgJSON, &parsed); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	inbounds := parsed["inbounds"].([]any)
+	if len(inbounds) != 1 {
+		t.Fatalf("expected 1 inbound in JSON, got %d", len(inbounds))
+	}
+
+	// Node 2 only has ss-in
+	_, internals2, _, inbCount2, err := nm.renderNodeConfigFromPrepared("node-2", prep, map[string]struct{}{"ss-in": {}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inbCount2 != 1 {
+		t.Fatalf("expected 1 inbound, got %d", inbCount2)
+	}
+	if len(internals2.Hashes.Inbounds) != 1 || internals2.Hashes.Inbounds[0].Tag != "ss-in" {
+		t.Fatalf("expected 1 inbound hash for ss-in, got %v", internals2.Hashes.Inbounds)
 	}
 }

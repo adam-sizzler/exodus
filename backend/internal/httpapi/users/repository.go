@@ -797,11 +797,26 @@ func (r *UserRepository) deleteUsersByStatus(ctx context.Context, status string)
 		return 0, nil, rowsErr
 	}
 
-	result, execErr := tx.ExecContext(ctx, `DELETE FROM users WHERE status = $1`, status)
-	if execErr != nil {
-		return 0, nil, execErr
+	const deleteBatchSize = 30000
+	var affectedRows int64
+	for {
+		result, execErr := tx.ExecContext(ctx, `
+			DELETE FROM users
+			WHERE id IN (
+				SELECT id FROM users
+				WHERE status = $1
+				LIMIT $2
+			)
+		`, status, deleteBatchSize)
+		if execErr != nil {
+			return 0, nil, execErr
+		}
+		deleted, _ := result.RowsAffected()
+		affectedRows += deleted
+		if deleted < deleteBatchSize {
+			break
+		}
 	}
-	affectedRows, _ := result.RowsAffected()
 
 	if err := tx.Commit(); err != nil {
 		return 0, nil, err

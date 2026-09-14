@@ -26,7 +26,7 @@ func triggerNodeDeploy(restart bool, nodeUUIDs ...string) {
 	nodeDeployMu.RLock()
 	cb := nodeDeployCallback
 	nodeDeployMu.RUnlock()
-	if cb != nil && len(nodeUUIDs) > 0 {
+	if cb != nil {
 		cb(restart, nodeUUIDs...)
 	}
 }
@@ -38,8 +38,21 @@ type StatusUpdateResult struct {
 
 func (s *Scheduler) runExpiredUsersReview(ctx context.Context) error {
 	result, users, err := UpdateExpiredUsersWithRecords(ctx, s.db)
-	s.handleStatusUpdateResult("expired", result, err)
-	if err == nil && len(users) > 0 {
+	if err != nil {
+		s.handleStatusUpdateResult("expired", result, err)
+		return err
+	}
+	if len(users) >= 10000 {
+		s.cfg.Logger.Info("More than 10,000 expired users found, skipping webhook/telegram events.")
+		if len(result.NodeUUIDs) > 0 {
+			triggerNodeDeploy(true, result.NodeUUIDs...)
+		} else {
+			triggerNodeDeploy(true)
+		}
+		return nil
+	}
+	s.handleStatusUpdateResult("expired", result, nil)
+	if len(users) > 0 {
 		skipTelegram := len(users) >= 500
 		for _, user := range users {
 			meta := map[string]any{}
@@ -54,13 +67,26 @@ func (s *Scheduler) runExpiredUsersReview(ctx context.Context) error {
 			})
 		}
 	}
-	return err
+	return nil
 }
 
 func (s *Scheduler) runExceededUsersReview(ctx context.Context) error {
 	result, users, err := UpdateExceededTrafficUsersWithRecords(ctx, s.db)
-	s.handleStatusUpdateResult("limited", result, err)
-	if err == nil && len(users) > 0 {
+	if err != nil {
+		s.handleStatusUpdateResult("limited", result, err)
+		return err
+	}
+	if len(users) >= 10000 {
+		s.cfg.Logger.Info("More than 10,000 exceeded traffic usage users found, skipping webhook/telegram events.")
+		if len(result.NodeUUIDs) > 0 {
+			triggerNodeDeploy(true, result.NodeUUIDs...)
+		} else {
+			triggerNodeDeploy(true)
+		}
+		return nil
+	}
+	s.handleStatusUpdateResult("limited", result, nil)
+	if len(users) > 0 {
 		skipTelegram := len(users) >= 500
 		for _, user := range users {
 			meta := map[string]any{}
@@ -75,7 +101,7 @@ func (s *Scheduler) runExceededUsersReview(ctx context.Context) error {
 			})
 		}
 	}
-	return err
+	return nil
 }
 
 func (s *Scheduler) handleStatusUpdateResult(statusName string, result StatusUpdateResult, err error) {

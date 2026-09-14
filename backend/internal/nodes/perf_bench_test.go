@@ -1,12 +1,15 @@
 package users
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
 	"exodus/internal/proto"
+
+	"github.com/iancoleman/orderedmap"
 )
 
 func BenchmarkBulkUpsertQueryBuilder(b *testing.B) {
@@ -167,4 +170,77 @@ func BenchmarkBuildInboundUsers(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = buildInboundUsers("vless", users)
 	}
+}
+
+func BenchmarkDeployConfigGeneration1000Nodes(b *testing.B) {
+	baseJSON := `{"log":{"level":"info"},"inbounds":[{"tag":"vless-in","type":"vless","users":[]},{"tag":"ss-in","type":"shadowsocks","users":[]}],"outbounds":[{"tag":"direct","type":"direct"}]}`
+	baseParsed := orderedmap.New()
+	_ = json.Unmarshal([]byte(baseJSON), baseParsed)
+
+	users := make([]inboundUserCredentials, 5000)
+	for i := range users {
+		users[i] = inboundUserCredentials{
+			ID:             int64(i + 1),
+			Username:       "user_" + strconv.Itoa(i+1),
+			VLESSUUID:      "a0000000-0000-0000-0000-" + fmt.Sprintf("%012d", i+1),
+			TrojanPassword: "pwd_" + strconv.Itoa(i+1),
+		}
+	}
+
+	hash1 := deployInboundHash{Tag: "vless-in", Hash: "abcdef1234567890", UsersCount: len(users)}
+	hash2 := deployInboundHash{Tag: "ss-in", Hash: "1234567890abcdef", UsersCount: len(users)}
+	prep := &preparedProfileData{
+		profileUUID: "profile-uuid-1",
+		baseParsed:  baseParsed,
+		inbounds: []preparedInbound{
+			{
+				tag:          "vless-in",
+				normTag:      "vless-in",
+				inboundType:  "vless",
+				rawWithUsers: map[string]any{"tag": "vless-in", "type": "vless", "users": buildInboundUsers("vless", users)},
+				rawEmpty:     map[string]any{"tag": "vless-in", "type": "vless"},
+				hash:         &hash1,
+			},
+			{
+				tag:          "ss-in",
+				normTag:      "ss-in",
+				inboundType:  "shadowsocks",
+				rawWithUsers: map[string]any{"tag": "ss-in", "type": "shadowsocks", "users": buildInboundUsers("shadowsocks", users)},
+				rawEmpty:     map[string]any{"tag": "ss-in", "type": "shadowsocks"},
+				hash:         &hash2,
+			},
+		},
+	}
+
+	nm := &NodeMonitor{}
+	activeTags := map[string]struct{}{"vless-in": {}}
+
+	b.Run("WithPreparedProfile_SingleNode", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, _, _, err := nm.renderNodeConfigFromPrepared("node-uuid", prep, activeTags)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("WithoutPreparedProfile_SingleNode", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			parsed := orderedmap.New()
+			_ = json.Unmarshal([]byte(baseJSON), parsed)
+			builtUsers := buildInboundUsers("vless", users)
+			userSet := NewHashedSet()
+			for _, u := range users {
+				userSet.Add(u.VLESSUUID)
+			}
+			_ = userSet.Hash64String()
+			raw := map[string]any{"tag": "vless-in", "type": "vless", "users": builtUsers}
+			parsed.Set("inbounds", []any{raw})
+			_, _ = json.Marshal(parsed)
+		}
+	})
 }

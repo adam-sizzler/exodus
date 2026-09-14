@@ -275,7 +275,7 @@ func (s *UserService) BulkDeleteUsersByStatus(ctx context.Context, status string
 		return 0, err
 	}
 
-	if len(internalSquadNodeUUIDs) > 0 {
+	if strings.EqualFold(status, "ACTIVE") && len(internalSquadNodeUUIDs) > 0 {
 		monitor.RequestNodeDeploy(true, internalSquadNodeUUIDs...)
 	}
 	return affectedRows, nil

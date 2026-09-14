@@ -84,6 +84,7 @@ func (nm *NodeMonitor) deployToConnectedNodes(restart bool, forceRestart bool, r
 	// so it's loaded once instead of once per node (was a per-target N+1).
 	sharedLists := nm.loadSharedLists(nm.globalCtx)
 	snippets := nm.loadConfigSnippets(nm.globalCtx)
+	profileCache := nm.newDeployProfileCache(snippets)
 
 	batchStart := time.Now()
 	var (
@@ -101,7 +102,7 @@ func (nm *NodeMonitor) deployToConnectedNodes(restart bool, forceRestart bool, r
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			profileUUID := nm.deployNodeTarget(target, sharedLists, snippets, restart, forceRestart)
+			profileUUID := nm.deployNodeTarget(target, sharedLists, snippets, profileCache, restart, forceRestart)
 			if profileUUID != "" {
 				profileMu.Lock()
 				lastProfileUUID = profileUUID
@@ -122,11 +123,23 @@ func (nm *NodeMonitor) deployNodeTarget(
 	target deployTarget,
 	sharedLists resolvedSharedLists,
 	snippets *resolvedConfigSnippets,
+	profileCache *deployProfileCache,
 	restart bool,
 	forceRestart bool,
 ) string {
 	start := time.Now()
-	configJSON, internals, profileUUID, inboundsCount, err := nm.buildNodeConfigForDeploy(nm.globalCtx, target.uuid, snippets)
+	var (
+		configJSON    json.RawMessage
+		internals     *deployInternalsBlock
+		profileUUID   string
+		inboundsCount int
+		err           error
+	)
+	if profileCache != nil {
+		configJSON, internals, profileUUID, inboundsCount, err = profileCache.buildNodeConfigForDeploy(nm.globalCtx, target.uuid)
+	} else {
+		configJSON, internals, profileUUID, inboundsCount, err = nm.buildNodeConfigForDeploy(nm.globalCtx, target.uuid, snippets)
+	}
 	if err != nil {
 		nm.cfg.Logger.Warn("Failed to build node deploy config", "node", target.name, "node_uuid", target.uuid, "error", err)
 		return ""

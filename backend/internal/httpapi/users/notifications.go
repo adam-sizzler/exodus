@@ -97,16 +97,27 @@ func emitUsersByUUIDsNotification(ctx context.Context, repo *UserRepository, cfg
 	if len(clean) == 0 {
 		return
 	}
+	if len(clean) >= 10000 {
+		if cfg != nil && cfg.Logger != nil {
+			cfg.Logger.Info("More than 10,000 users in batch, skipping webhook/telegram events", "count", len(clean), "event", event)
+		}
+		return
+	}
 	records, err := repo.getUserRecordsByUUIDs(ctx, clean)
 	if err != nil || len(records) == 0 {
 		return
+	}
+
+	subBase := ""
+	if repo != nil {
+		subBase = resolveUsersSubscriptionBaseFromNode(ctx, repo.db)
 	}
 
 	foundUUIDs := make([]string, 0, len(records))
 	dataByUUID := make(map[string]map[string]any, len(records))
 	for _, record := range records {
 		foundUUIDs = append(foundUUIDs, record.UUID)
-		dataByUUID[record.UUID] = userRecordNotificationData(ctx, repo, cfg, record)
+		dataByUUID[record.UUID] = userRecordNotificationData(ctx, repo, cfg, record, subBase)
 	}
 
 	if userNotificationNeedsInternalSquads(event) {
@@ -133,13 +144,24 @@ func emitUsersNotificationFromRecords(ctx context.Context, repo *UserRepository,
 	if len(clean) == 0 || len(records) == 0 {
 		return
 	}
+	if len(records) >= 10000 {
+		if cfg != nil && cfg.Logger != nil {
+			cfg.Logger.Info("More than 10,000 users in batch, skipping webhook/telegram events", "count", len(records), "event", event)
+		}
+		return
+	}
+
+	subBase := ""
+	if repo != nil {
+		subBase = resolveUsersSubscriptionBaseFromNode(ctx, repo.db)
+	}
 
 	foundUUIDs := make([]string, 0, len(records))
 	dataByUUID := make(map[string]map[string]any, len(records))
 	for _, userUUID := range clean {
 		if record, ok := records[userUUID]; ok {
 			foundUUIDs = append(foundUUIDs, record.UUID)
-			dataByUUID[record.UUID] = userRecordNotificationData(ctx, repo, cfg, record)
+			dataByUUID[record.UUID] = userRecordNotificationData(ctx, repo, cfg, record, subBase)
 		}
 	}
 
@@ -166,9 +188,11 @@ func emitUsersNotificationFromRecords(ctx context.Context, repo *UserRepository,
 	}
 }
 
-func userRecordNotificationData(ctx context.Context, repo *UserRepository, cfg *config.BackendConfig, record userRecord) map[string]any {
+func userRecordNotificationData(ctx context.Context, repo *UserRepository, cfg *config.BackendConfig, record userRecord, optSubBase ...string) map[string]any {
 	subBase := ""
-	if repo != nil {
+	if len(optSubBase) > 0 && optSubBase[0] != "" {
+		subBase = optSubBase[0]
+	} else if repo != nil {
 		subBase = resolveUsersSubscriptionBaseFromNode(ctx, repo.db)
 	}
 	if subBase == "" {

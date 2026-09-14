@@ -2,10 +2,18 @@ package users
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"exodus/internal/config"
+	"exodus/internal/logger"
 	"exodus/internal/proto"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 )
 
 func TestExtractTrafficStatsDelta(t *testing.T) {
@@ -143,6 +151,75 @@ func TestMergeDeployRequests(t *testing.T) {
 	}
 	if !mergedAll.Restart {
 		t.Fatalf("expected Restart=true")
+	}
+}
+
+type mockDeployNodeServiceClient struct {
+	proto.NodeServiceClient
+	submitTaskFunc func(ctx context.Context, in *proto.NodeTask, opts ...grpc.CallOption) (*rpcstatus.Status, error)
+}
+
+func (m *mockDeployNodeServiceClient) SubmitTask(ctx context.Context, in *proto.NodeTask, opts ...grpc.CallOption) (*rpcstatus.Status, error) {
+	if m.submitTaskFunc != nil {
+		return m.submitTaskFunc(ctx, in, opts...)
+	}
+	return &rpcstatus.Status{Code: int32(codes.OK), Message: "success"}, nil
+}
+
+func TestDeployFailureIsolation(t *testing.T) {
+	l, _ := logger.NewLogger("debug", "UTC", nil)
+	nm := &NodeMonitor{
+		cfg: &config.BackendConfig{Logger: l},
+	}
+
+	node1Failed := false
+	node2Succeeded := false
+
+	target1 := deployTarget{
+		name: "node-1-failing",
+		uuid: "uuid-1",
+		client: &mockDeployNodeServiceClient{
+			submitTaskFunc: func(ctx context.Context, in *proto.NodeTask, opts ...grpc.CallOption) (*rpcstatus.Status, error) {
+				node1Failed = true
+				return nil, fmt.Errorf("connection refused")
+			},
+		},
+	}
+
+	target2 := deployTarget{
+		name: "node-2-working",
+		uuid: "uuid-2",
+		client: &mockDeployNodeServiceClient{
+			submitTaskFunc: func(ctx context.Context, in *proto.NodeTask, opts ...grpc.CallOption) (*rpcstatus.Status, error) {
+				node2Succeeded = true
+				return &rpcstatus.Status{Code: int32(codes.OK), Message: "success: users=1 core_ready=true"}, nil
+			},
+		},
+	}
+
+	// Run concurrent deploy to both targets using waitgroup and bounded concurrency
+	var wg sync.WaitGroup
+	targets := []deployTarget{target1, target2}
+	sem := make(chan struct{}, 2)
+
+	for _, target := range targets {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(tgt deployTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// submitDeployTask should not panic or block even if target fails
+			_ = nm.submitDeployTask(tgt, []byte("{}"), true, false)
+		}(target)
+	}
+
+	wg.Wait()
+
+	if !node1Failed {
+		t.Fatalf("expected node 1 to attempt deploy and fail")
+	}
+	if !node2Succeeded {
+		t.Fatalf("expected node 2 to complete deploy successfully despite node 1 failure")
 	}
 }
 

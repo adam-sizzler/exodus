@@ -205,33 +205,55 @@ func (nm *NodeMonitor) deployNodeTarget(
 		return profileUUID
 	}
 
+	if err := nm.submitDeployTask(target, taskPayload, restart, forceRestart); err != nil {
+		return profileUUID
+	}
+	return profileUUID
+}
+
+func (nm *NodeMonitor) submitDeployTask(
+	target deployTarget,
+	taskPayload []byte,
+	restart bool,
+	forceRestart bool,
+) error {
 	ctxBase := nm.globalCtx
 	if ctxBase == nil {
 		ctxBase = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctxBase, 60*time.Second)
-	nm.cfg.Logger.Debug("Submitting deploy task", "node", target.name, "payload_bytes", len(taskPayload), "restart", restart, "force_restart", forceRestart)
+	defer cancel()
+
+	if nm.cfg != nil && nm.cfg.Logger != nil {
+		nm.cfg.Logger.Debug("Submitting deploy task", "node", target.name, "payload_bytes", len(taskPayload), "restart", restart, "force_restart", forceRestart)
+	}
+
 	resp, err := target.client.SubmitTask(ctx, &proto.NodeTask{
 		TaskId:    fmt.Sprintf("deploy-%d", time.Now().UnixNano()),
 		Operation: "deploy_config",
 		Payload:   taskPayload,
 	})
-	cancel()
 
 	if err != nil {
-		nm.cfg.Logger.Warn("Deploy task failed", "node", target.name, "error", err)
+		if nm.cfg != nil && nm.cfg.Logger != nil {
+			nm.cfg.Logger.Warn("Deploy task failed", "node", target.name, "error", err)
+		}
 		nm.updateConnectionStatus(target.name, false, false, fmt.Sprintf("Deploy transport error: %v", err))
-		return profileUUID
+		return err
 	}
 	if resp == nil || resp.Code != int32(codes.OK) {
 		if resp == nil {
-			nm.cfg.Logger.Warn("Deploy task returned nil status", "node", target.name)
+			if nm.cfg != nil && nm.cfg.Logger != nil {
+				nm.cfg.Logger.Warn("Deploy task returned nil status", "node", target.name)
+			}
 			nm.updateConnectionStatus(target.name, false, false, "Deploy task returned nil status")
-		} else {
-			nm.cfg.Logger.Warn("Deploy task rejected", "node", target.name, "code", resp.Code, "message", resp.Message)
-			nm.updateConnectionStatus(target.name, false, false, firstNonEmptyString(resp.Message, "Deploy task rejected"))
+			return fmt.Errorf("deploy task returned nil status")
 		}
-		return profileUUID
+		if nm.cfg != nil && nm.cfg.Logger != nil {
+			nm.cfg.Logger.Warn("Deploy task rejected", "node", target.name, "code", resp.Code, "message", resp.Message)
+		}
+		nm.updateConnectionStatus(target.name, false, false, firstNonEmptyString(resp.Message, "Deploy task rejected"))
+		return fmt.Errorf("deploy task rejected: %s", resp.Message)
 	}
 
 	if hasCoreReady, coreReady, coreMessage := parseDeployCoreState(resp.Message); hasCoreReady {
@@ -244,6 +266,8 @@ func (nm *NodeMonitor) deployNodeTarget(
 		nm.updateConnectionStatus(target.name, false, true, "")
 	}
 
-	nm.cfg.Logger.Debug("Node config deployed", "node", target.name, "restart", restart, "force_restart", forceRestart, "message", resp.Message)
-	return profileUUID
+	if nm.cfg != nil && nm.cfg.Logger != nil {
+		nm.cfg.Logger.Debug("Node config deployed", "node", target.name, "restart", restart, "force_restart", forceRestart, "message", resp.Message)
+	}
+	return nil
 }

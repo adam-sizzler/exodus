@@ -436,9 +436,13 @@ func parseOptionalJSONRaw(raw string) json.RawMessage {
 
 func extractTrafficStatsDelta(stats []*proto.Stat) trafficStatsDelta {
 	var delta trafficStatsDelta
-	delta.InboundByTag = make(map[string]TagTrafficCounters)
-	delta.OutboundByTag = make(map[string]TagTrafficCounters)
-	delta.UserBytesByName = make(map[string]int64)
+	userCap := 0
+	if len(stats) > 16 {
+		userCap = len(stats) / 2
+	}
+	delta.InboundByTag = make(map[string]TagTrafficCounters, 8)
+	delta.OutboundByTag = make(map[string]TagTrafficCounters, 8)
+	delta.UserBytesByName = make(map[string]int64, userCap)
 
 	for _, stat := range stats {
 		if stat == nil {

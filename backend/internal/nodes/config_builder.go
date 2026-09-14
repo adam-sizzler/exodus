@@ -19,6 +19,9 @@ import (
 )
 
 func (nm *NodeMonitor) loadNodePluginRuntimeConfig(ctx context.Context, nodeUUID string) (activeNodePluginRuntimeConfig, error) {
+	if nm == nil || nm.db == nil {
+		return activeNodePluginRuntimeConfig{}, nil
+	}
 	if strings.TrimSpace(nodeUUID) == "" {
 		return activeNodePluginRuntimeConfig{}, fmt.Errorf("node uuid is empty")
 	}
@@ -368,6 +371,9 @@ func (nm *NodeMonitor) buildPreparedProfileData(
 	profileUUID string,
 	preloadedSnippets *resolvedConfigSnippets,
 ) (*preparedProfileData, error) {
+	if nm == nil || nm.db == nil {
+		return nil, fmt.Errorf("database is not initialized")
+	}
 	if strings.TrimSpace(profileUUID) == "" {
 		return nil, fmt.Errorf("profile uuid is empty")
 	}
@@ -569,6 +575,9 @@ func (c *deployProfileCache) buildNodeConfigForDeploy(
 	ctx context.Context,
 	nodeUUID string,
 ) (json.RawMessage, *deployInternalsBlock, string, int, error) {
+	if c == nil || c.nm == nil || c.nm.db == nil {
+		return nil, nil, "", 0, fmt.Errorf("database is not initialized")
+	}
 	if strings.TrimSpace(nodeUUID) == "" {
 		return nil, nil, "", 0, fmt.Errorf("node uuid is empty")
 	}

@@ -407,7 +407,12 @@ func applyConsumptionMultiplier(bytes int64, multiplier int64) int64 {
 	if bytes <= 0 || multiplier <= 0 {
 		return 0
 	}
-	return (bytes * multiplier) / 1_000_000_000
+	if multiplier == 1_000_000_000 {
+		return bytes
+	}
+	// Prevent int64 overflow on bytes * multiplier (overflows at ~9.22 GB when multiplied by 10^9).
+	// Uses float64 scaling matching upstream fromNanoToNumber(multiplier) * totalBytes.
+	return int64(float64(bytes) * (float64(multiplier) / 1_000_000_000.0))
 }
 
 func parseOptionalUptimeSeconds(raw string) (int64, bool) {

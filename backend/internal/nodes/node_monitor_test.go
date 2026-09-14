@@ -63,6 +63,15 @@ func TestApplyConsumptionMultiplier(t *testing.T) {
 	if got := applyConsumptionMultiplier(100, 0); got != 0 {
 		t.Fatalf("unexpected 0 multiplier result: got %d want %d", got, 0)
 	}
+	// Test large traffic (> 9.22 GB) that previously overflowed int64 when multiplied by 10^9
+	const fiftyGB = int64(50 * 1024 * 1024 * 1024)
+	if got := applyConsumptionMultiplier(fiftyGB, 1_000_000_000); got != fiftyGB {
+		t.Fatalf("unexpected 50GB multiplier result: got %d want %d", got, fiftyGB)
+	}
+	const oneTB = int64(1024 * 1024 * 1024 * 1024)
+	if got := applyConsumptionMultiplier(oneTB, 2_000_000_000); got != oneTB*2 {
+		t.Fatalf("unexpected 1TB 2.0x multiplier result: got %d want %d", got, oneTB*2)
+	}
 }
 
 func TestNormalizeNodeConnectionFields(t *testing.T) {

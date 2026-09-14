@@ -109,6 +109,53 @@ func notificationDedupeID(event Event) string {
 			stringValue(event.Data, "nodeName"),
 			stringValue(event.Data, "nextBillingAt"),
 		)
+	case ScopeUser:
+		username := stringValue(event.Data, "username")
+		if username == "" {
+			username = stringValue(event.Data, "uuid")
+		}
+		if username == "" {
+			return ""
+		}
+		switch event.Event {
+		case EventUserExpiration:
+			exp := ""
+			if event.Meta != nil {
+				if v, ok := event.Meta["expiration"]; ok {
+					exp = fmt.Sprintf("%v", v)
+				}
+			}
+			expireAt := stringValue(event.Data, "expireAt")
+			return fmt.Sprintf("user:expiration:%s:%s:%s", username, exp, expireAt)
+		case EventUserBandwidthThreshold:
+			threshold := ""
+			if event.Meta != nil {
+				if v, ok := event.Meta["threshold"]; ok {
+					threshold = fmt.Sprintf("%v", v)
+				}
+			}
+			if threshold == "" {
+				if v, ok := event.Data["lastTriggeredThreshold"]; ok {
+					threshold = fmt.Sprintf("%v", v)
+				}
+			}
+			return fmt.Sprintf("user:threshold:%s:%s", username, threshold)
+		case EventUserExpired:
+			expireAt := stringValue(event.Data, "expireAt")
+			return fmt.Sprintf("user:expired:%s:%s", username, expireAt)
+		case EventUserLimited:
+			return fmt.Sprintf("user:limited:%s", username)
+		case EventUserNotConnected:
+			hours := ""
+			if event.Meta != nil {
+				if v, ok := event.Meta["notConnectedAfterHours"]; ok {
+					hours = fmt.Sprintf("%v", v)
+				}
+			}
+			return fmt.Sprintf("user:not_connected:%s:%s", username, hours)
+		default:
+			return ""
+		}
 	default:
 		return ""
 	}

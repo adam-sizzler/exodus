@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"golang.org/x/time/rate"
 
 	"exodus/internal/config"
 	"exodus/internal/jobqueue"
@@ -21,6 +22,11 @@ const (
 	webhookJobName    = "sendWebhook"
 	telegramJobName   = "sendTelegram"
 
+	// telegramRateLimitPerSecond limits the dispatch rate to Telegram API
+	// to prevent HTTP 429 rate-limiting and message reordering during bursts.
+	// Matches upstream queue limiter { max: 20, duration: 1_000 }.
+	telegramRateLimitPerSecond = 20
+
 	// telegramMaxRetries bounds how many times a rate-limited Telegram send
 	// will be retried (see handleTelegram/telegramRetryDelay below). Only
 	// RateLimitError actually consumes a retry — any other failure is
@@ -30,9 +36,10 @@ const (
 )
 
 type Worker struct {
-	processor *jobqueue.Processor
-	cfg       *config.BackendConfig
-	notifier  *Notifier
+	processor       *jobqueue.Processor
+	cfg             *config.BackendConfig
+	notifier        *Notifier
+	telegramLimiter *rate.Limiter
 }
 
 func NewWorker(cfg *config.BackendConfig) (*Worker, error) {
@@ -47,9 +54,10 @@ func NewWorker(cfg *config.BackendConfig) (*Worker, error) {
 
 	processor := jobqueue.NewProcessor(client, cfg)
 	worker := &Worker{
-		processor: processor,
-		cfg:       cfg,
-		notifier:  New(cfg),
+		processor:       processor,
+		cfg:             cfg,
+		notifier:        New(cfg),
+		telegramLimiter: rate.NewLimiter(rate.Limit(telegramRateLimitPerSecond), telegramRateLimitPerSecond),
 	}
 
 	// Webhook delivery: no queue-level retry (matches upstream's BullMQ
@@ -125,6 +133,12 @@ func (w *Worker) handleWebhook(ctx context.Context, job jobqueue.Job) error {
 }
 
 func (w *Worker) handleTelegram(ctx context.Context, job jobqueue.Job) error {
+	if w.telegramLimiter != nil {
+		if err := w.telegramLimiter.Wait(ctx); err != nil {
+			return err
+		}
+	}
+
 	var event Event
 	if err := json.Unmarshal(job.Payload, &event); err != nil {
 		return err

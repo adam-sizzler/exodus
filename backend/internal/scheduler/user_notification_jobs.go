@@ -176,7 +176,8 @@ func (s *Scheduler) triggerThresholdNotifications(ctx context.Context, threshold
 			SELECT
 				u.id,
 				MIN(u.created_at) AS created_at_for_order,
-				MAX(t.pct)::int AS new_threshold
+				MAX(t.pct)::int AS new_threshold,
+				MAX(ut.used_traffic_bytes)::bigint AS used_traffic_bytes
 			FROM users u
 			INNER JOIN user_traffic ut ON ut.id = u.id
 			INNER JOIN thresholds t
@@ -200,7 +201,7 @@ func (s *Scheduler) triggerThresholdNotifications(ctx context.Context, threshold
 			u.short_uuid,
 			u.status,
 			u.traffic_limit_bytes,
-			COALESCE((SELECT ut.used_traffic_bytes FROM user_traffic ut WHERE ut.id = u.id), 0),
+			c.used_traffic_bytes,
 			u.expire_at,
 			u.last_triggered_threshold,
 			u.created_at

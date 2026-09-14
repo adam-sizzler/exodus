@@ -11,6 +11,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"exodus/internal/config"
@@ -171,12 +172,29 @@ func LoadNodeSyncItems(ctx context.Context, db *sql.DB) ([]NodeSyncItem, error) 
 	return result, nil
 }
 
-func CheckOneURL(ctx context.Context, rawURL string) error {
-	client := &http.Client{Timeout: 25 * time.Second}
+var srsHTTPClient = &http.Client{
+	Timeout: 25 * time.Second,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          50,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
+const srsCheckConcurrency = 5
+
+type srsCheckResult struct {
+	item Item
+	err  error
+}
+
+func CheckOneURL(ctx context.Context, rawURL string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
 	if err == nil {
-		resp, reqErr := client.Do(req)
+		resp, reqErr := srsHTTPClient.Do(req)
 		if reqErr == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -195,7 +213,7 @@ func CheckOneURL(ctx context.Context, rawURL string) error {
 	}
 	getReq.Header.Set("Range", "bytes=0-1023")
 
-	resp, err := client.Do(getReq)
+	resp, err := srsHTTPClient.Do(getReq)
 	if err != nil {
 		return err
 	}
@@ -219,14 +237,41 @@ func CheckAndUpdateAvailability(ctx context.Context, db *sql.DB, cfg *config.Bac
 	if err != nil {
 		return 0, err
 	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+
+	results := make([]srsCheckResult, len(items))
+	sem := make(chan struct{}, srsCheckConcurrency)
+	var wg sync.WaitGroup
+
+	for i, item := range items {
+		wg.Add(1)
+		go func(idx int, it Item) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[idx] = srsCheckResult{item: it, err: ctx.Err()}
+				return
+			}
+
+			results[idx] = srsCheckResult{item: it, err: CheckOneURL(ctx, it.URL)}
+		}(i, item)
+	}
+
+	wg.Wait()
 
 	updated := 0
-	for _, item := range items {
-		err := CheckOneURL(ctx, item.URL)
-		isAvailable := err == nil
+	for _, res := range results {
+		if ctx.Err() != nil {
+			break
+		}
+		isAvailable := res.err == nil
 		var errText any
-		if err != nil {
-			errText = err.Error()
+		if res.err != nil {
+			errText = res.err.Error()
 		}
 
 		_, writeErr := db.ExecContext(ctx, `
@@ -236,10 +281,10 @@ func CheckAndUpdateAvailability(ctx context.Context, db *sql.DB, cfg *config.Bac
 				last_error = $2,
 				updated_at = CURRENT_TIMESTAMP
 			WHERE uuid = $3
-		`, isAvailable, errText, item.UUID)
+		`, isAvailable, errText, res.item.UUID)
 		if writeErr != nil {
 			if cfg != nil && cfg.Logger != nil {
-				cfg.Logger.Warn("Failed to update SRS availability", "uuid", item.UUID, "error", writeErr)
+				cfg.Logger.Warn("Failed to update SRS availability", "uuid", res.item.UUID, "error", writeErr)
 			}
 			continue
 		}

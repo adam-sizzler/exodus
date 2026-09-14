@@ -97,7 +97,6 @@ func (sm *SubNodeMonitor) syncNodes() {
 	}
 
 	sm.nodesLock.Lock()
-	defer sm.nodesLock.Unlock()
 
 	toStart := make(map[string]dbSubNode)
 	for name, state := range sm.nodes {
@@ -142,12 +141,26 @@ func (sm *SubNodeMonitor) syncNodes() {
 		}
 	}
 
-	for _, node := range toStart {
-		sm.startNode(node)
+	tasks := make([]subNodeStartupTask, 0, len(toStart))
+	for name, node := range toStart {
+		tasks = append(tasks, sm.registerSubNodeState(name, node))
 	}
+
+	sm.nodesLock.Unlock()
+
+	sm.launchSubNodes(tasks)
 }
 
-func (sm *SubNodeMonitor) startNode(dbNode dbSubNode) {
+// subNodeStartupConcurrency bounds how many subscription nodes we mark "connecting" in
+// Postgres (and hand off to a monitor goroutine) at the same time during a sync.
+const subNodeStartupConcurrency = 10
+
+type subNodeStartupTask struct {
+	name  string
+	state *subNodeState
+}
+
+func (sm *SubNodeMonitor) registerSubNodeState(name string, dbNode dbSubNode) subNodeStartupTask {
 	ctx, cancel := context.WithCancel(sm.globalCtx)
 	state := &subNodeState{
 		nodeUUID:          dbNode.UUID,
@@ -162,19 +175,53 @@ func (sm *SubNodeMonitor) startNode(dbNode dbSubNode) {
 		cancel:            cancel,
 	}
 
-	sm.nodes[dbNode.Name] = state
-	sm.updateConnectionStatus(dbNode.Name, false, true, "Connecting...")
-	go sm.monitorNode(state)
+	sm.nodes[name] = state
 
-	sm.cfg.Logger.Debug(
-		"Started monitoring subscription node",
-		"node", dbNode.Name,
-		"address", dbNode.Address,
-		"port", dbNode.Port,
-		"schema", dbNode.APISchema,
-		"path", dbNode.APIPath,
-		"subpage_config_uuid", dbNode.SubpageConfigUUID,
-	)
+	return subNodeStartupTask{name: name, state: state}
+}
+
+func (sm *SubNodeMonitor) launchSubNodes(tasks []subNodeStartupTask) {
+	if len(tasks) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, subNodeStartupConcurrency)
+
+	for _, task := range tasks {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(task subNodeStartupTask) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if task.state == nil || (task.state.ctx != nil && task.state.ctx.Err() != nil) {
+				return
+			}
+
+			// Mark as connecting in DB
+			sm.updateConnectionStatus(task.name, false, true, "Connecting...")
+
+			if task.state.ctx != nil && task.state.ctx.Err() != nil {
+				return
+			}
+
+			go sm.monitorNode(task.state)
+
+			sm.cfg.Logger.Debug(
+				"Started monitoring subscription node",
+				"node", task.name,
+				"address", task.state.address,
+				"port", task.state.port,
+				"schema", task.state.apiSchema,
+				"path", task.state.apiPath,
+				"subpage_config_uuid", task.state.subpageConfigUUID,
+			)
+		}(task)
+	}
+
+	wg.Wait()
 }
 
 func (sm *SubNodeMonitor) stopAll() {
@@ -252,7 +299,8 @@ func (sm *SubNodeMonitor) RequestDeploy(nodeUUIDs ...string) {
 	case sm.deployNow <- normalized:
 	default:
 		select {
-		case <-sm.deployNow:
+		case prev := <-sm.deployNow:
+			normalized = mergeSubNodeTargets(prev, normalized)
 		default:
 		}
 		sm.deployNow <- normalized
@@ -268,7 +316,8 @@ func (sm *SubNodeMonitor) RequestSRSDeploy(nodeUUIDs ...string) {
 	case sm.srsSyncNow <- normalized:
 	default:
 		select {
-		case <-sm.srsSyncNow:
+		case prev := <-sm.srsSyncNow:
+			normalized = mergeSubNodeTargets(prev, normalized)
 		default:
 		}
 		sm.srsSyncNow <- normalized
@@ -298,11 +347,35 @@ func (sm *SubNodeMonitor) RequestSubpageConfigPush(uuid string, config []byte, n
 	case sm.subpagePushNow <- command:
 	default:
 		select {
-		case <-sm.subpagePushNow:
+		case prev := <-sm.subpagePushNow:
+			if prev.uuid == command.uuid {
+				command.targetUUIDs = mergeSubNodeTargets(prev.targetUUIDs, command.targetUUIDs)
+			}
 		default:
 		}
 		sm.subpagePushNow <- command
 	}
+}
+
+func mergeSubNodeTargets(a, b []string) []string {
+	if len(a) == 0 || len(b) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	result := make([]string, 0, len(a)+len(b))
+	for _, id := range a {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			result = append(result, id)
+		}
+	}
+	for _, id := range b {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			result = append(result, id)
+		}
+	}
+	return result
 }
 
 func normalizeSubNodeUUIDTargets(raw []string) []string {

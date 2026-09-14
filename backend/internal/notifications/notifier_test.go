@@ -275,3 +275,62 @@ func TestFormatServiceMessageApiToken(t *testing.T) {
 	}
 }
 
+func TestNotificationDedupeID(t *testing.T) {
+	// CRM Event
+	crmEvent := Event{
+		Scope: ScopeCRM,
+		Event: "crm.billing_reminder",
+		Data: map[string]any{
+			"providerName": "Hetzner",
+			"nodeName":     "Node-1",
+			"nextBillingAt": "2026-10-01",
+		},
+	}
+	if id := notificationDedupeID(crmEvent); id != "crm:crm.billing_reminder:Hetzner:Node-1:2026-10-01" {
+		t.Fatalf("unexpected CRM dedupe ID: %q", id)
+	}
+
+	// User Expiration Event
+	userExpEvent := Event{
+		Scope: ScopeUser,
+		Event: EventUserExpiration,
+		Data: map[string]any{
+			"username": "alice",
+			"expireAt": "2026-10-01T00:00:00Z",
+		},
+		Meta: map[string]any{
+			"expiration": 24,
+		},
+	}
+	if id := notificationDedupeID(userExpEvent); id != "user:expiration:alice:24:2026-10-01T00:00:00Z" {
+		t.Fatalf("unexpected User Expiration dedupe ID: %q", id)
+	}
+
+	// User Threshold Event
+	userThresholdEvent := Event{
+		Scope: ScopeUser,
+		Event: EventUserBandwidthThreshold,
+		Data: map[string]any{
+			"username": "bob",
+		},
+		Meta: map[string]any{
+			"threshold": 80,
+		},
+	}
+	if id := notificationDedupeID(userThresholdEvent); id != "user:threshold:bob:80" {
+		t.Fatalf("unexpected User Threshold dedupe ID: %q", id)
+	}
+
+	// User Limited Event
+	userLimitedEvent := Event{
+		Scope: ScopeUser,
+		Event: EventUserLimited,
+		Data: map[string]any{
+			"username": "charlie",
+		},
+	}
+	if id := notificationDedupeID(userLimitedEvent); id != "user:limited:charlie" {
+		t.Fatalf("unexpected User Limited dedupe ID: %q", id)
+	}
+}
+

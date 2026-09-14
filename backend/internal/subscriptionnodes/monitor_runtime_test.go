@@ -141,3 +141,21 @@ func TestWatchStreamHeartbeatIgnoresOldGeneration(t *testing.T) {
 	default:
 	}
 }
+
+func TestMergeSubNodeTargets(t *testing.T) {
+	// Discrete sets merged
+	a := []string{"uuid-1", "uuid-2"}
+	b := []string{"uuid-2", "uuid-3"}
+	merged := mergeSubNodeTargets(a, b)
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 unique targets, got %d", len(merged))
+	}
+
+	// Either empty/nil => all nodes (nil)
+	if res := mergeSubNodeTargets(nil, b); res != nil {
+		t.Fatalf("expected nil when a is nil, got %v", res)
+	}
+	if res := mergeSubNodeTargets(a, nil); res != nil {
+		t.Fatalf("expected nil when b is nil, got %v", res)
+	}
+}

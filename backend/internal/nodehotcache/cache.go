@@ -48,6 +48,7 @@ type HotCache struct {
 
 type Cache struct {
 	client *redis.Client
+	cfg    *config.BackendConfig
 }
 
 var defaultCache struct {
@@ -66,13 +67,27 @@ func Default(cfg *config.BackendConfig) *Cache {
 	if cfg == nil {
 		return nil
 	}
-	defaultCache.ready = true
 
 	client, err := jobqueue.NewRedisClient(cfg)
 	if err != nil || client == nil {
+		// Logged, not just swallowed: node system stats (rx/tx speed,
+		// uptime, users online, versions) live only in Redis, so if this
+		// fails, the dashboard will silently show empty stats for every
+		// node for the rest of this process's lifetime — worth knowing
+		// about immediately rather than discovering it by staring at a
+		// blank "Download speed" widget.
+		//
+		// Crucially, ready is intentionally NOT marked true here, allowing
+		// subsequent calls to retry connecting if Redis is temporarily
+		// unavailable during early process initialization.
+		if cfg.Logger != nil {
+			cfg.Logger.Warn("Node hot cache disabled: failed to connect to Redis", "error", err)
+		}
 		return nil
 	}
-	defaultCache.cache = &Cache{client: client}
+
+	defaultCache.ready = true
+	defaultCache.cache = &Cache{client: client, cfg: cfg}
 	return defaultCache.cache
 }
 
@@ -113,6 +128,15 @@ func (c *Cache) GetMany(ctx context.Context, uuids []string) (map[string]HotCach
 
 	values, err := c.client.MGet(ctx, keys...).Result()
 	if err != nil && err != redis.Nil {
+		// Every caller of GetMany discards its error return (they can't do
+		// much about a cache miss except show empty stats), so this is the
+		// only place a Redis outage would ever be visible. Log it here
+		// rather than failing silently — otherwise "the dashboard shows no
+		// speed/uptime for any node" looks identical to "Redis is fine, the
+		// nodes just aren't reporting anything."
+		if c.cfg != nil && c.cfg.Logger != nil {
+			c.cfg.Logger.Warn("Node hot cache MGet failed, returning empty stats", "error", err, "nodes", len(uuids))
+		}
 		return result, nil
 	}
 
@@ -197,54 +221,75 @@ func (c *Cache) SetVersions(ctx context.Context, uuid, singbox, node string) err
 	if err != nil {
 		return err
 	}
-	return c.client.Set(ctx, key(versionsPrefix, uuid), payload, versionsTTL).Err()
+	redisKey := key(versionsPrefix, uuid)
+	err = c.client.Set(ctx, redisKey, payload, versionsTTL).Err()
+	c.logWriteError("SetVersions", redisKey, err)
+	return err
 }
 
 func (c *Cache) SetUptime(ctx context.Context, uuid string, seconds int64) error {
 	if c == nil || c.client == nil || strings.TrimSpace(uuid) == "" {
 		return nil
 	}
-	return c.client.Set(ctx, key(singboxUptimePrefix, uuid), strconv.FormatInt(seconds, 10), singboxUptimeTTL).Err()
+	redisKey := key(singboxUptimePrefix, uuid)
+	err := c.client.Set(ctx, redisKey, strconv.FormatInt(seconds, 10), singboxUptimeTTL).Err()
+	c.logWriteError("SetUptime", redisKey, err)
+	return err
 }
 
 func (c *Cache) SetUsersOnline(ctx context.Context, uuid string, count int) error {
 	if c == nil || c.client == nil || strings.TrimSpace(uuid) == "" {
 		return nil
 	}
-	return c.client.Set(ctx, key(usersOnlinePrefix, uuid), strconv.Itoa(count), usersOnlineTTL).Err()
+	redisKey := key(usersOnlinePrefix, uuid)
+	err := c.client.Set(ctx, redisKey, strconv.Itoa(count), usersOnlineTTL).Err()
+	c.logWriteError("SetUsersOnline", redisKey, err)
+	return err
 }
 
 func (c *Cache) Delete(ctx context.Context, uuid string) error {
 	if c == nil || c.client == nil || strings.TrimSpace(uuid) == "" {
 		return nil
 	}
-	return c.client.Del(ctx,
+	err := c.client.Del(ctx,
 		key(systemInfoPrefix, uuid),
 		key(systemStatsPrefix, uuid),
 		key(usersOnlinePrefix, uuid),
 		key(versionsPrefix, uuid),
 		key(singboxUptimePrefix, uuid),
 	).Err()
+	c.logWriteError("Delete", uuid, err)
+	return err
 }
 
 func (c *Cache) DeleteTransient(ctx context.Context, uuid string) error {
 	if c == nil || c.client == nil || strings.TrimSpace(uuid) == "" {
 		return nil
 	}
-	return c.client.Del(ctx,
+	err := c.client.Del(ctx,
 		key(systemInfoPrefix, uuid),
 		key(systemStatsPrefix, uuid),
 		key(usersOnlinePrefix, uuid),
 		key(versionsPrefix, uuid),
 		key(singboxUptimePrefix, uuid),
 	).Err()
+	c.logWriteError("DeleteTransient", uuid, err)
+	return err
 }
 
 func (c *Cache) setJSON(ctx context.Context, redisKey string, payload json.RawMessage, ttl time.Duration) error {
 	if c == nil || c.client == nil || strings.TrimSpace(redisKey) == "" || len(payload) == 0 {
 		return nil
 	}
-	return c.client.Set(ctx, redisKey, []byte(payload), ttl).Err()
+	err := c.client.Set(ctx, redisKey, []byte(payload), ttl).Err()
+	c.logWriteError("setJSON", redisKey, err)
+	return err
+}
+
+func (c *Cache) logWriteError(op, redisKey string, err error) {
+	if err != nil && c != nil && c.cfg != nil && c.cfg.Logger != nil {
+		c.cfg.Logger.Warn("Node hot cache write failed", "op", op, "key", redisKey, "error", err)
+	}
 }
 
 func key(prefix, uuid string) string {

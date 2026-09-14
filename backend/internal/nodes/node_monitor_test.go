@@ -123,3 +123,26 @@ func TestWatchStreamHeartbeat(t *testing.T) {
 	}
 }
 
+func TestMergeDeployRequests(t *testing.T) {
+	// Case 1: Both have discrete targets
+	reqA := deployRequest{Restart: true, ForceRestart: false, NodeUUIDs: []string{"node-1", "node-2"}}
+	reqB := deployRequest{Restart: false, ForceRestart: true, NodeUUIDs: []string{"node-2", "node-3"}}
+	merged := mergeDeployRequests(reqA, reqB)
+	if !merged.Restart || !merged.ForceRestart {
+		t.Fatalf("expected Restart and ForceRestart to be true, got restart=%v force=%v", merged.Restart, merged.ForceRestart)
+	}
+	if len(merged.NodeUUIDs) != 3 {
+		t.Fatalf("expected 3 unique targets, got %d", len(merged.NodeUUIDs))
+	}
+
+	// Case 2: One targets all nodes (nil)
+	reqAll := deployRequest{Restart: false, NodeUUIDs: nil}
+	mergedAll := mergeDeployRequests(reqA, reqAll)
+	if mergedAll.NodeUUIDs != nil {
+		t.Fatalf("expected nil (all nodes), got %v", mergedAll.NodeUUIDs)
+	}
+	if !mergedAll.Restart {
+		t.Fatalf("expected Restart=true")
+	}
+}
+

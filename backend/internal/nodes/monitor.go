@@ -207,7 +207,6 @@ func (nm *NodeMonitor) syncNodes() {
 	nm.cfg.Logger.Debug("Node monitor sync complete", "nodes", len(desired))
 
 	nm.nodesLock.Lock()
-	defer nm.nodesLock.Unlock()
 
 	toStart := make(map[string]db.DBNode)
 
@@ -254,9 +253,20 @@ func (nm *NodeMonitor) syncNodes() {
 		}
 	}
 
-	for _, dbNode := range toStart {
-		nm.startNode(dbNode)
+	// Register in-memory state for every node we're about to (re)start while
+	// still holding the write lock — this part is pure map manipulation, no
+	// I/O, so it's cheap even for a large batch. The slow part (marking the
+	// node as connecting in Postgres, one row at a time) is deferred to
+	// launchNodes, which runs after the lock is released — see its comment
+	// for why.
+	tasks := make([]nodeStartupTask, 0, len(toStart))
+	for name, dbNode := range toStart {
+		tasks = append(tasks, nm.registerNodeState(name, dbNode))
 	}
+
+	nm.nodesLock.Unlock()
+
+	nm.launchNodes(tasks)
 }
 
 // loadActiveNodes loads enabled nodes from database.
@@ -277,8 +287,29 @@ func (nm *NodeMonitor) loadActiveNodes() ([]db.DBNode, error) {
 	return nodes, nil
 }
 
-// startNode starts monitoring a single node.
-func (nm *NodeMonitor) startNode(dbNode db.DBNode) {
+// nodeStartupConcurrency bounds how many nodes we mark "connecting" in
+// Postgres (and hand off to a monitor goroutine) at the same time during a
+// single sync. Without this, a large batch — e.g. the very first sync after
+// startup with hundreds/thousands of nodes already in the DB — would fire
+// that many sequential blocking SQL round-trips back to back. Mirrors the
+// bounded-concurrency pattern used for the equivalent work on the upstream
+// worker side (concurrency 40 for node health checks, 20 for starting all
+// nodes in a config profile).
+const nodeStartupConcurrency = 32
+
+// nodeStartupTask carries a node whose in-memory state has already been
+// registered (see registerNodeState) and just needs its DB status write and
+// monitor goroutine.
+type nodeStartupTask struct {
+	name  string
+	state *nodeState
+}
+
+// registerNodeState creates a node's in-memory state and adds it to
+// nm.nodes. The caller must hold nm.nodesLock for writing; this only touches
+// the in-memory map, no I/O, so it's safe to do for an entire batch without
+// releasing the lock in between.
+func (nm *NodeMonitor) registerNodeState(name string, dbNode db.DBNode) nodeStartupTask {
 	ctx, cancel := context.WithCancel(nm.globalCtx)
 
 	state := &nodeState{
@@ -294,14 +325,60 @@ func (nm *NodeMonitor) startNode(dbNode db.DBNode) {
 		cancel:        cancel,
 	}
 
-	nm.nodes[dbNode.Name] = state
+	nm.nodes[name] = state
 
-	// Mark as connecting in DB
-	nm.updateConnectionStatus(dbNode.Name, false, true, "")
+	return nodeStartupTask{name: name, state: state}
+}
 
-	go nm.monitorNode(state)
+// launchNodes marks each task's node as connecting in the DB and starts its
+// monitor goroutine. It must be called without nm.nodesLock held: it does
+// one blocking SQL round-trip per node (updateConnectionStatus), and this
+// bounds that work to nodeStartupConcurrency at a time instead of the
+// caller's previous behavior of doing it once per node, one at a time,
+// while still holding the process-wide node registry lock — which meant a
+// large sync blocked every other reader of nm.nodes (deploy, geocheck,
+// IsNodeConnected, ...) for as long as the whole batch took.
+func (nm *NodeMonitor) launchNodes(tasks []nodeStartupTask) {
+	if len(tasks) == 0 {
+		return
+	}
 
-	nm.cfg.Logger.Debug("Started monitoring node", "node", dbNode.Name, "address", dbNode.Address, "port", dbNode.Port, "schema", dbNode.APISchema, "path", dbNode.APIPath)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, nodeStartupConcurrency)
+
+	for _, task := range tasks {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(task nodeStartupTask) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if task.state == nil || (task.state.ctx != nil && task.state.ctx.Err() != nil) {
+				return
+			}
+
+			// Mark as connecting in DB
+			nm.updateConnectionStatus(task.name, false, true, "")
+
+			if task.state.ctx != nil && task.state.ctx.Err() != nil {
+				return
+			}
+
+			go nm.monitorNode(task.state)
+
+			nm.cfg.Logger.Debug(
+				"Started monitoring node",
+				"node", task.name,
+				"address", task.state.address,
+				"port", task.state.port,
+				"schema", task.state.apiSchema,
+				"path", task.state.apiPath,
+			)
+		}(task)
+	}
+
+	wg.Wait()
 }
 
 func (nm *NodeMonitor) Stop() {
@@ -466,16 +543,44 @@ func (nm *NodeMonitor) RequestDeployWithForce(restart bool, forceRestart bool, n
 			nm.cfg.Logger.Debug("Node deploy queue accepted request", "restart", restart, "force_restart", forceRestart, "node_targets", len(normalizedTargets))
 		}
 	default:
-		// Drain and replace pending
+		// Drain and merge pending request to prevent lost deploy targets
 		select {
-		case <-nm.deployNow:
+		case prev := <-nm.deployNow:
+			req = mergeDeployRequests(prev, req)
 		default:
 		}
 		nm.deployNow <- req
 		if nm.cfg != nil && nm.cfg.Logger != nil {
-			nm.cfg.Logger.Debug("Node deploy queue replaced previous pending request", "restart", restart, "force_restart", forceRestart, "node_targets", len(normalizedTargets))
+			nm.cfg.Logger.Debug("Node deploy queue merged pending request", "restart", req.Restart, "force_restart", req.ForceRestart, "node_targets", len(req.NodeUUIDs))
 		}
 	}
+}
+
+func mergeDeployRequests(a, b deployRequest) deployRequest {
+	merged := deployRequest{
+		Restart:      a.Restart || b.Restart,
+		ForceRestart: a.ForceRestart || b.ForceRestart,
+	}
+	if len(a.NodeUUIDs) == 0 || len(b.NodeUUIDs) == 0 {
+		merged.NodeUUIDs = nil
+		return merged
+	}
+	seen := make(map[string]struct{}, len(a.NodeUUIDs)+len(b.NodeUUIDs))
+	mergedTargets := make([]string, 0, len(a.NodeUUIDs)+len(b.NodeUUIDs))
+	for _, id := range a.NodeUUIDs {
+		if _, exists := seen[id]; !exists {
+			seen[id] = struct{}{}
+			mergedTargets = append(mergedTargets, id)
+		}
+	}
+	for _, id := range b.NodeUUIDs {
+		if _, exists := seen[id]; !exists {
+			seen[id] = struct{}{}
+			mergedTargets = append(mergedTargets, id)
+		}
+	}
+	merged.NodeUUIDs = mergedTargets
+	return merged
 }
 
 func normalizeNodeUUIDTargets(raw []string) []string {

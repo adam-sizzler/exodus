@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"exodus/internal/logger"
@@ -12,6 +13,11 @@ import (
 
 	"google.golang.org/grpc/codes"
 )
+
+// nodeDeployConcurrency bounds how many nodes we deploy configurations to
+// concurrently. Mirrors the bounded-concurrency pattern (concurrency 20)
+// used for starting all nodes in a profile.
+const nodeDeployConcurrency = 20
 
 func (nm *NodeMonitor) deployToConnectedNodes(restart bool, forceRestart bool, requestedNodeUUIDs []string) {
 	if nm == nil {
@@ -80,123 +86,151 @@ func (nm *NodeMonitor) deployToConnectedNodes(restart bool, forceRestart bool, r
 	snippets := nm.loadConfigSnippets(nm.globalCtx)
 
 	batchStart := time.Now()
-	var lastProfileUUID string
+	var (
+		wg              sync.WaitGroup
+		profileMu       sync.Mutex
+		lastProfileUUID string
+	)
+	sem := make(chan struct{}, nodeDeployConcurrency)
 
 	for _, target := range targets {
-		start := time.Now()
-		configJSON, internals, profileUUID, inboundsCount, err := nm.buildNodeConfigForDeploy(nm.globalCtx, target.uuid, snippets)
-		if err != nil {
-			nm.cfg.Logger.Warn("Failed to build node deploy config", "node", target.name, "node_uuid", target.uuid, "error", err)
-			continue
-		}
-		if profileUUID != "" {
-			lastProfileUUID = profileUUID
-		}
+		wg.Add(1)
+		sem <- struct{}{}
 
-		nm.cfg.Logger.RoleService(logger.RoleWorkers, "StartAllNodesByProfileQueueProcessor").Info(fmt.Sprintf("Node %s has %d active inbounds.", target.uuid, inboundsCount))
+		go func(target deployTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		genDuration := time.Since(start).Milliseconds()
-		nm.cfg.Logger.RoleService(logger.RoleWorkers, "StartAllNodesByProfileQueueProcessor").Info(fmt.Sprintf("Generated config for nodes by Profile in %dms", genDuration))
-
-		pluginConfig, modulesErr := nm.loadNodePluginRuntimeConfig(nm.globalCtx, target.uuid)
-		if modulesErr != nil {
-			nm.cfg.Logger.Warn("Failed to load node plugin settings for deploy payload", "node", target.name, "node_uuid", target.uuid, "error", modulesErr)
-		}
-		haproxyInboundTags := normalizeHaproxyInboundTags(pluginConfig.HaproxyAuth.InboundTags)
-
-		ingressIPs, ingressASNs := resolvePluginFilters(pluginConfig.IngressFilter.BlockedIPs, pluginConfig.IngressFilter.BlockedASNs, sharedLists)
-		egressIPs, egressASNs := resolvePluginFilters(pluginConfig.EgressFilter.BlockedIPs, pluginConfig.EgressFilter.BlockedASNs, sharedLists)
-
-		modules := &deployModulesTaskBlock{
-			IngressFilter: deployIngressFilterBlock{
-				Enabled:     pluginConfig.IngressFilter.Enabled,
-				BlockedIPs:  ingressIPs,
-				BlockedASNs: ingressASNs,
-			},
-			EgressFilter: deployEgressFilterBlock{
-				Enabled:      pluginConfig.EgressFilter.Enabled,
-				BlockedIPs:   egressIPs,
-				BlockedPorts: normalizePortSlice(pluginConfig.EgressFilter.BlockedPorts),
-				BlockedASNs:  egressASNs,
-			},
-		}
-		if pluginConfig.PreStart.Enabled {
-			modules.PreStart.Enabled = true
-			if pluginConfig.PreStart.CleanupSockets.Enabled && len(pluginConfig.PreStart.CleanupSockets.Files) > 0 {
-				modules.PreStart.CleanupSockets = &deployCleanupSocketsBlock{
-					Enabled: true,
-					Files:   normalizeStringSlice(pluginConfig.PreStart.CleanupSockets.Files),
-				}
+			profileUUID := nm.deployNodeTarget(target, sharedLists, snippets, restart, forceRestart)
+			if profileUUID != "" {
+				profileMu.Lock()
+				lastProfileUUID = profileUUID
+				profileMu.Unlock()
 			}
-		}
-		if pluginConfig.HaproxyAuth.Enabled {
-			haproxyUsers, haproxyEnabled, usersErr := nm.loadNodeHaproxyUsers(nm.globalCtx, target.uuid, haproxyInboundTags)
-			if usersErr != nil {
-				nm.cfg.Logger.Warn("Failed to load node users for HAPROXY payload", "node", target.name, "node_uuid", target.uuid, "error", usersErr)
-			} else {
-				modules.HaproxyEnabled = haproxyEnabled
-				modules.HaproxyUsers = haproxyUsers
-			}
-		}
-
-		restartFlag := restart
-		forceRestartFlag := forceRestart
-		taskPayload, err := json.Marshal(deployTaskPayload{
-			Config:       configJSON,
-			Restart:      &restartFlag,
-			ForceRestart: &forceRestartFlag,
-			Modules:      modules,
-			Internals:    internals,
-		})
-		if err != nil {
-			nm.cfg.Logger.Warn("Failed to serialize deploy payload", "node", target.name, "error", err)
-			continue
-		}
-
-		ctxBase := nm.globalCtx
-		if ctxBase == nil {
-			ctxBase = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(ctxBase, 60*time.Second)
-		nm.cfg.Logger.Debug("Submitting deploy task", "node", target.name, "payload_bytes", len(taskPayload), "restart", restart, "force_restart", forceRestart)
-		resp, err := target.client.SubmitTask(ctx, &proto.NodeTask{
-			TaskId:    fmt.Sprintf("deploy-%d", time.Now().UnixNano()),
-			Operation: "deploy_config",
-			Payload:   taskPayload,
-		})
-		cancel()
-
-		if err != nil {
-			nm.cfg.Logger.Warn("Deploy task failed", "node", target.name, "error", err)
-			nm.updateConnectionStatus(target.name, false, false, fmt.Sprintf("Deploy transport error: %v", err))
-			continue
-		}
-		if resp == nil || resp.Code != int32(codes.OK) {
-			if resp == nil {
-				nm.cfg.Logger.Warn("Deploy task returned nil status", "node", target.name)
-				nm.updateConnectionStatus(target.name, false, false, "Deploy task returned nil status")
-			} else {
-				nm.cfg.Logger.Warn("Deploy task rejected", "node", target.name, "code", resp.Code, "message", resp.Message)
-				nm.updateConnectionStatus(target.name, false, false, firstNonEmptyString(resp.Message, "Deploy task rejected"))
-			}
-			continue
-		}
-
-		if hasCoreReady, coreReady, coreMessage := parseDeployCoreState(resp.Message); hasCoreReady {
-			if coreReady {
-				nm.updateConnectionStatus(target.name, true, false, "")
-			} else {
-				nm.updateConnectionStatus(target.name, false, false, coreMessage)
-			}
-		} else {
-			nm.updateConnectionStatus(target.name, false, true, "")
-		}
-
-		nm.cfg.Logger.Debug("Node config deployed", "node", target.name, "restart", restart, "force_restart", forceRestart, "message", resp.Message)
+		}(target)
 	}
+
+	wg.Wait()
 
 	if lastProfileUUID != "" {
 		batchDuration := time.Since(batchStart).Milliseconds()
 		nm.cfg.Logger.RoleService(logger.RoleWorkers, "StartAllNodesByProfileQueueProcessor").Info(fmt.Sprintf("Started all nodes with profile %s in %dms", lastProfileUUID, batchDuration))
 	}
+}
+
+func (nm *NodeMonitor) deployNodeTarget(
+	target deployTarget,
+	sharedLists resolvedSharedLists,
+	snippets *resolvedConfigSnippets,
+	restart bool,
+	forceRestart bool,
+) string {
+	start := time.Now()
+	configJSON, internals, profileUUID, inboundsCount, err := nm.buildNodeConfigForDeploy(nm.globalCtx, target.uuid, snippets)
+	if err != nil {
+		nm.cfg.Logger.Warn("Failed to build node deploy config", "node", target.name, "node_uuid", target.uuid, "error", err)
+		return ""
+	}
+
+	nm.cfg.Logger.RoleService(logger.RoleWorkers, "StartAllNodesByProfileQueueProcessor").Info(fmt.Sprintf("Node %s has %d active inbounds.", target.uuid, inboundsCount))
+
+	genDuration := time.Since(start).Milliseconds()
+	nm.cfg.Logger.RoleService(logger.RoleWorkers, "StartAllNodesByProfileQueueProcessor").Info(fmt.Sprintf("Generated config for nodes by Profile in %dms", genDuration))
+
+	pluginConfig, modulesErr := nm.loadNodePluginRuntimeConfig(nm.globalCtx, target.uuid)
+	if modulesErr != nil {
+		nm.cfg.Logger.Warn("Failed to load node plugin settings for deploy payload", "node", target.name, "node_uuid", target.uuid, "error", modulesErr)
+	}
+	haproxyInboundTags := normalizeHaproxyInboundTags(pluginConfig.HaproxyAuth.InboundTags)
+
+	ingressIPs, ingressASNs := resolvePluginFilters(pluginConfig.IngressFilter.BlockedIPs, pluginConfig.IngressFilter.BlockedASNs, sharedLists)
+	egressIPs, egressASNs := resolvePluginFilters(pluginConfig.EgressFilter.BlockedIPs, pluginConfig.EgressFilter.BlockedASNs, sharedLists)
+
+	modules := &deployModulesTaskBlock{
+		IngressFilter: deployIngressFilterBlock{
+			Enabled:     pluginConfig.IngressFilter.Enabled,
+			BlockedIPs:  ingressIPs,
+			BlockedASNs: ingressASNs,
+		},
+		EgressFilter: deployEgressFilterBlock{
+			Enabled:      pluginConfig.EgressFilter.Enabled,
+			BlockedIPs:   egressIPs,
+			BlockedPorts: normalizePortSlice(pluginConfig.EgressFilter.BlockedPorts),
+			BlockedASNs:  egressASNs,
+		},
+	}
+	if pluginConfig.PreStart.Enabled {
+		modules.PreStart.Enabled = true
+		if pluginConfig.PreStart.CleanupSockets.Enabled && len(pluginConfig.PreStart.CleanupSockets.Files) > 0 {
+			modules.PreStart.CleanupSockets = &deployCleanupSocketsBlock{
+				Enabled: true,
+				Files:   normalizeStringSlice(pluginConfig.PreStart.CleanupSockets.Files),
+			}
+		}
+	}
+	if pluginConfig.HaproxyAuth.Enabled {
+		haproxyUsers, haproxyEnabled, usersErr := nm.loadNodeHaproxyUsers(nm.globalCtx, target.uuid, haproxyInboundTags)
+		if usersErr != nil {
+			nm.cfg.Logger.Warn("Failed to load node users for HAPROXY payload", "node", target.name, "node_uuid", target.uuid, "error", usersErr)
+		} else {
+			modules.HaproxyEnabled = haproxyEnabled
+			modules.HaproxyUsers = haproxyUsers
+		}
+	}
+
+	restartFlag := restart
+	forceRestartFlag := forceRestart
+	taskPayload, err := json.Marshal(deployTaskPayload{
+		Config:       configJSON,
+		Restart:      &restartFlag,
+		ForceRestart: &forceRestartFlag,
+		Modules:      modules,
+		Internals:    internals,
+	})
+	if err != nil {
+		nm.cfg.Logger.Warn("Failed to serialize deploy payload", "node", target.name, "error", err)
+		return profileUUID
+	}
+
+	ctxBase := nm.globalCtx
+	if ctxBase == nil {
+		ctxBase = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctxBase, 60*time.Second)
+	nm.cfg.Logger.Debug("Submitting deploy task", "node", target.name, "payload_bytes", len(taskPayload), "restart", restart, "force_restart", forceRestart)
+	resp, err := target.client.SubmitTask(ctx, &proto.NodeTask{
+		TaskId:    fmt.Sprintf("deploy-%d", time.Now().UnixNano()),
+		Operation: "deploy_config",
+		Payload:   taskPayload,
+	})
+	cancel()
+
+	if err != nil {
+		nm.cfg.Logger.Warn("Deploy task failed", "node", target.name, "error", err)
+		nm.updateConnectionStatus(target.name, false, false, fmt.Sprintf("Deploy transport error: %v", err))
+		return profileUUID
+	}
+	if resp == nil || resp.Code != int32(codes.OK) {
+		if resp == nil {
+			nm.cfg.Logger.Warn("Deploy task returned nil status", "node", target.name)
+			nm.updateConnectionStatus(target.name, false, false, "Deploy task returned nil status")
+		} else {
+			nm.cfg.Logger.Warn("Deploy task rejected", "node", target.name, "code", resp.Code, "message", resp.Message)
+			nm.updateConnectionStatus(target.name, false, false, firstNonEmptyString(resp.Message, "Deploy task rejected"))
+		}
+		return profileUUID
+	}
+
+	if hasCoreReady, coreReady, coreMessage := parseDeployCoreState(resp.Message); hasCoreReady {
+		if coreReady {
+			nm.updateConnectionStatus(target.name, true, false, "")
+		} else {
+			nm.updateConnectionStatus(target.name, false, false, coreMessage)
+		}
+	} else {
+		nm.updateConnectionStatus(target.name, false, true, "")
+	}
+
+	nm.cfg.Logger.Debug("Node config deployed", "node", target.name, "restart", restart, "force_restart", forceRestart, "message", resp.Message)
+	return profileUUID
 }

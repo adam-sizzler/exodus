@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	subscriptionapi "exodus/internal/httpapi/subscription"
@@ -467,7 +469,12 @@ func (sm *SubNodeMonitor) syncSRSListsToConnectedNodes(requestedNodeUUIDs []stri
 
 	matchedTargets := 0
 	readyTargets := 0
-	sentTargets := 0
+
+	type srsTarget struct {
+		name   string
+		client proto.NodeServiceClient
+	}
+	var targets []srsTarget
 
 	for _, state := range states {
 		state.mutex.RLock()
@@ -486,45 +493,64 @@ func (sm *SubNodeMonitor) syncSRSListsToConnectedNodes(requestedNodeUUIDs []stri
 			continue
 		}
 		readyTargets++
-
-		ctxBase := sm.globalCtx
-		if ctxBase == nil {
-			ctxBase = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(ctxBase, 30*time.Second)
-		resp, submitErr := client.SubmitTask(ctx, &proto.NodeTask{
-			TaskId:    fmt.Sprintf("sync-srs-%d", time.Now().UnixNano()),
-			Operation: "sync_srs_lists",
-			Payload:   payload,
-		})
-		cancel()
-
-		if submitErr != nil {
-			sm.cfg.Logger.Warn("SRS sync task failed on subscription node", "node", nodeName, "error", submitErr)
-			continue
-		}
-		if resp == nil || resp.Code != int32(codes.OK) {
-			if resp == nil {
-				sm.cfg.Logger.Warn("SRS sync returned nil status from subscription node", "node", nodeName)
-			} else {
-				sm.cfg.Logger.Warn("SRS sync rejected by subscription node", "node", nodeName, "code", resp.Code, "message", resp.Message)
-			}
-			continue
-		}
-
-		sentTargets++
-		sm.cfg.Logger.Info("SRS lists synced to subscription node", "node", nodeName, "lists", len(srsLists), "message", resp.Message)
+		targets = append(targets, srsTarget{name: nodeName, client: client})
 	}
+
+	var sentTargets int64
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, subNodeDeployConcurrency)
+
+	for _, target := range targets {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(t srsTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			ctxBase := sm.globalCtx
+			if ctxBase == nil {
+				ctxBase = context.Background()
+			}
+			ctx, cancel := context.WithTimeout(ctxBase, 30*time.Second)
+			resp, submitErr := t.client.SubmitTask(ctx, &proto.NodeTask{
+				TaskId:    fmt.Sprintf("sync-srs-%d", time.Now().UnixNano()),
+				Operation: "sync_srs_lists",
+				Payload:   payload,
+			})
+			cancel()
+
+			if submitErr != nil {
+				sm.cfg.Logger.Warn("SRS sync task failed on subscription node", "node", t.name, "error", submitErr)
+				return
+			}
+			if resp == nil || resp.Code != int32(codes.OK) {
+				if resp == nil {
+					sm.cfg.Logger.Warn("SRS sync returned nil status from subscription node", "node", t.name)
+				} else {
+					sm.cfg.Logger.Warn("SRS sync rejected by subscription node", "node", t.name, "code", resp.Code, "message", resp.Message)
+				}
+				return
+			}
+
+			atomic.AddInt64(&sentTargets, 1)
+			sm.cfg.Logger.Info("SRS lists synced to subscription node", "node", t.name, "lists", len(srsLists), "message", resp.Message)
+		}(target)
+	}
+
+	wg.Wait()
 
 	sm.cfg.Logger.Debug(
 		"SRS subscription node sync processed",
 		"target_filter_count", len(targetFilter),
 		"matched_targets", matchedTargets,
 		"ready_targets", readyTargets,
-		"sent_targets", sentTargets,
+		"sent_targets", int(sentTargets),
 		"lists", len(srsLists),
 	)
 }
+
+const subNodeDeployConcurrency = 10
 
 func (sm *SubNodeMonitor) deployToConnectedNodes(requestedNodeUUIDs []string) {
 	targetFilter := make(map[string]struct{}, len(requestedNodeUUIDs))
@@ -545,10 +571,12 @@ func (sm *SubNodeMonitor) deployToConnectedNodes(requestedNodeUUIDs []string) {
 	}
 	sm.nodesLock.RUnlock()
 
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, subNodeDeployConcurrency)
+
 	for _, state := range states {
 		state.mutex.RLock()
 		nodeUUID := state.nodeUUID
-		nodeName := state.nodeName
 		ready := state.isConnected && state.stream != nil
 		state.mutex.RUnlock()
 		if !ready {
@@ -560,17 +588,31 @@ func (sm *SubNodeMonitor) deployToConnectedNodes(requestedNodeUUIDs []string) {
 			}
 		}
 
-		err := sm.sendNodeRequest(state, &proto.NodeDataRequest{
-			Request: &proto.NodeDataRequest_Config{Config: &proto.StreamConfig{IntervalSeconds: 15}},
-		})
-		if err != nil {
-			sm.cfg.Logger.Warn("Failed to push subscription config over stream", "node", nodeName, "error", err)
-			sm.handleDisconnect(state, fmt.Sprintf("Config push failed: %v", err))
-			continue
-		}
-		sm.pushAssignedSubpageConfig(state)
-		sm.cfg.Logger.Info("Subscription config push sent", "node", nodeName)
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(st *subNodeState) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			st.mutex.RLock()
+			nodeName := st.nodeName
+			st.mutex.RUnlock()
+
+			err := sm.sendNodeRequest(st, &proto.NodeDataRequest{
+				Request: &proto.NodeDataRequest_Config{Config: &proto.StreamConfig{IntervalSeconds: 15}},
+			})
+			if err != nil {
+				sm.cfg.Logger.Warn("Failed to push subscription config over stream", "node", nodeName, "error", err)
+				sm.handleDisconnect(st, fmt.Sprintf("Config push failed: %v", err))
+				return
+			}
+			sm.pushAssignedSubpageConfig(st)
+			sm.cfg.Logger.Info("Subscription config push sent", "node", nodeName)
+		}(state)
 	}
+
+	wg.Wait()
 }
 
 func (sm *SubNodeMonitor) pushAssignedSubpageConfig(state *subNodeState) {

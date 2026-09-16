@@ -27,6 +27,25 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fix compare URL in event payload
+        shell: bash
+        run: |
+          if [ -f "$GITHUB_EVENT_PATH" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            git fetch --tags --force 2>/dev/null || true
+            PREV_TAG=$(git describe --tags --abbrev=0 --exclude="*.n*" --exclude="*.s*" "${TAG}^" 2>/dev/null || true)
+            if [ -z "$PREV_TAG" ]; then
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' | grep -v "^${TAG}$" | head -n 1 || true)
+            fi
+            if [ -n "$PREV_TAG" ]; then
+              COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+              jq --arg url "$COMPARE_URL" '.compare = $url' "$GITHUB_EVENT_PATH" > "${GITHUB_EVENT_PATH}.tmp" && mv "${GITHUB_EVENT_PATH}.tmp" "$GITHUB_EVENT_PATH"
+              echo "Updated compare URL in event payload to: $COMPARE_URL"
+            fi
+          fi
 
       - name: Send Telegram message
         uses: proDreams/actions-telegram-notifier@main
@@ -254,6 +273,25 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fix compare URL in event payload
+        shell: bash
+        run: |
+          if [ -f "$GITHUB_EVENT_PATH" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            git fetch --tags --force 2>/dev/null || true
+            PREV_TAG=$(git describe --tags --abbrev=0 --exclude="*.n*" --exclude="*.s*" "${TAG}^" 2>/dev/null || true)
+            if [ -z "$PREV_TAG" ]; then
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' | grep -v "^${TAG}$" | head -n 1 || true)
+            fi
+            if [ -n "$PREV_TAG" ]; then
+              COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+              jq --arg url "$COMPARE_URL" '.compare = $url' "$GITHUB_EVENT_PATH" > "${GITHUB_EVENT_PATH}.tmp" && mv "${GITHUB_EVENT_PATH}.tmp" "$GITHUB_EVENT_PATH"
+              echo "Updated compare URL in event payload to: $COMPARE_URL"
+            fi
+          fi
 
       - name: Send Telegram message
         uses: proDreams/actions-telegram-notifier@main
@@ -273,6 +311,25 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fix compare URL in event payload
+        shell: bash
+        run: |
+          if [ -f "$GITHUB_EVENT_PATH" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            git fetch --tags --force 2>/dev/null || true
+            PREV_TAG=$(git describe --tags --abbrev=0 --exclude="*.n*" --exclude="*.s*" "${TAG}^" 2>/dev/null || true)
+            if [ -z "$PREV_TAG" ]; then
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' | grep -v "^${TAG}$" | head -n 1 || true)
+            fi
+            if [ -n "$PREV_TAG" ]; then
+              COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+              jq --arg url "$COMPARE_URL" '.compare = $url' "$GITHUB_EVENT_PATH" > "${GITHUB_EVENT_PATH}.tmp" && mv "${GITHUB_EVENT_PATH}.tmp" "$GITHUB_EVENT_PATH"
+              echo "Updated compare URL in event payload to: $COMPARE_URL"
+            fi
+          fi
 
       - name: Send error notification
         uses: proDreams/actions-telegram-notifier@main

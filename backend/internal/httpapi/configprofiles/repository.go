@@ -188,7 +188,7 @@ func (r *ConfigProfileRepository) getConfigProfileNodesMap(ctx context.Context, 
 
 func (r *ConfigProfileRepository) createConfigProfile(ctx context.Context, profileUUID string, req createConfigProfileRequest) error {
 	tags := shared.SanitizeTags(req.Tags)
-	return exodusdb.WithRetryTx(ctx, r.db, func(tx *sql.Tx) error {
+	return exodusdb.WithRetrySqlTx(ctx, r.db, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO config_profiles (uuid, name, tags, config, created_at, updated_at)
 			VALUES ($1, $2, $3::text[], $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -249,7 +249,7 @@ func (r *ConfigProfileRepository) setTags(ctx context.Context, profileUUID strin
 }
 
 func (r *ConfigProfileRepository) updateConfigProfile(ctx context.Context, profileUUID string, clauses []string, args []any, updateConfig *json.RawMessage) error {
-	return exodusdb.WithRetryTx(ctx, r.db, func(tx *sql.Tx) error {
+	return exodusdb.WithRetrySqlTx(ctx, r.db, func(tx *sql.Tx) error {
 		if len(clauses) > 0 {
 			txArgs := append(append([]any{}, args...), profileUUID)
 			result, err := tx.ExecContext(ctx, fmt.Sprintf(`

@@ -275,7 +275,7 @@ func (nm *NodeMonitor) loadActiveNodes() ([]db.DBNode, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	nodes, err := db.LoadNodesFromDB(ctx, nm.db, nm.cfg)
+	nodes, err := db.LoadNodesFromSqlDB(ctx, nm.db, nm.cfg)
 	if err != nil {
 		return nil, err
 	}

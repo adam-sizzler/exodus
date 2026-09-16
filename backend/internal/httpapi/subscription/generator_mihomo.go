@@ -59,8 +59,8 @@ func generateYAMLConfigExt(templateYAML []byte, hosts []SubscriptionHost, user S
 	}
 
 	proxiesNode := ensureYAMLMappingSequenceValue(config, "proxies")
-	proxyNames := []string{}
-	trailingSelectorProxyNames := []string{}
+	proxyNames := make([]string, 0, len(hosts))
+	trailingSelectorProxyNames := make([]string, 0, len(hosts))
 	for _, host := range hosts {
 		if !includeHidden && host.IsHidden {
 			continue

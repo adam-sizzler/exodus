@@ -30,11 +30,14 @@ func generateSingboxConfig(templateJSON []byte, hosts []SubscriptionHost, user S
 			baseConfig = orderedmap.New()
 		}
 	}
-	outbounds := []interface{}{}
+	var outbounds []interface{}
 	if existing, ok := baseConfig.Get("outbounds"); ok {
 		if items, ok := existing.([]interface{}); ok {
 			outbounds = items
 		}
+	}
+	if outbounds == nil {
+		outbounds = make([]interface{}, 0, len(hosts))
 	}
 	trailingSelectorNodeTags := make([]string, 0, len(hosts))
 	for _, host := range hosts {

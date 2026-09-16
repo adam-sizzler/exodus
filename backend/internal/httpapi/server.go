@@ -41,8 +41,10 @@ func StartWebServer(ctx context.Context, pools *db.Pools, cfg *config.BackendCon
 	mux.Handle("/", panelRequestHandler(panelBasePath, panelBasePathNoTrailing, uiDir, staticFS, apiHandler))
 
 	server := &http.Server{
-		Addr:    addr,
-		Handler: middleware.WithCORS(cfg, middleware.WithClientIP(cfg, middleware.WithRequestLogging(cfg, "web", mux))),
+		Addr:              addr,
+		Handler:           middleware.WithCORS(cfg, middleware.WithClientIP(cfg, middleware.WithRequestLogging(cfg, "web", mux))),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceHTTP).Info("HTTP server listening", "address", server.Addr)

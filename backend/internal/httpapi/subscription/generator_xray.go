@@ -53,8 +53,8 @@ func buildSubscriptionLinks(hosts []SubscriptionHost, user SubscriptionUser) ([]
 }
 
 func buildSubscriptionLinksExt(hosts []SubscriptionHost, user SubscriptionUser, isExtendedClient bool) ([]string, map[string]string) {
-	links := []string{}
-	ssConfLinks := map[string]string{}
+	links := make([]string, 0, len(hosts))
+	ssConfLinks := make(map[string]string)
 	for _, host := range hosts {
 		if hostExcludesResponseType(host.ExcludeFromSubscriptionTypes, responseTypeXrayBase64) {
 			continue

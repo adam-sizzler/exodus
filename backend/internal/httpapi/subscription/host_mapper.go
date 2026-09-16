@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -28,10 +29,13 @@ type HostMapper struct {
 // ParseHostMapper parses a JSON/JSONB value into HostMapper.
 func ParseHostMapper(raw []byte) HostMapper {
 	var m HostMapper
-	if len(raw) == 0 || string(raw) == "{}" || string(raw) == "null" {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 ||
+		(len(trimmed) == 2 && trimmed[0] == '{' && trimmed[1] == '}') ||
+		(len(trimmed) == 4 && trimmed[0] == 'n' && trimmed[1] == 'u' && trimmed[2] == 'l' && trimmed[3] == 'l') {
 		return m
 	}
-	_ = json.Unmarshal(raw, &m)
+	_ = json.Unmarshal(trimmed, &m)
 	return m
 }
 

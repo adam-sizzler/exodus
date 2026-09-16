@@ -13,74 +13,132 @@ import (
 var hwidHeaderRegex = regexp.MustCompile(`^[a-zA-Z0-9=-]{10,64}$`)
 
 func extractHwidHeaders(r *http.Request) *HwidHeaders {
-	hwid := firstNonEmptyHeaderValue(r, "X-HWID", "X-Hwid", "Hwid", "X-HWID-Device-ID")
-	if hwid == nil || !hwidHeaderRegex.MatchString(*hwid) {
+	hwidStr := getFirstHeader(r, "X-HWID", "X-Hwid", "Hwid", "X-HWID-Device-ID")
+	if hwidStr == "" || !hwidHeaderRegex.MatchString(hwidStr) {
 		return nil
 	}
-	userAgent := firstNonEmptyHeader(r, "User-Agent", "X-HWID-User-Agent")
-	platform := firstNonEmptyLowerHeader(r, "X-Device-OS", "X-HWID-Platform", "X-Hwid-Platform", "Hwid-Platform")
-	osVersion := firstNonEmptyHeader(r, "X-Ver-OS", "X-HWID-OS-Version", "X-Hwid-Os-Version", "Hwid-Os-Version")
-	deviceModel := firstNonEmptyHeader(r, "X-Device-Model", "X-HWID-Device-Model", "X-Hwid-Device-Model", "Hwid-Device-Model")
-	platform, osVersion, deviceModel, userAgent = normalizeHwidMetadata(platform, osVersion, deviceModel, userAgent)
+	userAgentStr := getFirstHeader(r, "User-Agent", "X-HWID-User-Agent", "", "")
+	platformStr := getFirstHeader(r, "X-Device-OS", "X-HWID-Platform", "X-Hwid-Platform", "Hwid-Platform")
+	osVersionStr := getFirstHeader(r, "X-Ver-OS", "X-HWID-OS-Version", "X-Hwid-Os-Version", "Hwid-Os-Version")
+	deviceModelStr := getFirstHeader(r, "X-Device-Model", "X-HWID-Device-Model", "X-Hwid-Device-Model", "Hwid-Device-Model")
 
-	h := &HwidHeaders{
-		Hwid:        *hwid,
+	platform, osVersion, deviceModel, userAgent := normalizeHwidMetadata(
+		stringPtrIfNotEmpty(strings.ToLower(platformStr)),
+		stringPtrIfNotEmpty(osVersionStr),
+		stringPtrIfNotEmpty(deviceModelStr),
+		stringPtrIfNotEmpty(userAgentStr),
+	)
+
+	return &HwidHeaders{
+		Hwid:        hwidStr,
 		Platform:    platform,
 		OsVersion:   osVersion,
 		DeviceModel: deviceModel,
 		UserAgent:   userAgent,
 	}
-	return h
-}
-
-func firstNonEmptyHeaderValue(r *http.Request, names ...string) *string {
-	for _, name := range names {
-		val := strings.TrimSpace(r.Header.Get(name))
-		if val != "" {
-			return &val
-		}
-	}
-	return nil
 }
 
 func extractSyntheticHwidHeaders(r *http.Request, userUUID, requestIP string) *HwidHeaders {
 	userAgent := strings.TrimSpace(r.Header.Get("User-Agent"))
-	platform := firstNonEmptyLowerHeader(r, "X-Device-OS", "X-HWID-Platform")
-	osVersion := firstNonEmptyHeader(r, "X-Ver-OS", "X-HWID-OS-Version")
-	deviceModel := firstNonEmptyHeader(r, "X-Device-Model", "X-HWID-Device-Model")
+	platformStr := getFirstHeader(r, "X-Device-OS", "X-HWID-Platform", "", "")
+	osVersionStr := getFirstHeader(r, "X-Ver-OS", "X-HWID-OS-Version", "", "")
+	deviceModelStr := getFirstHeader(r, "X-Device-Model", "X-HWID-Device-Model", "", "")
 
-	hasMetadata := userAgent != "" || platform != nil || osVersion != nil || deviceModel != nil
-	if !hasMetadata {
+	if userAgent == "" && platformStr == "" && osVersionStr == "" && deviceModelStr == "" {
 		return nil
 	}
-	platform, osVersion, deviceModel, userAgentPtr := normalizeHwidMetadata(
-		platform,
-		osVersion,
-		deviceModel,
-		stringPtrIfNotEmpty(userAgent),
-	)
 
-	var b strings.Builder
-	b.Grow(128)
-	b.WriteString("exodus:synthetic-hwid:v1|ua=")
-	writeLowerString(&b, ptrString(userAgentPtr))
-	b.WriteString("|platform=")
-	writeLowerString(&b, ptrString(platform))
-	b.WriteString("|os=")
-	writeLowerString(&b, ptrString(osVersion))
-	b.WriteString("|model=")
-	writeLowerString(&b, ptrString(deviceModel))
-	signature := b.String()
+	platformLower := strings.ToLower(platformStr)
+	if platformLower == "" && userAgent != "" {
+		if inferred := inferPlatformFromUserAgent(userAgent); inferred != "" {
+			platformLower = inferred
+		}
+	}
+	if deviceModelStr == "" {
+		deviceModelStr = "unknown"
+	}
+
+	buf := make([]byte, 0, 128)
+	buf = append(buf, "exodus:synthetic-hwid:v1|ua="...)
+	buf = appendLower(buf, userAgent)
+	buf = append(buf, "|platform="...)
+	buf = appendLower(buf, platformLower)
+	buf = append(buf, "|os="...)
+	buf = appendLower(buf, osVersionStr)
+	buf = append(buf, "|model="...)
+	buf = appendLower(buf, deviceModelStr)
+
+	var platformPtr *string
+	if platformLower != "" {
+		platformPtr = &platformLower
+	}
+	var osVersionPtr *string
+	if osVersionStr != "" {
+		osVersionPtr = &osVersionStr
+	}
+	var deviceModelPtr *string
+	if deviceModelStr != "" {
+		deviceModelPtr = &deviceModelStr
+	}
+	var userAgentPtr *string
+	if userAgent != "" {
+		userAgentPtr = &userAgent
+	}
+	var requestIPPtr *string
+	if reqIP := strings.TrimSpace(requestIP); reqIP != "" {
+		requestIPPtr = &reqIP
+	}
 
 	return &HwidHeaders{
-		Hwid:        deterministicSyntheticHwid(userUUID, signature),
-		Platform:    platform,
-		OsVersion:   osVersion,
-		DeviceModel: deviceModel,
+		Hwid:        deterministicSyntheticHwidBytes(userUUID, buf),
+		Platform:    platformPtr,
+		OsVersion:   osVersionPtr,
+		DeviceModel: deviceModelPtr,
 		UserAgent:   userAgentPtr,
-		RequestIP:   stringPtrIfNotEmpty(requestIP),
+		RequestIP:   requestIPPtr,
 		Synthetic:   true,
 	}
+}
+
+func appendLower(b []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b = append(b, c)
+	}
+	return b
+}
+
+func deterministicSyntheticHwidBytes(userUUID string, signatureBytes []byte) string {
+	namespace, err := uuid.Parse(strings.TrimSpace(userUUID))
+	if err != nil {
+		namespace = uuid.NameSpaceOID
+	}
+	return uuid.NewSHA1(namespace, signatureBytes).String()
+}
+
+func getFirstHeader(r *http.Request, h1, h2, h3, h4 string) string {
+	if v := strings.TrimSpace(r.Header.Get(h1)); v != "" {
+		return v
+	}
+	if h2 != "" {
+		if v := strings.TrimSpace(r.Header.Get(h2)); v != "" {
+			return v
+		}
+	}
+	if h3 != "" {
+		if v := strings.TrimSpace(r.Header.Get(h3)); v != "" {
+			return v
+		}
+	}
+	if h4 != "" {
+		if v := strings.TrimSpace(r.Header.Get(h4)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func normalizeHwidMetadata(platform, osVersion, deviceModel, userAgent *string) (*string, *string, *string, *string) {

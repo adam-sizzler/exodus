@@ -822,9 +822,27 @@ func isUnsecureInbound(inboundType string) bool {
 	}
 }
 
+var commonIDStrings = func() []string {
+	table := make([]string, 10001)
+	for i := 1; i <= 10000; i++ {
+		table[i] = strconv.Itoa(i)
+	}
+	return table
+}()
+
+func formatUserID(id int64) string {
+	if id > 0 && id <= 10000 {
+		return commonIDStrings[id]
+	}
+	return strconv.FormatInt(id, 10)
+}
+
 func userIdentifier(user inboundUserCredentials) string {
+	if user.Identifier != "" {
+		return user.Identifier
+	}
 	if user.ID > 0 {
-		return strconv.FormatInt(user.ID, 10)
+		return formatUserID(user.ID)
 	}
 	return user.Username
 }

@@ -13,11 +13,11 @@ import (
 const ExodusRealIPHeader = "X-Exodus-Real-IP"
 
 var clientIPHeaders = [...]string{
-	ExodusRealIPHeader,
-	"CF-Connecting-IP",
-	"True-Client-IP",
+	"X-Exodus-Real-Ip",
+	"Cf-Connecting-Ip",
+	"True-Client-Ip",
 	"X-Forwarded-For",
-	"X-Real-IP",
+	"X-Real-Ip",
 }
 
 type clientIPContextKey struct{}
@@ -65,9 +65,50 @@ func ResolveClientIP(r *http.Request, cfg *config.BackendConfig) string {
 
 	var candidateBuf [8]clientIPCandidate
 	candidates := candidateBuf[:0]
-	for _, header := range clientIPHeaders {
-		candidates = appendHeaderIPCandidates(candidates, header, r.Header.Values(header))
+
+	if r.Header != nil {
+		for _, header := range clientIPHeaders {
+			values := r.Header[header]
+			if len(values) == 0 {
+				continue
+			}
+			for _, value := range values {
+				if strings.IndexByte(value, ',') == -1 {
+					if candidate, ok := parseIPCandidate(value, header); ok {
+						if isPublicClientIP(candidate.addr) {
+							if cfg != nil && cfg.Logger != nil && cfg.Logger.IsDebugEnabled() {
+								cfg.Logger.Debug("Resolved client IP address", "client_ip", candidate.value, "source", candidate.source, "remote_addr", r.RemoteAddr)
+							}
+							return candidate.value
+						}
+						candidates = append(candidates, candidate)
+					}
+					continue
+				}
+				remaining := value
+				for len(remaining) > 0 {
+					var item string
+					if idx := strings.IndexByte(remaining, ','); idx >= 0 {
+						item = remaining[:idx]
+						remaining = remaining[idx+1:]
+					} else {
+						item = remaining
+						remaining = ""
+					}
+					if candidate, ok := parseIPCandidate(item, header); ok {
+						if isPublicClientIP(candidate.addr) {
+							if cfg != nil && cfg.Logger != nil && cfg.Logger.IsDebugEnabled() {
+								cfg.Logger.Debug("Resolved client IP address", "client_ip", candidate.value, "source", candidate.source, "remote_addr", r.RemoteAddr)
+							}
+							return candidate.value
+						}
+						candidates = append(candidates, candidate)
+					}
+				}
+			}
+		}
 	}
+
 	if candidate, ok := parseIPCandidate(r.RemoteAddr, "RemoteAddr"); ok {
 		candidates = append(candidates, candidate)
 	}
@@ -80,23 +121,6 @@ func ResolveClientIP(r *http.Request, cfg *config.BackendConfig) string {
 		cfg.Logger.Debug("Resolved client IP address", "client_ip", selected.value, "source", selected.source, "remote_addr", r.RemoteAddr)
 	}
 	return selected.value
-}
-
-func appendHeaderIPCandidates(candidates []clientIPCandidate, header string, values []string) []clientIPCandidate {
-	for _, value := range values {
-		if strings.IndexByte(value, ',') == -1 {
-			if candidate, ok := parseIPCandidate(value, header); ok {
-				candidates = append(candidates, candidate)
-			}
-			continue
-		}
-		for _, item := range strings.Split(value, ",") {
-			if candidate, ok := parseIPCandidate(item, header); ok {
-				candidates = append(candidates, candidate)
-			}
-		}
-	}
-	return candidates
 }
 
 func parseIPCandidate(value, source string) (clientIPCandidate, bool) {

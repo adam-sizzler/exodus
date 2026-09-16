@@ -134,3 +134,12 @@ func TestApplyHostMapperCopyFromRawInbound(t *testing.T) {
 		t.Fatalf("expected servername = test.domain.com, got %v", node["servername"])
 	}
 }
+
+func BenchmarkParseHostMapper(b *testing.B) {
+	emptyPayload := []byte("{}")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ParseHostMapper(emptyPayload)
+	}
+}

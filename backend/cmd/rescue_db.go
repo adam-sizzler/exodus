@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +26,8 @@ func truncateHwidUserDevices(resources *rescueResources, reader *bufio.Reader) e
 		return errors.New("aborted")
 	}
 
-	if _, err := resources.db.Exec(`TRUNCATE hwid_user_devices`); err != nil {
+	ctx := context.Background()
+	if _, err := resources.db.Exec(ctx, `TRUNCATE hwid_user_devices`); err != nil {
 		return fmt.Errorf("clean up HWID Devices: %w", err)
 	}
 
@@ -45,7 +47,8 @@ func truncateSRHTable(resources *rescueResources, reader *bufio.Reader) error {
 		return errors.New("aborted")
 	}
 
-	if _, err := resources.db.Exec(`TRUNCATE user_subscription_request_history RESTART IDENTITY`); err != nil {
+	ctx := context.Background()
+	if _, err := resources.db.Exec(ctx, `TRUNCATE user_subscription_request_history RESTART IDENTITY`); err != nil {
 		return fmt.Errorf("clean up SRH Table: %w", err)
 	}
 
@@ -65,13 +68,14 @@ func truncateUsersUsageTable(resources *rescueResources, reader *bufio.Reader) e
 		return errors.New("aborted")
 	}
 
-	if _, err := resources.db.Exec(`TRUNCATE nodes_user_usage_history RESTART IDENTITY`); err != nil {
+	ctx := context.Background()
+	if _, err := resources.db.Exec(ctx, `TRUNCATE nodes_user_usage_history RESTART IDENTITY`); err != nil {
 		return fmt.Errorf("clean up Users Usage Table: %w", err)
 	}
-	if _, err := resources.db.Exec(`VACUUM nodes_user_usage_history`); err != nil {
+	if _, err := resources.db.Exec(ctx, `VACUUM nodes_user_usage_history`); err != nil {
 		return fmt.Errorf("vacuum Users Usage Table: %w", err)
 	}
-	if _, err := resources.db.Exec(`REINDEX TABLE nodes_user_usage_history`); err != nil {
+	if _, err := resources.db.Exec(ctx, `REINDEX TABLE nodes_user_usage_history`); err != nil {
 		return fmt.Errorf("reindex Users Usage Table: %w", err)
 	}
 
@@ -181,7 +185,8 @@ func renderDeleteProgress(current, total int64, startedAt time.Time, lastBatchMs
 func runSingleUsageDelete(resources *rescueResources, startStr, endStr string) (int64, error) {
 	printStatus("◐", "🔄 Deleting records... (do NOT close this window)")
 
-	result, err := resources.db.Exec(`
+	ctx := context.Background()
+	result, err := resources.db.Exec(ctx, `
 		DELETE FROM nodes_user_usage_history
 		WHERE created_at >= $1::date
 		  AND created_at <= $2::date
@@ -190,10 +195,7 @@ func runSingleUsageDelete(resources *rescueResources, startStr, endStr string) (
 		return 0, fmt.Errorf("delete records: %w", err)
 	}
 
-	deleted, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("read rows affected: %w", err)
-	}
+	deleted := result.RowsAffected()
 
 	printStatus("✔", fmt.Sprintf("✅ Deleted %s record(s).", formatThousands(deleted)))
 
@@ -212,10 +214,11 @@ func runBatchedUsageDelete(
 
 	printStatus("◐", "🔄 Deleting records in batches... (do NOT close this window)")
 
+	ctx := context.Background()
 	for {
 		batchStart := time.Now()
 
-		result, err := resources.db.Exec(`
+		result, err := resources.db.Exec(ctx, `
 			DELETE FROM nodes_user_usage_history
 			WHERE ctid IN (
 				SELECT ctid
@@ -234,13 +237,7 @@ func runBatchedUsageDelete(
 
 		batchMs := time.Since(batchStart).Milliseconds()
 
-		deleted, err := result.RowsAffected()
-		if err != nil {
-			if term.IsTerminal(int(os.Stdout.Fd())) {
-				fmt.Println()
-			}
-			return totalDeleted, fmt.Errorf("read rows affected: %w", err)
-		}
+		deleted := result.RowsAffected()
 
 		if deleted == 0 {
 			break
@@ -333,8 +330,9 @@ func deleteUsersUsageByDateRange(resources *rescueResources, reader *bufio.Reade
 
 	printStatus("◐", "🔍 Counting affected rows...")
 
+	ctx := context.Background()
 	var rowsToDelete int64
-	if err := resources.db.QueryRow(`
+	if err := resources.db.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM nodes_user_usage_history
 		WHERE created_at >= $1::date
@@ -390,7 +388,7 @@ func deleteUsersUsageByDateRange(resources *rescueResources, reader *bufio.Reade
 	}
 
 	printStatus("◐", "🧹 Reclaiming space (VACUUM)... (do NOT close this window)")
-	if _, err := resources.db.Exec(`VACUUM nodes_user_usage_history`); err != nil {
+	if _, err := resources.db.Exec(ctx, `VACUUM nodes_user_usage_history`); err != nil {
 		printStatus("⚠", fmt.Sprintf("⚠️ Final VACUUM failed (table left as-is): %v", err))
 	}
 

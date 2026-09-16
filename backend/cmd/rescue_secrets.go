@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"bufio"
-	"database/sql"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"exodus/internal/security"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type rescueSecretPayload struct {
@@ -33,23 +35,25 @@ func resetCerts(resources *rescueResources, reader *bufio.Reader) error {
 
 	printStatus("◐", "🔄 Deleting certs...")
 
+	ctx := context.Background()
+
 	var keygenUUID string
 
-	err = resources.db.QueryRow(`
+	err = resources.db.QueryRow(ctx, `
 		SELECT uuid
 		FROM keygen
 		ORDER BY created_at ASC
 		LIMIT 1
 	`).Scan(&keygenUUID)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("certs not found")
 	}
 	if err != nil {
 		return fmt.Errorf("find certs: %w", err)
 	}
 
-	if _, err := resources.db.Exec("DELETE FROM keygen WHERE uuid = $1", keygenUUID); err != nil {
+	if _, err := resources.db.Exec(ctx, "DELETE FROM keygen WHERE uuid = $1", keygenUUID); err != nil {
 		return fmt.Errorf("delete certs: %w", err)
 	}
 
@@ -62,20 +66,22 @@ func resetCerts(resources *rescueResources, reader *bufio.Reader) error {
 func getSecretKeyForNode(resources *rescueResources) error {
 	printStatus("◐", "🔑 Getting SECRET_KEY for node...")
 
+	ctx := context.Background()
+
 	var (
 		pubKey string
 		caCert string
 		caKey  string
 	)
 
-	err := resources.db.QueryRow(`
+	err := resources.db.QueryRow(ctx, `
 		SELECT pub_key, ca_cert, ca_key
 		FROM keygen
 		ORDER BY created_at ASC
 		LIMIT 1
 	`).Scan(&pubKey, &caCert, &caKey)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("keygen not found; reset certs first or restart Exodus")
 	}
 	if err != nil {

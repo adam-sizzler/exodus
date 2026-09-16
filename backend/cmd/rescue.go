@@ -3,7 +3,6 @@ package cmd
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +16,7 @@ import (
 	"exodus/internal/db"
 	"exodus/internal/jobqueue"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -25,7 +25,7 @@ type CLIFlags struct {
 }
 
 type rescueResources struct {
-	db    *sql.DB
+	db    *pgxpool.Pool
 	redis *redis.Client
 	cfg   *config.BackendConfig
 }
@@ -130,7 +130,7 @@ func runRescueCLI() error {
 
 func openRescueResources() (*rescueResources, error) {
 	var cfg config.BackendConfig
-	var sqldb *sql.DB
+	var pgxPool *pgxpool.Pool
 
 	err := runSilently(func() error {
 		loadedCfg, err := config.LoadConfig()
@@ -140,27 +140,23 @@ func openRescueResources() (*rescueResources, error) {
 
 		cfg = loadedCfg
 
-		sqldb, err = db.OpenAndInitDB(&cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		pool, err := db.OpenPgxPool(ctx, cfg.Database.URL, 4, 1)
 		if err != nil {
 			return fmt.Errorf("connect database: %w", err)
 		}
 
+		pgxPool = pool
 		return nil
 	})
 	if err != nil {
-		if sqldb != nil {
-			_ = sqldb.Close()
+		if pgxPool != nil {
+			pgxPool.Close()
 		}
 
 		return nil, err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := sqldb.PingContext(ctx); err != nil {
-		_ = sqldb.Close()
-		return nil, fmt.Errorf("database ping failed: %w", err)
 	}
 
 	var redisClient *redis.Client
@@ -180,12 +176,12 @@ func openRescueResources() (*rescueResources, error) {
 		return nil
 	})
 	if err != nil {
-		_ = sqldb.Close()
+		pgxPool.Close()
 		return nil, err
 	}
 
 	return &rescueResources{
-		db:    sqldb,
+		db:    pgxPool,
 		redis: redisClient,
 		cfg:   &cfg,
 	}, nil
@@ -216,7 +212,7 @@ func (r *rescueResources) close() {
 	}
 
 	if r.db != nil {
-		_ = r.db.Close()
+		r.db.Close()
 	}
 }
 

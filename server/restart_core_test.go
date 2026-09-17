@@ -65,3 +65,31 @@ func TestCoreIdentityFailureSkipsPidCheckWhenStartedPidUnknown(t *testing.T) {
 		t.Fatalf("expected no identity failure when startedPID is unknown, got reason=%q", reason)
 	}
 }
+
+func TestCoreHealthcheckIntervalForAttempt(t *testing.T) {
+	tests := []struct {
+		attempt  int
+		expected string
+	}{
+		{1, "50ms"},
+		{4, "50ms"},
+		{5, "100ms"},
+		{8, "100ms"},
+		{9, "250ms"},
+		{12, "250ms"},
+		{13, "500ms"},
+		{16, "500ms"},
+		{17, "1s"},
+		{20, "1s"},
+		{21, "2s"},
+		{25, "2s"},
+	}
+
+	for _, tc := range tests {
+		got := coreHealthcheckIntervalForAttempt(tc.attempt).String()
+		if got != tc.expected {
+			t.Errorf("attempt %d: expected interval %s, got %s", tc.attempt, tc.expected, got)
+		}
+	}
+}
+

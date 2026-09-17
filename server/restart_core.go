@@ -16,9 +16,29 @@ import (
 
 const (
 	coreProcessName         = "singbox"
-	coreHealthcheckAttempts = 10
-	coreHealthcheckInterval = 2 * time.Second
+	coreHealthcheckAttempts = 25
 )
+
+// coreHealthcheckIntervalForAttempt returns the interval to wait before the next attempt.
+// Fast polling during initial startup (50ms - 100ms) prevents artificial multi-second lag,
+// followed by progressive backoff if the core takes longer (e.g. huge config or slow disk).
+func coreHealthcheckIntervalForAttempt(attempt int) time.Duration {
+	switch {
+	case attempt <= 4:
+		return 50 * time.Millisecond
+	case attempt <= 8:
+		return 100 * time.Millisecond
+	case attempt <= 12:
+		return 250 * time.Millisecond
+	case attempt <= 16:
+		return 500 * time.Millisecond
+	case attempt <= 20:
+		return 1 * time.Second
+	default:
+		return 2 * time.Second
+	}
+}
+
 
 type s6ProcessInfo struct {
 	Name      string
@@ -310,11 +330,11 @@ func waitForCoreAPIReady(ctx context.Context, cfg *config.NodeConfig, apiService
 
 	startTime := time.Now()
 
-	// Give a short 250ms window for the process to either boot or immediately fail
+	// Give a short initial 50ms window for the process to be spawned
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	var lastErr error
@@ -326,7 +346,11 @@ func waitForCoreAPIReady(ctx context.Context, cfg *config.NodeConfig, apiService
 			return time.Since(startTime), fmt.Errorf("%s", reason)
 		}
 
-		checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		checkTimeout := 500 * time.Millisecond
+		if attempt > 8 {
+			checkTimeout = 2 * time.Second
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, checkTimeout)
 		err := apiService.CheckCoreReady(checkCtx)
 		cancel()
 
@@ -341,14 +365,20 @@ func waitForCoreAPIReady(ctx context.Context, cfg *config.NodeConfig, apiService
 				log.Debug("Core API answered but process identity is broken, not trusting it", "reason", reason, "attempt", attempt)
 				return elapsed, fmt.Errorf("%s", reason)
 			}
-			log.Debug("Core API healthcheck passed", "attempt", attempt)
+			log.Debug("Core API healthcheck passed", "attempt", attempt, "elapsed", elapsed)
 			return elapsed, nil
 		}
 		lastErr = err
 
-		// Warn with formatted retry message
-		log.Warn(fmt.Sprintf("▸ Sing-box Core status check, %d/%d · elapsed %s · retrying in %s",
-			attempt, coreHealthcheckAttempts, formatDuration(elapsed), formatDuration(coreHealthcheckInterval)))
+		interval := coreHealthcheckIntervalForAttempt(attempt)
+
+		// Log as debug for fast sub-second polling; only warn if core doesn't answer after ~1s
+		if elapsed > 1*time.Second {
+			log.Warn(fmt.Sprintf("▸ Sing-box Core status check, %d/%d · elapsed %s · retrying in %s",
+				attempt, coreHealthcheckAttempts, formatDuration(elapsed), formatDuration(interval)))
+		} else {
+			log.Debug("Sing-box Core status check pending", "attempt", attempt, "elapsed", elapsed, "retry_in", interval)
+		}
 
 		// After failed attempt, verify if process stopped or was respawned
 		// under a different pid before waiting
@@ -363,7 +393,7 @@ func waitForCoreAPIReady(ctx context.Context, cfg *config.NodeConfig, apiService
 		select {
 		case <-ctx.Done():
 			return elapsed, ctx.Err()
-		case <-time.After(coreHealthcheckInterval):
+		case <-time.After(interval):
 		}
 	}
 

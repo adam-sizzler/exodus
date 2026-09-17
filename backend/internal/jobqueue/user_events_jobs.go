@@ -2,12 +2,12 @@ package jobqueue
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"sync"
 	"time"
 
 	"exodus/internal/config"
+	"exodus/internal/db"
 	"exodus/internal/logger"
 )
 
@@ -35,7 +35,7 @@ var (
 	userEventsJobs         *userEventsDispatcher
 )
 
-func StartUserEventsQueue(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, cfg *config.BackendConfig, notifier UserEventNotifier) (*Processor, error) {
+func StartUserEventsQueue(ctx context.Context, wg *sync.WaitGroup, dbConn db.DBTX, cfg *config.BackendConfig, notifier UserEventNotifier) (*Processor, error) {
 	client, err := NewRedisClient(cfg)
 	if err != nil || client == nil {
 		return nil, err
@@ -59,7 +59,7 @@ func StartUserEventsQueue(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, c
 			if err := json.Unmarshal(job.Payload, &payload); err != nil {
 				return err
 			}
-			return handleFireUserEvent(ctx, db, cfg, notifier, payload)
+			return handleFireUserEvent(ctx, dbConn, cfg, notifier, payload)
 		},
 	}); err != nil {
 		_ = client.Close()
@@ -102,8 +102,8 @@ func EnqueueUserEvent(ctx context.Context, payload FireUserEventPayload) (bool, 
 	return err == nil, err
 }
 
-func handleFireUserEvent(ctx context.Context, db *sql.DB, cfg *config.BackendConfig, notifier UserEventNotifier, payload FireUserEventPayload) error {
-	if db == nil || payload.UserID <= 0 {
+func handleFireUserEvent(ctx context.Context, dbConn db.DBTX, cfg *config.BackendConfig, notifier UserEventNotifier, payload FireUserEventPayload) error {
+	if dbConn == nil || payload.UserID <= 0 {
 		return nil
 	}
 
@@ -118,7 +118,7 @@ func handleFireUserEvent(ctx context.Context, db *sql.DB, cfg *config.BackendCon
 		expireAt  time.Time
 	)
 
-	row := db.QueryRowContext(ctx, `
+	row := dbConn.QueryRow(ctx, `
 		SELECT u.id, u.username, u.uuid::text, u.short_uuid, u.status,
 		       u.traffic_limit_bytes, COALESCE(ut.used_traffic_bytes, 0), u.expire_at
 		FROM users u

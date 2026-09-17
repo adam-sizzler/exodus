@@ -159,7 +159,7 @@ func SRSListsBulkHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 }
 
 func handleGetSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
-	items, err := srscore.LoadAll(r.Context(), db)
+	items, err := srscore.LoadAllSql(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetSrsListsFailed.WithCause(err), cfg)
 		return
@@ -192,7 +192,7 @@ func handleGetSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *
 }
 
 func handleGetSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, listUUID string) {
-	items, err := srscore.LoadAll(r.Context(), db)
+	items, err := srscore.LoadAllSql(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetSrsListByUUIDFailed.WithCause(err), cfg)
 		return
@@ -355,7 +355,7 @@ func handleCreateSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	cfg.Logger.Debug("SRS create DB write completed", "duration_ms", time.Since(dbStarted).Milliseconds(), "created", len(toCreate))
 
 	checkStarted := time.Now()
-	if _, err := srscore.CheckAndUpdateAvailability(context.Background(), db, cfg); err != nil {
+	if _, err := srscore.CheckAndUpdateAvailabilitySql(context.Background(), db, cfg); err != nil {
 		cfg.Logger.Warn("Failed to check SRS lists right after create", "error", err)
 	}
 	cfg.Logger.Debug("SRS create availability check completed", "duration_ms", time.Since(checkStarted).Milliseconds())
@@ -477,7 +477,7 @@ func handleUpdateSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 	cfg.Logger.Debug("SRS update DB write completed", "duration_ms", time.Since(dbStarted).Milliseconds(), "uuid", strings.TrimSpace(req.UUID))
 
 	checkStarted := time.Now()
-	if _, err := srscore.CheckAndUpdateAvailability(context.Background(), db, cfg); err != nil {
+	if _, err := srscore.CheckAndUpdateAvailabilitySql(context.Background(), db, cfg); err != nil {
 		cfg.Logger.Warn("Failed to check SRS list after update", "error", err)
 	}
 	cfg.Logger.Debug("SRS update availability check completed", "duration_ms", time.Since(checkStarted).Milliseconds(), "uuid", strings.TrimSpace(req.UUID))
@@ -658,7 +658,7 @@ func handleCheckSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 			return
 		}
 	} else {
-		if _, err := srscore.CheckAndUpdateAvailability(r.Context(), db, cfg); err != nil {
+		if _, err := srscore.CheckAndUpdateAvailabilitySql(r.Context(), db, cfg); err != nil {
 			shared.SendAPIError(w, shared.ErrGetAllSRSListsFailed.WithCause(err), cfg)
 			return
 		}

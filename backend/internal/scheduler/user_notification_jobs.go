@@ -64,7 +64,7 @@ func (s *Scheduler) findUsersForExpireNotifications(ctx context.Context) error {
 }
 
 func (s *Scheduler) usersByExpireAt(ctx context.Context, start, end time.Time) ([]userNotificationRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.Query(ctx, `
 		SELECT
 			u.id, u.uuid::text, u.username, u.short_uuid, u.status,
 			u.traffic_limit_bytes, COALESCE(ut.used_traffic_bytes, 0),
@@ -207,7 +207,7 @@ func (s *Scheduler) triggerThresholdNotifications(ctx context.Context, threshold
 			u.created_at
 	`, strings.Join(values, ","))
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +277,7 @@ func (s *Scheduler) findNotConnectedUsersNotification(ctx context.Context) error
 }
 
 func (s *Scheduler) notConnectedUsers(ctx context.Context, start, end time.Time) ([]userNotificationRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.Query(ctx, `
 		SELECT
 			u.id, u.uuid::text, u.username, u.short_uuid, u.status,
 			u.traffic_limit_bytes, COALESCE(ut.used_traffic_bytes, 0),

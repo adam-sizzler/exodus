@@ -83,7 +83,59 @@ func DeriveTagFromFileName(fileName string) string {
 	return tag
 }
 
-func LoadAll(ctx context.Context, sqlDB *sql.DB) ([]Item, error) {
+func LoadAll(ctx context.Context, dbConn db.DBTX) ([]Item, error) {
+	if dbConn == nil {
+		return nil, fmt.Errorf("database connection is nil")
+	}
+
+	rows, err := dbConn.Query(ctx, `
+		SELECT uuid, tags, format, url, update_interval, path, file_name, view_position, is_enabled, is_available, last_checked_at, last_error, created_at, updated_at
+		FROM srs_lists
+		ORDER BY view_position ASC, created_at ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Item, 0)
+	for rows.Next() {
+		var item Item
+		var tags []string
+		if err := rows.Scan(
+			&item.UUID,
+			&tags,
+			&item.Format,
+			&item.URL,
+			&item.UpdateInterval,
+			&item.Path,
+			&item.FileName,
+			&item.ViewPosition,
+			&item.IsEnabled,
+			&item.IsAvailable,
+			&item.LastCheckedAt,
+			&item.LastError,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if tags == nil {
+			tags = []string{}
+		}
+		item.Tags = tags
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func LoadAllSql(ctx context.Context, sqlDB *sql.DB) ([]Item, error) {
+	if sqlDB == nil {
+		return nil, fmt.Errorf("sql database connection is nil")
+	}
 	rows, err := sqlDB.QueryContext(ctx, `
 		SELECT uuid, tags, format, url, update_interval, path, file_name, view_position, is_enabled, is_available, last_checked_at, last_error, created_at, updated_at
 		FROM srs_lists
@@ -137,14 +189,40 @@ func LoadAll(ctx context.Context, sqlDB *sql.DB) ([]Item, error) {
 		}
 		items = append(items, item)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+	return items, rows.Err()
 }
 
-func LoadNodeSyncItems(ctx context.Context, db *sql.DB) ([]NodeSyncItem, error) {
-	items, err := LoadAll(ctx, db)
+func LoadNodeSyncItems(ctx context.Context, dbConn db.DBTX) ([]NodeSyncItem, error) {
+	items, err := LoadAll(ctx, dbConn)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NodeSyncItem, 0, len(items))
+	for _, item := range items {
+		if !item.IsEnabled {
+			continue
+		}
+		tag := DeriveTagFromFileName(item.FileName)
+		pathValue := ""
+		if item.Path != nil {
+			pathValue = strings.TrimSpace(*item.Path)
+		}
+		if pathValue == "" {
+			pathValue = item.FileName
+		}
+		result = append(result, NodeSyncItem{
+			Tag:            tag,
+			Format:         item.Format,
+			URL:            item.URL,
+			UpdateInterval: item.UpdateInterval,
+			Path:           pathValue,
+		})
+	}
+	return result, nil
+}
+
+func LoadNodeSyncItemsSql(ctx context.Context, sqlDB *sql.DB) ([]NodeSyncItem, error) {
+	items, err := LoadAllSql(ctx, sqlDB)
 	if err != nil {
 		return nil, err
 	}
@@ -232,8 +310,8 @@ func CheckOneURL(ctx context.Context, rawURL string) error {
 	return nil
 }
 
-func CheckAndUpdateAvailability(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) (int, error) {
-	items, err := LoadAll(ctx, db)
+func CheckAndUpdateAvailability(ctx context.Context, dbConn db.DBTX, cfg *config.BackendConfig) (int, error) {
+	items, err := LoadAll(ctx, dbConn)
 	if err != nil {
 		return 0, err
 	}
@@ -274,7 +352,7 @@ func CheckAndUpdateAvailability(ctx context.Context, db *sql.DB, cfg *config.Bac
 			errText = res.err.Error()
 		}
 
-		_, writeErr := db.ExecContext(ctx, `
+		_, writeErr := dbConn.Exec(ctx, `
 			UPDATE srs_lists
 			SET is_available = $1,
 				last_checked_at = CURRENT_TIMESTAMP,
@@ -292,3 +370,65 @@ func CheckAndUpdateAvailability(ctx context.Context, db *sql.DB, cfg *config.Bac
 	}
 	return updated, nil
 }
+
+func CheckAndUpdateAvailabilitySql(ctx context.Context, sqlDB *sql.DB, cfg *config.BackendConfig) (int, error) {
+	items, err := LoadAllSql(ctx, sqlDB)
+	if err != nil {
+		return 0, err
+	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+
+	results := make([]srsCheckResult, len(items))
+	sem := make(chan struct{}, srsCheckConcurrency)
+	var wg sync.WaitGroup
+
+	for i, item := range items {
+		wg.Add(1)
+		go func(idx int, it Item) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[idx] = srsCheckResult{item: it, err: ctx.Err()}
+				return
+			}
+
+			results[idx] = srsCheckResult{item: it, err: CheckOneURL(ctx, it.URL)}
+		}(i, item)
+	}
+
+	wg.Wait()
+
+	updated := 0
+	for _, res := range results {
+		if ctx.Err() != nil {
+			break
+		}
+		isAvailable := res.err == nil
+		var errText any
+		if res.err != nil {
+			errText = res.err.Error()
+		}
+
+		_, writeErr := sqlDB.ExecContext(ctx, `
+			UPDATE srs_lists
+			SET is_available = $1,
+				last_checked_at = CURRENT_TIMESTAMP,
+				last_error = $2,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE uuid = $3
+		`, isAvailable, errText, res.item.UUID)
+		if writeErr != nil {
+			if cfg != nil && cfg.Logger != nil {
+				cfg.Logger.Warn("Failed to update SRS availability", "uuid", res.item.UUID, "error", writeErr)
+			}
+			continue
+		}
+		updated++
+	}
+	return updated, nil
+}
+

@@ -2,13 +2,14 @@ package notifications
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"exodus/internal/config"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Dispatcher struct {
@@ -22,7 +23,7 @@ var (
 	globalDispatcher   *Dispatcher
 )
 
-func StartDispatcher(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, cfg *config.BackendConfig) {
+func StartDispatcher(ctx context.Context, wg *sync.WaitGroup, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	if cfg == nil {
 		return
 	}

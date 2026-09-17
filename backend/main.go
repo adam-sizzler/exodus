@@ -122,7 +122,7 @@ func main() {
 	subNodeMonitor := subscriptionnodes.NewSubNodeMonitor(pools.Background, &cfg)
 	subscriptionnodes.RegisterGlobalSubNodeMonitor(subNodeMonitor)
 
-	redisWorker, err := redisqueue.NewWorker(&cfg, pools.Background)
+	redisWorker, err := redisqueue.NewWorker(&cfg, pools.PgxBackground)
 	redisStatus := "Disabled"
 	if err != nil {
 		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceRedis).Warn("Redis worker disabled", "error", err)
@@ -161,12 +161,12 @@ func main() {
 	go metrics.StartMetricsServer(ctx, pools, &cfg, &wg)
 	go nodeMonitor.Start(ctx, &wg)
 	go subNodeMonitor.Start(ctx, &wg)
-	notifications.StartDispatcher(ctx, &wg, pools.Background, &cfg)
-	scheduler.Start(ctx, &wg, pools.Background, &cfg)
-	if _, err := jobqueue.StartSubscriptionQueues(ctx, &wg, pools.Background, &cfg); err != nil {
+	notifications.StartDispatcher(ctx, &wg, pools.PgxBackground, &cfg)
+	scheduler.Start(ctx, &wg, pools.PgxBackground, &cfg)
+	if _, err := jobqueue.StartSubscriptionQueues(ctx, &wg, pools.PgxBackground, &cfg); err != nil {
 		cfg.Logger.RoleService(logger.RoleWorkers, logger.ServiceUsersQueue).Warn("Subscription job queue disabled", "error", err)
 	}
-	if _, err := jobqueue.StartUserEventsQueue(ctx, &wg, pools.Background, &cfg, func(notifyCtx context.Context, event string, data map[string]any, meta map[string]any) {
+	if _, err := jobqueue.StartUserEventsQueue(ctx, &wg, pools.PgxBackground, &cfg, func(notifyCtx context.Context, event string, data map[string]any, meta map[string]any) {
 		notifications.Emit(notifyCtx, &cfg, notifications.Event{
 			Scope: notifications.ScopeUser,
 			Event: event,

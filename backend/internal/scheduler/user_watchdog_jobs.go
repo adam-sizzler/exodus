@@ -2,12 +2,15 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"sync"
 	"time"
 
+	"exodus/internal/db"
 	"exodus/internal/notifications"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -104,34 +107,46 @@ func (s *Scheduler) runExceededUsersReview(ctx context.Context) error {
 	return nil
 }
 
-func (s *Scheduler) handleStatusUpdateResult(statusName string, result StatusUpdateResult, err error) {
+func (s *Scheduler) handleStatusUpdateResult(label string, result StatusUpdateResult, err error) {
 	if err != nil {
-		s.cfg.Logger.Warn("User status review failed", "status", statusName, "error", err)
+		s.cfg.Logger.Error("User status update review failed", "type", label, "error", err)
 		return
 	}
 	if result.Users == 0 {
-		s.cfg.Logger.Debug("User status review found no users", "status", statusName)
+		s.cfg.Logger.Debug("User status update review: no users affected", "type", label)
 		return
 	}
-
-	s.cfg.Logger.Info("User status review updated users", "status", statusName, "users", result.Users, "node_targets", len(result.NodeUUIDs))
+	s.cfg.Logger.Info("User status update review completed", "type", label, "users", result.Users, "node_targets", len(result.NodeUUIDs))
 	if len(result.NodeUUIDs) > 0 {
 		triggerNodeDeploy(true, result.NodeUUIDs...)
 	}
 }
 
-func UpdateExpiredUsers(ctx context.Context, db *sql.DB) (StatusUpdateResult, error) {
-	res, _, err := UpdateExpiredUsersWithRecords(ctx, db)
+func UpdateExpiredUsers(ctx context.Context, dbConn db.DBTX) (StatusUpdateResult, error) {
+	res, _, err := UpdateExpiredUsersWithRecords(ctx, dbConn)
 	return res, err
 }
 
-func UpdateExpiredUsersWithRecords(ctx context.Context, db *sql.DB) (StatusUpdateResult, []userNotificationRecord, error) {
+func isNilDB(dbConn db.DBTX) bool {
+	if dbConn == nil {
+		return true
+	}
+	switch v := dbConn.(type) {
+	case *pgxpool.Pool:
+		return v == nil
+	case *pgx.Conn:
+		return v == nil
+	}
+	return false
+}
+
+func UpdateExpiredUsersWithRecords(ctx context.Context, dbConn db.DBTX) (StatusUpdateResult, []userNotificationRecord, error) {
 	result := StatusUpdateResult{NodeUUIDs: []string{}}
-	if db == nil {
+	if isNilDB(dbConn) {
 		return result, nil, nil
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := dbConn.Query(ctx, `
 		WITH affected_users AS (
 			UPDATE users
 			SET status = 'EXPIRED', updated_at = CURRENT_TIMESTAMP
@@ -177,7 +192,7 @@ func UpdateExpiredUsersWithRecords(ctx context.Context, db *sql.DB) (StatusUpdat
 		return result, users, nil
 	}
 
-	nodeRows, err := db.QueryContext(ctx, `
+	nodeRows, err := dbConn.Query(ctx, `
 		SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
 		FROM internal_squad_members ism
 		JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
@@ -190,29 +205,29 @@ func UpdateExpiredUsersWithRecords(ctx context.Context, db *sql.DB) (StatusUpdat
 	defer nodeRows.Close()
 
 	for nodeRows.Next() {
-		var nodeUUID sql.NullString
+		var nodeUUID *string
 		if err := nodeRows.Scan(&nodeUUID); err != nil {
 			return result, users, err
 		}
-		if nodeUUID.Valid && strings.TrimSpace(nodeUUID.String) != "" {
-			result.NodeUUIDs = append(result.NodeUUIDs, nodeUUID.String)
+		if nodeUUID != nil && strings.TrimSpace(*nodeUUID) != "" {
+			result.NodeUUIDs = append(result.NodeUUIDs, *nodeUUID)
 		}
 	}
 	return result, users, nodeRows.Err()
 }
 
-func UpdateExceededTrafficUsers(ctx context.Context, db *sql.DB) (StatusUpdateResult, error) {
-	res, _, err := UpdateExceededTrafficUsersWithRecords(ctx, db)
+func UpdateExceededTrafficUsers(ctx context.Context, dbConn db.DBTX) (StatusUpdateResult, error) {
+	res, _, err := UpdateExceededTrafficUsersWithRecords(ctx, dbConn)
 	return res, err
 }
 
-func UpdateExceededTrafficUsersWithRecords(ctx context.Context, db *sql.DB) (StatusUpdateResult, []userNotificationRecord, error) {
+func UpdateExceededTrafficUsersWithRecords(ctx context.Context, dbConn db.DBTX) (StatusUpdateResult, []userNotificationRecord, error) {
 	result := StatusUpdateResult{NodeUUIDs: []string{}}
-	if db == nil {
+	if isNilDB(dbConn) {
 		return result, nil, nil
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := dbConn.Query(ctx, `
 		WITH affected_users AS (
 			UPDATE users AS u
 			SET status = 'LIMITED', updated_at = CURRENT_TIMESTAMP
@@ -261,7 +276,7 @@ func UpdateExceededTrafficUsersWithRecords(ctx context.Context, db *sql.DB) (Sta
 		return result, users, nil
 	}
 
-	nodeRows, err := db.QueryContext(ctx, `
+	nodeRows, err := dbConn.Query(ctx, `
 		SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
 		FROM internal_squad_members ism
 		JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
@@ -274,42 +289,45 @@ func UpdateExceededTrafficUsersWithRecords(ctx context.Context, db *sql.DB) (Sta
 	defer nodeRows.Close()
 
 	for nodeRows.Next() {
-		var nodeUUID sql.NullString
+		var nodeUUID *string
 		if err := nodeRows.Scan(&nodeUUID); err != nil {
 			return result, users, err
 		}
-		if nodeUUID.Valid && strings.TrimSpace(nodeUUID.String) != "" {
-			result.NodeUUIDs = append(result.NodeUUIDs, nodeUUID.String)
+		if nodeUUID != nil && strings.TrimSpace(*nodeUUID) != "" {
+			result.NodeUUIDs = append(result.NodeUUIDs, *nodeUUID)
 		}
 	}
 	return result, users, nodeRows.Err()
 }
 
-func ResetTrafficByStrategy(ctx context.Context, db *sql.DB, strategy string) (StatusUpdateResult, error) {
-	return ResetTrafficByStrategyAt(ctx, db, strategy, time.Now())
+func ResetTrafficByStrategy(ctx context.Context, pool *pgxpool.Pool, strategy string) (StatusUpdateResult, error) {
+	return ResetTrafficByStrategyAt(ctx, pool, strategy, time.Now())
 }
 
-func ResetTrafficByStrategyAt(ctx context.Context, db *sql.DB, strategy string, now time.Time) (StatusUpdateResult, error) {
+func ResetTrafficByStrategyAt(ctx context.Context, pool *pgxpool.Pool, strategy string, now time.Time) (StatusUpdateResult, error) {
 	normalizedStrategy := strings.ToUpper(strings.TrimSpace(strategy))
 	result := StatusUpdateResult{NodeUUIDs: []string{}}
+	if pool == nil {
+		return result, nil
+	}
 
 	boundary, ok := resetPeriodBoundary(normalizedStrategy, now)
 	if !ok {
 		return result, nil
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return result, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	nodeUUIDs, err := queryLimitedUserNodeUUIDsByStrategyTx(ctx, tx, normalizedStrategy, boundary, now)
 	if err != nil {
 		return result, err
 	}
 
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRow(ctx, `
 		WITH affected_users AS (
 			UPDATE users
 			SET last_traffic_reset_at = CURRENT_TIMESTAMP,
@@ -344,24 +362,24 @@ func ResetTrafficByStrategyAt(ctx context.Context, db *sql.DB, strategy string, 
 	}
 
 	result.NodeUUIDs = nodeUUIDs
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
 func resetPeriodBoundary(strategy string, now time.Time) (time.Time, bool) {
-	local := now.Local()
-	dayStart := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location())
+	loc := now.Location()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 
 	switch strings.ToUpper(strings.TrimSpace(strategy)) {
 	case "DAY":
 		return dayStart, true
 	case "WEEK":
-		daysSinceMonday := (int(local.Weekday()) - int(time.Monday) + 7) % 7
+		daysSinceMonday := (int(now.Weekday()) - int(time.Monday) + 7) % 7
 		return dayStart.AddDate(0, 0, -daysSinceMonday), true
 	case "MONTH":
-		return time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, local.Location()), true
+		return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc), true
 	case "MONTH_ROLLING":
 		return dayStart, true
 	default:
@@ -369,10 +387,13 @@ func resetPeriodBoundary(strategy string, now time.Time) (time.Time, bool) {
 	}
 }
 
-func updateUsersAndCollectNodes(ctx context.Context, db *sql.DB, query string) (StatusUpdateResult, error) {
+func updateUsersAndCollectNodes(ctx context.Context, dbConn db.DBTX, query string) (StatusUpdateResult, error) {
 	result := StatusUpdateResult{NodeUUIDs: []string{}}
+	if dbConn == nil {
+		return result, nil
+	}
 
-	rows, err := db.QueryContext(ctx, query)
+	rows, err := dbConn.Query(ctx, query)
 	if err != nil {
 		return result, err
 	}
@@ -382,14 +403,14 @@ func updateUsersAndCollectNodes(ctx context.Context, db *sql.DB, query string) (
 	for rows.Next() {
 		var (
 			users    int64
-			nodeUUID sql.NullString
+			nodeUUID *string
 		)
 		if err := rows.Scan(&users, &nodeUUID); err != nil {
 			return result, err
 		}
 		result.Users = users
-		if nodeUUID.Valid {
-			nodeUUIDs = append(nodeUUIDs, strings.TrimSpace(nodeUUID.String))
+		if nodeUUID != nil && strings.TrimSpace(*nodeUUID) != "" {
+			nodeUUIDs = append(nodeUUIDs, strings.TrimSpace(*nodeUUID))
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -399,8 +420,8 @@ func updateUsersAndCollectNodes(ctx context.Context, db *sql.DB, query string) (
 	return result, nil
 }
 
-func queryLimitedUserNodeUUIDsByStrategyTx(ctx context.Context, tx *sql.Tx, strategy string, boundary time.Time, now time.Time) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `
+func queryLimitedUserNodeUUIDsByStrategyTx(ctx context.Context, tx pgx.Tx, strategy string, boundary time.Time, now time.Time) ([]string, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
 		FROM users u
 		JOIN internal_squad_members ism ON ism.user_id = u.id
@@ -414,9 +435,9 @@ func queryLimitedUserNodeUUIDsByStrategyTx(ctx context.Context, tx *sql.Tx, stra
 		      OR (
 		          (u.created_at + interval '1 month')::date <= $4::date
 		          AND LEAST(
-		              EXTRACT(DAY FROM u.created_at),
-		              EXTRACT(DAY FROM date_trunc('month', $5::timestamp) + interval '1 month - 1 day')
-		          ) = EXTRACT(DAY FROM $6::timestamp)
+				              EXTRACT(DAY FROM u.created_at),
+				              EXTRACT(DAY FROM date_trunc('month', $5::timestamp) + interval '1 month - 1 day')
+				          ) = EXTRACT(DAY FROM $6::timestamp)
 		      )
 		  )
 	`, strategy, boundary, strategy, now, now, now)

@@ -2,7 +2,7 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
+	"strings"
 	"time"
 
 	"exodus/internal/notifications"
@@ -75,7 +75,7 @@ func (s *Scheduler) infraBillingNodesNotifications(ctx context.Context) error {
 }
 
 func (s *Scheduler) getInfraBillingNotifications(ctx context.Context, window infraBillingNotificationWindow) ([]infraBillingNotificationRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.Query(ctx, `
 		SELECT COALESCE(n.name, ibn.name), ip.name, ip.login_url, ibn.next_billing_at
 		FROM infra_billing_nodes ibn
 		LEFT JOIN nodes n ON n.uuid = ibn.node_uuid
@@ -93,12 +93,14 @@ func (s *Scheduler) getInfraBillingNotifications(ctx context.Context, window inf
 	for rows.Next() {
 		var (
 			item     infraBillingNotificationRecord
-			loginURL sql.NullString
+			loginURL *string
 		)
 		if scanErr := rows.Scan(&item.NodeName, &item.ProviderName, &loginURL, &item.NextBillingAt); scanErr != nil {
 			return nil, scanErr
 		}
-		item.LoginURL = nullableStringFromSQL(loginURL)
+		if loginURL != nil {
+			item.LoginURL = strings.TrimSpace(*loginURL)
+		}
 		if item.LoginURL == "" {
 			item.LoginURL = "https://docs.ex"
 		}

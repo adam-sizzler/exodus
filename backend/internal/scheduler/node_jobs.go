@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"math"
 	"strings"
 	"time"
@@ -15,13 +14,13 @@ type nodeTrafficResetTarget struct {
 	Bytes       int64
 	ResetDay    int
 	CreatedAt   time.Time
-	LastResetAt sql.NullTime
+	LastResetAt *time.Time
 	ScheduledAt time.Time
 }
 
 func (s *Scheduler) resetNodeTraffic(ctx context.Context) error {
 	now := time.Now()
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.Query(ctx, `
 		SELECT
 			n.uuid::text,
 			COALESCE(n.traffic_used_bytes, 0),
@@ -59,23 +58,23 @@ func (s *Scheduler) resetNodeTraffic(ctx context.Context) error {
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, target := range targets {
 		if strings.TrimSpace(target.UUID) == "" {
 			continue
 		}
-		if _, execErr := tx.ExecContext(ctx, `
+		if _, execErr := tx.Exec(ctx, `
 			INSERT INTO nodes_traffic_usage_history (node_uuid, traffic_bytes, reset_at)
 			VALUES ($1, $2, CURRENT_TIMESTAMP)
 		`, target.UUID, target.Bytes); execErr != nil {
 			return execErr
 		}
-		if _, execErr := tx.ExecContext(ctx, `
+		if _, execErr := tx.Exec(ctx, `
 			UPDATE nodes
 			SET traffic_used_bytes = 0, updated_at = CURRENT_TIMESTAMP
 			WHERE uuid = $1
@@ -84,7 +83,7 @@ func (s *Scheduler) resetNodeTraffic(ctx context.Context) error {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 
@@ -94,7 +93,7 @@ func (s *Scheduler) resetNodeTraffic(ctx context.Context) error {
 	return nil
 }
 
-func nodeTrafficResetDue(now time.Time, resetDay int, createdAt time.Time, lastResetAt sql.NullTime) (time.Time, bool) {
+func nodeTrafficResetDue(now time.Time, resetDay int, createdAt time.Time, lastResetAt *time.Time) (time.Time, bool) {
 	scheduledAt := latestNodeTrafficResetBoundary(now.Local(), resetDay)
 	if scheduledAt.IsZero() {
 		return time.Time{}, false
@@ -102,7 +101,7 @@ func nodeTrafficResetDue(now time.Time, resetDay int, createdAt time.Time, lastR
 	if createdAt.After(scheduledAt) {
 		return scheduledAt, false
 	}
-	if lastResetAt.Valid && !lastResetAt.Time.Before(scheduledAt) {
+	if lastResetAt != nil && !lastResetAt.Before(scheduledAt) {
 		return scheduledAt, false
 	}
 
@@ -125,8 +124,17 @@ func nodeTrafficResetBoundary(year int, month time.Month, resetDay int, location
 	if location == nil {
 		location = time.Local
 	}
+	firstDay := time.Date(year, month, 1, 0, 0, 0, 0, location)
+	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, location).Day()
+	day := resetDay
+	if day > lastDay {
+		day = lastDay
+	}
+	if day < 1 {
+		day = 1
+	}
 
-	day := min(clampResetDay(resetDay), lastDayOfMonth(time.Date(year, month, 1, 0, 0, 0, 0, location)))
+	_ = firstDay
 	return time.Date(year, month, day, 1, 0, 0, 0, location)
 }
 
@@ -153,7 +161,7 @@ type nodeReviewRecord struct {
 }
 
 func (s *Scheduler) reviewNodes(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.Query(ctx, `
 		SELECT uuid::text, name, address, COALESCE(port, 0), COALESCE(traffic_used_bytes, 0), COALESCE(traffic_limit_bytes, 0), COALESCE(traffic_reset_day, 1), COALESCE(notify_percent, 0)
 		FROM nodes
 		WHERE is_traffic_tracking_active = true
@@ -219,11 +227,4 @@ func (s *Scheduler) reviewNodes(ctx context.Context) error {
 		s.mu.Unlock()
 	}
 	return nil
-}
-
-func nullableStringFromSQL(value sql.NullString) string {
-	if !value.Valid {
-		return ""
-	}
-	return strings.TrimSpace(value.String)
 }

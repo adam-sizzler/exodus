@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"sync"
 	"time"
 
@@ -10,17 +9,19 @@ import (
 
 	"exodus/internal/config"
 	"exodus/internal/logger"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Scheduler struct {
-	db                  *sql.DB
+	db                  *pgxpool.Pool
 	cfg                 *config.BackendConfig
 	cron                *cron.Cron
 	mu                  sync.Mutex
 	nodeTrafficNotified map[string]bool
 }
 
-func Start(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, cfg *config.BackendConfig) {
+func Start(ctx context.Context, wg *sync.WaitGroup, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	if db == nil || cfg == nil {
 		return
 	}

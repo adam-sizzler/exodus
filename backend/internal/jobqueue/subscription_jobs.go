@@ -2,13 +2,13 @@ package jobqueue
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"exodus/internal/config"
+	"exodus/internal/db"
 	"exodus/internal/logger"
 	"exodus/internal/streamexport"
 	"exodus/internal/util"
@@ -55,7 +55,7 @@ var (
 	subscriptionJobs         *subscriptionDispatcher
 )
 
-func StartSubscriptionQueues(ctx context.Context, wg *sync.WaitGroup, db *sql.DB, cfg *config.BackendConfig) (*Processor, error) {
+func StartSubscriptionQueues(ctx context.Context, wg *sync.WaitGroup, dbConn db.DBTX, cfg *config.BackendConfig) (*Processor, error) {
 	client, err := NewRedisClient(cfg)
 	if err != nil || client == nil {
 		return nil, err
@@ -79,21 +79,21 @@ func StartSubscriptionQueues(ctx context.Context, wg *sync.WaitGroup, db *sql.DB
 			if err := json.Unmarshal(job.Payload, &payload); err != nil {
 				return err
 			}
-			return updateUserSubscription(ctx, db, payload)
+			return updateUserSubscription(ctx, dbConn, payload)
 		},
 		jobAddSubscriptionRecord: func(ctx context.Context, job Job) error {
 			var payload AddSubscriptionRequestRecordPayload
 			if err := json.Unmarshal(job.Payload, &payload); err != nil {
 				return err
 			}
-			return addSubscriptionRequestRecord(ctx, db, client, cfg, payload)
+			return addSubscriptionRequestRecord(ctx, dbConn, client, cfg, payload)
 		},
 		jobUpsertHwidDevice: func(ctx context.Context, job Job) error {
 			var payload UpsertHwidDevicePayload
 			if err := json.Unmarshal(job.Payload, &payload); err != nil {
 				return err
 			}
-			return upsertHwidDevice(ctx, db, payload)
+			return upsertHwidDevice(ctx, dbConn, payload)
 		},
 	}); err != nil {
 		_ = client.Close()
@@ -163,14 +163,14 @@ func enqueueSubscriptionJob(ctx context.Context, jobName string, payload any, op
 	return err == nil, err
 }
 
-func updateUserSubscription(_ context.Context, _ *sql.DB, payload UpdateUserSubscriptionPayload) error {
+func updateUserSubscription(_ context.Context, _ db.DBTX, payload UpdateUserSubscriptionPayload) error {
 	if payload.UserUUID == "" {
 		return nil
 	}
 	return nil
 }
 
-func addSubscriptionRequestRecord(ctx context.Context, db *sql.DB, client *redis.Client, cfg *config.BackendConfig, payload AddSubscriptionRequestRecordPayload) error {
+func addSubscriptionRequestRecord(ctx context.Context, dbConn db.DBTX, client *redis.Client, cfg *config.BackendConfig, payload AddSubscriptionRequestRecordPayload) error {
 	if payload.UserID <= 0 {
 		return nil
 	}
@@ -178,14 +178,14 @@ func addSubscriptionRequestRecord(ctx context.Context, db *sql.DB, client *redis
 	if srrType == "" {
 		srrType = "UNKNOWN"
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := dbConn.Exec(ctx, `
 		INSERT INTO user_subscription_request_history (user_id, srr_response_type, srr_rule_name, request_ip, user_agent)
 		VALUES ($1, $2, $3, $4, $5)
 	`, payload.UserID, srrType, payload.SRRRuleName, payload.RequestIP, payload.UserAgent); err != nil {
 		return err
 	}
 
-	_, err := db.ExecContext(ctx, `
+	_, err := dbConn.Exec(ctx, `
 		DELETE FROM user_subscription_request_history
 		WHERE user_id = $1
 		  AND id NOT IN (
@@ -213,12 +213,12 @@ func addSubscriptionRequestRecord(ctx context.Context, db *sql.DB, client *redis
 	return err
 }
 
-func upsertHwidDevice(ctx context.Context, db *sql.DB, payload UpsertHwidDevicePayload) error {
+func upsertHwidDevice(ctx context.Context, dbConn db.DBTX, payload UpsertHwidDevicePayload) error {
 	if payload.UserID <= 0 || payload.Hwid == "" {
 		return nil
 	}
 	payload.Platform = lowerStringPtr(payload.Platform)
-	_, err := db.ExecContext(ctx, `
+	_, err := dbConn.Exec(ctx, `
 		INSERT INTO hwid_user_devices (hwid, user_id, platform, os_version, device_model, user_agent, request_ip)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (hwid, user_id)

@@ -435,7 +435,7 @@ func (sm *SubNodeMonitor) syncSRSListsToConnectedNodes(requestedNodeUUIDs []stri
 		return
 	}
 
-	srsLists, err := srscore.LoadNodeSyncItems(context.Background(), sm.db)
+	srsLists, err := srscore.LoadNodeSyncItemsSql(context.Background(), sm.db)
 	if err != nil {
 		sm.cfg.Logger.Warn("Failed to load SRS lists for subscription node sync", "error", err)
 		return

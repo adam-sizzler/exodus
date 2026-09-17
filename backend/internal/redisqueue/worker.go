@@ -2,7 +2,6 @@ package redisqueue
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"exodus/internal/config"
+	"exodus/internal/db"
 	"exodus/internal/jobqueue"
 	"exodus/internal/logger"
 	"exodus/internal/streamexport"
@@ -30,7 +30,7 @@ const (
 
 type Worker struct {
 	client    *redis.Client
-	db        *sql.DB
+	db        db.DBTX
 	cfg       *config.BackendConfig
 	processor *jobqueue.Processor
 	delay     time.Duration
@@ -46,7 +46,7 @@ type recordUserUsagePayload struct {
 	RedisKey string `json:"redisKey"`
 }
 
-func NewWorker(cfg *config.BackendConfig, db *sql.DB) (*Worker, error) {
+func NewWorker(cfg *config.BackendConfig, dbConn db.DBTX) (*Worker, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
@@ -57,7 +57,7 @@ func NewWorker(cfg *config.BackendConfig, db *sql.DB) (*Worker, error) {
 
 	worker := &Worker{
 		client:   client,
-		db:       db,
+		db:       dbConn,
 		cfg:      cfg,
 		delay:    time.Duration(cfg.Redis.UserUsageHistoryDelaySeconds) * time.Second,
 		usageTTL: time.Duration(cfg.Redis.UserUsageHistoryTTLSeconds) * time.Second,
@@ -280,7 +280,7 @@ func (w *Worker) restoreProcessingKey(ctx context.Context, redisKey, processingK
 	return err
 }
 
-func bulkUpsertNodeUserUsageHistory(ctx context.Context, db *sql.DB, nodeID int64, entries []nodeUsageEntry) error {
+func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, entries []nodeUsageEntry) error {
 	if nodeID <= 0 || len(entries) == 0 {
 		return nil
 	}
@@ -321,7 +321,7 @@ func bulkUpsertNodeUserUsageHistory(ctx context.Context, db *sql.DB, nodeID int6
 			updated_at = EXCLUDED.updated_at
 	`)
 
-	_, err := db.ExecContext(ctx, query.String(), args...)
+	_, err := dbConn.Exec(ctx, query.String(), args...)
 	return err
 }
 

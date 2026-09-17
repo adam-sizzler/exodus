@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"database/sql"
 	"testing"
 	"time"
 )
@@ -28,7 +27,7 @@ func TestLatestNodeTrafficResetBoundary(t *testing.T) {
 			want:     time.Date(2026, time.May, 15, 1, 0, 0, 0, location),
 		},
 		{
-			name:     "day beyond short month falls back to last day",
+			name:     "day beyond short month falls back to last day (Feb non-leap year)",
 			now:      time.Date(2026, time.February, 28, 2, 0, 0, 0, location),
 			resetDay: 31,
 			want:     time.Date(2026, time.February, 28, 1, 0, 0, 0, location),
@@ -38,6 +37,36 @@ func TestLatestNodeTrafficResetBoundary(t *testing.T) {
 			now:      time.Date(2026, time.February, 28, 0, 30, 0, 0, location),
 			resetDay: 31,
 			want:     time.Date(2026, time.January, 31, 1, 0, 0, 0, location),
+		},
+		{
+			name:     "day 31 in 30-day month falls back to 30th (April)",
+			now:      time.Date(2026, time.May, 2, 12, 0, 0, 0, location),
+			resetDay: 31,
+			want:     time.Date(2026, time.April, 30, 1, 0, 0, 0, location),
+		},
+		{
+			name:     "day 29 in Feb leap year (2024)",
+			now:      time.Date(2024, time.February, 29, 2, 0, 0, 0, location),
+			resetDay: 29,
+			want:     time.Date(2024, time.February, 29, 1, 0, 0, 0, location),
+		},
+		{
+			name:     "day 30 in Feb leap year (2024) falls back to Feb 29",
+			now:      time.Date(2024, time.February, 29, 2, 0, 0, 0, location),
+			resetDay: 30,
+			want:     time.Date(2024, time.February, 29, 1, 0, 0, 0, location),
+		},
+		{
+			name:     "reset day clamping below 1 defaults to 1",
+			now:      time.Date(2026, time.June, 10, 2, 0, 0, 0, location),
+			resetDay: 0,
+			want:     time.Date(2026, time.June, 1, 1, 0, 0, 0, location),
+		},
+		{
+			name:     "reset day clamping above 31 clamps to 31",
+			now:      time.Date(2026, time.July, 31, 2, 0, 0, 0, location),
+			resetDay: 35,
+			want:     time.Date(2026, time.July, 31, 1, 0, 0, 0, location),
 		},
 	}
 
@@ -56,39 +85,37 @@ func TestNodeTrafficResetDue(t *testing.T) {
 	now := time.Date(2026, time.June, 3, 1, 30, 0, 0, location)
 	boundary := time.Date(2026, time.June, 1, 1, 0, 0, 0, location)
 
+	boundaryPlusHour := boundary.Add(time.Hour)
+
 	tests := []struct {
 		name        string
 		createdAt   time.Time
-		lastResetAt sql.NullTime
+		lastResetAt *time.Time
 		wantDue     bool
 	}{
 		{
-			name:      "due when no reset exists after boundary",
-			createdAt: time.Date(2026, time.May, 1, 0, 0, 0, 0, location),
-			wantDue:   true,
+			name:        "due when no reset exists after boundary",
+			createdAt:   time.Date(2026, time.May, 1, 0, 0, 0, 0, location),
+			lastResetAt: nil,
+			wantDue:     true,
 		},
 		{
-			name:      "not due when node was created after boundary",
-			createdAt: time.Date(2026, time.June, 2, 0, 0, 0, 0, location),
-			wantDue:   false,
+			name:        "not due when node was created after boundary",
+			createdAt:   time.Date(2026, time.June, 2, 0, 0, 0, 0, location),
+			lastResetAt: nil,
+			wantDue:     false,
 		},
 		{
-			name:      "not due when reset already happened at boundary",
-			createdAt: time.Date(2026, time.May, 1, 0, 0, 0, 0, location),
-			lastResetAt: sql.NullTime{
-				Time:  boundary,
-				Valid: true,
-			},
-			wantDue: false,
+			name:        "not due when reset already happened at boundary",
+			createdAt:   time.Date(2026, time.May, 1, 0, 0, 0, 0, location),
+			lastResetAt: &boundary,
+			wantDue:     false,
 		},
 		{
-			name:      "not due when reset already happened after boundary",
-			createdAt: time.Date(2026, time.May, 1, 0, 0, 0, 0, location),
-			lastResetAt: sql.NullTime{
-				Time:  boundary.Add(time.Hour),
-				Valid: true,
-			},
-			wantDue: false,
+			name:        "not due when reset already happened after boundary",
+			createdAt:   time.Date(2026, time.May, 1, 0, 0, 0, 0, location),
+			lastResetAt: &boundaryPlusHour,
+			wantDue:     false,
 		},
 	}
 

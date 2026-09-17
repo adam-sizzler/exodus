@@ -54,12 +54,12 @@ func NewAPIHandler(pools *db.Pools, cfg *config.BackendConfig) http.Handler {
 	// 1. Public routes (unprotected) with optional auth parsing
 	publicMux := http.NewServeMux()
 	RegisterPublicRoutes(publicMux, pools.Interactive, pools.Background, pools.PgxInteractive, cfg)
-	publicHandler := auth.WithOptionalPanelAuth(pools.Interactive, cfg, publicMux)
+	publicHandler := auth.WithOptionalPanelAuth(pools.PgxInteractive, cfg, publicMux)
 
 	// 2. Protected routes with strict Auth enforcement
 	protectedMux := http.NewServeMux()
 	RegisterProtectedRoutes(protectedMux, pools.Interactive, pools.Background, pools.PgxInteractive, cfg, routeCounter)
-	protectedHandler := auth.WithPanelAuth(pools.Interactive, cfg, protectedMux)
+	protectedHandler := auth.WithPanelAuth(pools.PgxInteractive, cfg, protectedMux)
 
 	// Mount protected routes under /api/ first, then fall back to public routes / mainMux
 	mainMux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,15 +125,15 @@ func RegisterPublicRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB *p
 		}
 		cfg.Logger.RoleService(logger.RoleAPI, "SshTerminalGateway").Info(fmt.Sprintf("ws mounted on %s", wsPath))
 	}
-	mux.HandleFunc("/api/auth/bootstrap", auth.AuthBootstrapHandler(db, cfg))
-	mux.HandleFunc("/api/auth/setup", auth.AuthSetupHandler(db, cfg))
-	mux.HandleFunc("/api/auth/status", auth.AuthStatusHandler(db, cfg))
-	mux.HandleFunc("/api/auth/register", auth.AuthRegisterCompatHandler(db, cfg))
-	mux.HandleFunc("/api/auth/login", auth.AuthLoginCompatHandler(db, cfg))
-	mux.HandleFunc("/api/auth/oauth2/authorize", auth.OAuth2AuthorizeHandler(db, cfg))
-	mux.HandleFunc("/api/auth/oauth2/callback", auth.OAuth2CallbackHandler(db, cfg))
-	mux.HandleFunc("/api/auth/passkey/authentication/options", passkeys.AuthenticationOptionsHandler(db, cfg))
-	mux.HandleFunc("/api/auth/passkey/authentication/verify", passkeys.VerifyAuthenticationHandler(db, cfg))
+	mux.HandleFunc("/api/auth/bootstrap", auth.AuthBootstrapHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/setup", auth.AuthSetupHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/status", auth.AuthStatusHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/register", auth.AuthRegisterCompatHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/login", auth.AuthLoginCompatHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/oauth2/authorize", auth.OAuth2AuthorizeHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/oauth2/callback", auth.OAuth2CallbackHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/passkey/authentication/options", passkeys.AuthenticationOptionsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/passkey/authentication/verify", passkeys.VerifyAuthenticationHandler(pgxDB, cfg))
 
 	// Backend Tools routes (Swagger, Scalar, Queue Viewer / Bull Board)
 	toolsMux := http.NewServeMux()
@@ -167,15 +167,15 @@ func RegisterPublicRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB *p
 }
 
 func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB *pgxpool.Pool, cfg *config.BackendConfig, routeCounter *system.RouteCounter) {
-	mux.HandleFunc("/api/auth/logout", auth.AuthLogoutHandler(db, cfg))
-	mux.HandleFunc("/api/auth/me", auth.AuthMeHandler(db, cfg))
+	mux.HandleFunc("/api/auth/logout", auth.AuthLogoutHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/auth/me", auth.AuthMeHandler(pgxDB, cfg))
 
-	mux.HandleFunc("/api/exodus-settings", auth.RequireAdminRole(panelsettings.ExodusSettingsHandler(db, cfg)))
-	mux.HandleFunc("/api/exodus-settings/", auth.RequireAdminRole(panelsettings.ExodusSettingsHandler(db, cfg)))
-	mux.HandleFunc("/api/tokens/scopes", auth.RequireAdminRole(panelsettings.PanelAPITokenScopesHandler(db, cfg)))
-	mux.HandleFunc("/api/tokens/ott", auth.RequireAdminRole(panelsettings.PanelAPITokensOttHandler(db, cfg)))
-	mux.HandleFunc("/api/tokens", auth.RequireAdminRole(panelsettings.PanelAPITokensHandler(db, cfg)))
-	mux.HandleFunc("/api/tokens/", auth.RequireAdminRole(panelsettings.PanelAPITokenByUUIDHandler(db, cfg)))
+	mux.HandleFunc("/api/exodus-settings", auth.RequireAdminRole(panelsettings.ExodusSettingsHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/exodus-settings/", auth.RequireAdminRole(panelsettings.ExodusSettingsHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/tokens/scopes", auth.RequireAdminRole(panelsettings.PanelAPITokenScopesHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/tokens/ott", auth.RequireAdminRole(panelsettings.PanelAPITokensOttHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/tokens", auth.RequireAdminRole(panelsettings.PanelAPITokensHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/tokens/", auth.RequireAdminRole(panelsettings.PanelAPITokenByUUIDHandler(pgxDB, cfg)))
 
 	mux.HandleFunc("/api/nodes", nodes.NodesHandler(db, cfg))
 	mux.HandleFunc("/api/nodes/", nodes.NodeByUUIDHandler(db, cfg))
@@ -188,7 +188,7 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/node-plugins/", nodeplugins.Handler(db, cfg))
 	mux.HandleFunc("/api/node-integrations", nodeintegrations.Handler(db, cfg))
 	mux.HandleFunc("/api/node-integrations/", nodeintegrations.Handler(db, cfg))
-	mux.HandleFunc("/api/connections/", connections.Handler(db, cfg))
+	mux.HandleFunc("/api/connections/", connections.Handler(pgxDB, cfg))
 	mux.HandleFunc("/api/node-ssh/", nodessh.NodeSSHDispatcherHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/node-ssh", nodessh.NodeSSHDispatcherHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/node-ssh/tickets/", nodessh.NodeSSHTicketHandler(pgxDB, cfg))
@@ -196,8 +196,8 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/node-ssh/vault/evaluate", nodessh.NodeSSHVaultEvaluateHandler(pgxDB, cfg))
 	// /api/node-ssh/ws is registered in the public mux (isPublicPath) — no duplicate here (#12)
 
-	mux.HandleFunc("/api/metadata/user/", auth.RequireAdminRole(metadata.UserHandler(db, cfg)))
-	mux.HandleFunc("/api/metadata/node/", auth.RequireAdminRole(metadata.NodeHandler(db, cfg)))
+	mux.HandleFunc("/api/metadata/user/", auth.RequireAdminRole(metadata.UserHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/metadata/node/", auth.RequireAdminRole(metadata.NodeHandler(pgxDB, cfg)))
 
 	mux.HandleFunc("/api/subscription-connections", subscriptionconnections.NodesHandler(db, cfg))
 	mux.HandleFunc("/api/subscription-connections/", subscriptionconnections.NodeByUUIDHandler(db, cfg))
@@ -217,18 +217,18 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/users/bulk/", users.UsersBulkHandler(db, cfg))
 	mux.HandleFunc("/api/users/tags", users.UsersTagsHandler(db, cfg))
 
-	mux.HandleFunc("/api/keygen", keygen.KeygenHandler(db, cfg))
-	mux.HandleFunc("/api/keygen/", keygen.KeygenHandler(db, cfg))
+	mux.HandleFunc("/api/keygen", keygen.KeygenHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/keygen/", keygen.KeygenHandler(pgxDB, cfg))
 
-	mux.HandleFunc("/api/passkeys/registration/options", auth.RequireAdminRole(passkeys.RegistrationOptionsHandler(db, cfg)))
-	mux.HandleFunc("/api/passkeys/registration/verify", auth.RequireAdminRole(passkeys.VerifyRegistrationHandler(db, cfg)))
-	mux.HandleFunc("/api/passkeys", auth.RequireAdminRole(passkeys.PasskeysHandler(db, cfg)))
-	mux.HandleFunc("/api/passkeys/", auth.RequireAdminRole(passkeys.PasskeysHandler(db, cfg)))
+	mux.HandleFunc("/api/passkeys/registration/options", auth.RequireAdminRole(passkeys.RegistrationOptionsHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/passkeys/registration/verify", auth.RequireAdminRole(passkeys.VerifyRegistrationHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/passkeys", auth.RequireAdminRole(passkeys.PasskeysHandler(pgxDB, cfg)))
+	mux.HandleFunc("/api/passkeys/", auth.RequireAdminRole(passkeys.PasskeysHandler(pgxDB, cfg)))
 
-	mux.HandleFunc("/api/bandwidth-stats/nodes", bandwidthstats.NodesHandler(db, cfg))
-	mux.HandleFunc("/api/bandwidth-stats/nodes/", bandwidthstats.NodesHandler(db, cfg))
-	mux.HandleFunc("/api/bandwidth-stats/users", bandwidthstats.UsersHandler(db, cfg))
-	mux.HandleFunc("/api/bandwidth-stats/users/", bandwidthstats.UsersHandler(db, cfg))
+	mux.HandleFunc("/api/bandwidth-stats/nodes", bandwidthstats.NodesHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/bandwidth-stats/nodes/", bandwidthstats.NodesHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/bandwidth-stats/users", bandwidthstats.UsersHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/bandwidth-stats/users/", bandwidthstats.UsersHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/bandwidth-stats/internal-squads/", squads.BandwidthStatsInternalSquadsHandler(db, cfg))
 
 	mux.HandleFunc("/api/config-profiles/tags", configprofiles.ConfigProfilesTagsHandler(db, cfg))
@@ -255,22 +255,22 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/srs-lists/actions/", srslists.SRSListsActionsHandler(db, cfg))
 	mux.HandleFunc("/api/srs-lists/bulk/", srslists.SRSListsBulkHandler(db, cfg))
 
-	mux.HandleFunc("/api/hwid/devices/delete-all", hwiduserdevices.HWIDCompatDeleteAllUserDevicesHandler(db, cfg))
-	mux.HandleFunc("/api/hwid/devices/delete", hwiduserdevices.HWIDCompatDevicesHandler(db, cfg))
-	mux.HandleFunc("/api/hwid/devices", hwiduserdevices.HWIDCompatDevicesHandler(db, cfg))
-	mux.HandleFunc("/api/hwid/devices/", hwiduserdevices.HWIDCompatDevicesHandler(db, cfg))
-	mux.HandleFunc("/api/hwid/devices/stats", hwiduserdevices.HWIDCompatStatsHandler(db, cfg))
-	mux.HandleFunc("/api/hwid/devices/top-users", hwiduserdevices.HWIDCompatTopUsersHandler(db, cfg))
+	mux.HandleFunc("/api/hwid/devices/delete-all", hwiduserdevices.HWIDCompatDeleteAllUserDevicesHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/hwid/devices/delete", hwiduserdevices.HWIDCompatDevicesHandler(pgxDB, db, cfg))
+	mux.HandleFunc("/api/hwid/devices", hwiduserdevices.HWIDCompatDevicesHandler(pgxDB, db, cfg))
+	mux.HandleFunc("/api/hwid/devices/", hwiduserdevices.HWIDCompatDevicesHandler(pgxDB, db, cfg))
+	mux.HandleFunc("/api/hwid/devices/stats", hwiduserdevices.HWIDCompatStatsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/hwid/devices/top-users", hwiduserdevices.HWIDCompatTopUsersHandler(pgxDB, cfg))
 
 	mux.HandleFunc("/api/subscription-settings", subscriptionsettings.SubscriptionSettingsHandler(db, cfg))
 	mux.HandleFunc("/api/subscription-settings/", subscriptionsettings.SubscriptionSettingsHandler(db, cfg))
 
-	mux.HandleFunc("/api/infra-billing/providers", infrabilling.ProvidersHandler(db, cfg))
-	mux.HandleFunc("/api/infra-billing/providers/", infrabilling.ProvidersHandler(db, cfg))
-	mux.HandleFunc("/api/infra-billing/nodes", infrabilling.BillingNodesHandler(db, cfg))
-	mux.HandleFunc("/api/infra-billing/nodes/", infrabilling.BillingNodesHandler(db, cfg))
-	mux.HandleFunc("/api/infra-billing/history", infrabilling.BillingHistoryHandler(db, cfg))
-	mux.HandleFunc("/api/infra-billing/history/", infrabilling.BillingHistoryHandler(db, cfg))
+	mux.HandleFunc("/api/infra-billing/providers", infrabilling.ProvidersHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/infra-billing/providers/", infrabilling.ProvidersHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/infra-billing/nodes", infrabilling.BillingNodesHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/infra-billing/nodes/", infrabilling.BillingNodesHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/infra-billing/history", infrabilling.BillingHistoryHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/infra-billing/history/", infrabilling.BillingHistoryHandler(pgxDB, cfg))
 
 	mux.HandleFunc("/api/subscription-templates/tags", subscriptiontemplate.SubscriptionTemplateTagsHandler(db, cfg))
 	mux.HandleFunc("/api/subscription-templates", subscriptiontemplate.SubscriptionTemplatesHandler(db, cfg))

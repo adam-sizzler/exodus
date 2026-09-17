@@ -1,12 +1,14 @@
 package metadata
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -33,7 +35,7 @@ type metadataRequest struct {
 // @Failure      500     {object}  shared.ErrorResponse
 // @Router       /metadata/user/{userId} [get]
 // @Router       /metadata/user/{userId} [put]
-func UserHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func UserHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return entityHandler(db, cfg, "user")
 }
 
@@ -52,11 +54,11 @@ func UserHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /metadata/node/{uuid} [get]
 // @Router       /metadata/node/{uuid} [put]
-func NodeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodeHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return entityHandler(db, cfg, "node")
 }
 
-func entityHandler(db *sql.DB, cfg *config.BackendConfig, entity string) http.HandlerFunc {
+func entityHandler(db *pgxpool.Pool, cfg *config.BackendConfig, entity string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pathParam := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/metadata/"+entity+"/"), "/")
 		if entity == "node" {
@@ -90,7 +92,7 @@ func entityHandler(db *sql.DB, cfg *config.BackendConfig, entity string) http.Ha
 			}
 			metadata, err := upsertMetadata(r, db, entity, pathParam, req.Metadata)
 			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
+				if errors.Is(err, pgx.ErrNoRows) {
 					if entity == "node" {
 						shared.SendAPIError(w, shared.ErrNodeNotFound, cfg)
 					} else {
@@ -108,18 +110,18 @@ func entityHandler(db *sql.DB, cfg *config.BackendConfig, entity string) http.Ha
 	}
 }
 
-func getMetadata(r *http.Request, db *sql.DB, entity, pathParam string) (map[string]any, error) {
+func getMetadata(r *http.Request, db *pgxpool.Pool, entity, pathParam string) (map[string]any, error) {
 	metadata := map[string]any{}
 	table, column, id, err := metadataTargetID(r, db, entity, pathParam)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return metadata, nil
 		}
 		return nil, err
 	}
 	var raw string
-	err = db.QueryRowContext(r.Context(), "SELECT metadata::text FROM "+table+" WHERE "+column+" = $1", id).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
+	err = db.QueryRow(r.Context(), "SELECT metadata::text FROM "+table+" WHERE "+column+" = $1", id).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return metadata, nil
 	}
 	if err != nil {
@@ -131,7 +133,7 @@ func getMetadata(r *http.Request, db *sql.DB, entity, pathParam string) (map[str
 	return metadata, nil
 }
 
-func upsertMetadata(r *http.Request, db *sql.DB, entity, pathParam string, metadata map[string]any) (map[string]any, error) {
+func upsertMetadata(r *http.Request, db *pgxpool.Pool, entity, pathParam string, metadata map[string]any) (map[string]any, error) {
 	raw, err := json.Marshal(metadata)
 	if err != nil {
 		return nil, err
@@ -140,7 +142,7 @@ func upsertMetadata(r *http.Request, db *sql.DB, entity, pathParam string, metad
 	if err != nil {
 		return nil, err
 	}
-	_, err = db.ExecContext(r.Context(), `
+	_, err = db.Exec(r.Context(), `
 		INSERT INTO `+table+` (`+column+`, metadata)
 		VALUES ($1, $2::jsonb)
 		ON CONFLICT (`+column+`) DO UPDATE
@@ -159,10 +161,10 @@ func metadataTable(entity string) (table string, column string) {
 	return "user_meta", "user_id"
 }
 
-func metadataTargetID(r *http.Request, db *sql.DB, entity, pathParam string) (table string, column string, id int64, err error) {
+func metadataTargetID(r *http.Request, db *pgxpool.Pool, entity, pathParam string) (table string, column string, id int64, err error) {
 	table, column = metadataTable(entity)
 	if entity == "node" {
-		err = db.QueryRowContext(r.Context(), `SELECT id FROM nodes WHERE uuid = $1`, pathParam).Scan(&id)
+		err = db.QueryRow(r.Context(), `SELECT id FROM nodes WHERE uuid = $1`, pathParam).Scan(&id)
 		return table, column, id, err
 	}
 	id, err = strconv.ParseInt(pathParam, 10, 64)

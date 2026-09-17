@@ -1,8 +1,7 @@
 package auth
 
 import (
-	"database/sql"
-	"encoding/json"
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"exodus/internal/config"
 	"exodus/internal/httpapi/middleware"
 	"exodus/internal/security"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -27,7 +28,7 @@ type cachedTokenPrincipal struct {
 
 const tokenCacheTTL = 15 * time.Second
 
-func resolveToken(token string, db *sql.DB, cfg *config.BackendConfig) (*AuthPrincipal, error) {
+func resolveToken(ctx context.Context, token string, db *pgxpool.Pool, cfg *config.BackendConfig) (*AuthPrincipal, error) {
 	if token == "" {
 		return nil, errors.New("empty token")
 	}
@@ -43,12 +44,12 @@ func resolveToken(token string, db *sql.DB, cfg *config.BackendConfig) (*AuthPri
 	var principal *AuthPrincipal
 	var err error
 
-	if principal, err = resolveAdminJWT(token, db, cfg); err == nil && principal != nil {
+	if principal, err = resolveAdminJWT(ctx, token, db, cfg); err == nil && principal != nil {
 		cacheResolvedPrincipal(token, principal)
 		return principal, nil
 	}
 
-	if principal, err = resolveAPIJWT(token, db, cfg); err == nil && principal != nil {
+	if principal, err = resolveAPIJWT(ctx, token, db, cfg); err == nil && principal != nil {
 		cacheResolvedPrincipal(token, principal)
 		return principal, nil
 	}
@@ -82,7 +83,7 @@ func cacheResolvedPrincipal(token string, principal *AuthPrincipal) {
 	})
 }
 
-func resolveAdminJWT(token string, db *sql.DB, cfg *config.BackendConfig) (*AuthPrincipal, error) {
+func resolveAdminJWT(ctx context.Context, token string, db *pgxpool.Pool, cfg *config.BackendConfig) (*AuthPrincipal, error) {
 	payload, err := security.ParseJWT(cfg.JWT.AuthSecret, token)
 	if err != nil {
 		return nil, err
@@ -95,7 +96,7 @@ func resolveAdminJWT(token string, db *sql.DB, cfg *config.BackendConfig) (*Auth
 	}
 
 	username := strings.TrimSpace(*payload.Username)
-	row := db.QueryRow(`
+	row := db.QueryRow(ctx, `
 		SELECT uuid, username, role
 		FROM admin
 		WHERE username = $1 AND UPPER(role) = 'ADMIN'
@@ -124,7 +125,7 @@ func resolveAdminJWT(token string, db *sql.DB, cfg *config.BackendConfig) (*Auth
 	}, nil
 }
 
-func resolveAPIJWT(token string, db *sql.DB, cfg *config.BackendConfig) (*AuthPrincipal, error) {
+func resolveAPIJWT(ctx context.Context, token string, db *pgxpool.Pool, cfg *config.BackendConfig) (*AuthPrincipal, error) {
 	payload, err := security.ParseJWT(cfg.JWT.AuthSecret, token)
 	if err != nil {
 		return nil, err
@@ -133,8 +134,8 @@ func resolveAPIJWT(token string, db *sql.DB, cfg *config.BackendConfig) (*AuthPr
 		return nil, errors.New("jwt role is not api")
 	}
 
-	row := db.QueryRow(`
-		SELECT uuid, name, expire_at, array_to_json(COALESCE(scopes, ARRAY['*']::text[]))::text AS scopes
+	row := db.QueryRow(ctx, `
+		SELECT uuid, name, expire_at, COALESCE(scopes, ARRAY['*']::text[])
 		FROM api_tokens
 		WHERE uuid = $1
 		LIMIT 1
@@ -142,8 +143,8 @@ func resolveAPIJWT(token string, db *sql.DB, cfg *config.BackendConfig) (*AuthPr
 
 	var tokenUUID, tokenName string
 	var tokenExpireAt time.Time
-	var scopesRaw string
-	if scanErr := row.Scan(&tokenUUID, &tokenName, &tokenExpireAt, &scopesRaw); scanErr != nil {
+	var scopes []string
+	if scanErr := row.Scan(&tokenUUID, &tokenName, &tokenExpireAt, &scopes); scanErr != nil {
 		return nil, scanErr
 	}
 	if time.Now().After(tokenExpireAt) {
@@ -161,16 +162,8 @@ func resolveAPIJWT(token string, db *sql.DB, cfg *config.BackendConfig) (*AuthPr
 		Role:      "API",
 		TokenType: "jwt_api_token",
 		ExpiresAt: expiresAt,
-		Scopes:    parseAPITokenPrincipalScopes(scopesRaw),
+		Scopes:    normalizeAPITokenPrincipalScopes(scopes),
 	}, nil
-}
-
-func parseAPITokenPrincipalScopes(raw string) []string {
-	var scopes []string
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &scopes); err != nil {
-		return []string{"*"}
-	}
-	return normalizeAPITokenPrincipalScopes(scopes)
 }
 
 func createAdminAccessToken(cfg *config.BackendConfig, username, adminUUID, role string) (string, int64, error) {

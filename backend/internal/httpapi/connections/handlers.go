@@ -2,12 +2,13 @@ package connections
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -45,7 +46,7 @@ var (
 	jobs   = make(map[string]*GeocheckJob)
 )
 
-func Handler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func Handler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/connections")
 		path = strings.Trim(path, "/")

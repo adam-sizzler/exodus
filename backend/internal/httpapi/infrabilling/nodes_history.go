@@ -1,12 +1,13 @@
 package infrabilling
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -93,7 +94,7 @@ type createBillingHistoryRequest struct {
 // @Router       /infra-billing/nodes [post]
 // @Router       /infra-billing/nodes [patch]
 // @Router       /infra-billing/nodes/{uuid} [delete]
-func BillingNodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func BillingNodesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -128,7 +129,7 @@ func BillingNodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 // @Router       /infra-billing/history [get]
 // @Router       /infra-billing/history [post]
 // @Router       /infra-billing/history/{uuid} [delete]
-func BillingHistoryHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func BillingHistoryHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -144,7 +145,7 @@ func BillingHistoryHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFu
 	}
 }
 
-func handleCreateBillingNode(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreateBillingNode(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req createBillingNodeRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		shared.WriteJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -171,7 +172,7 @@ func handleCreateBillingNode(w http.ResponseWriter, r *http.Request, db *sql.DB,
 		nameArg = &trimmed
 	}
 
-	_, err := db.ExecContext(r.Context(), `
+	_, err := db.Exec(r.Context(), `
 		INSERT INTO infra_billing_nodes (node_uuid, provider_uuid, name, next_billing_at)
 		VALUES ($1, $2, $3, $4)
 	`, req.NodeUUID, req.ProviderUUID, nameArg, nextBillingAt)
@@ -183,7 +184,7 @@ func handleCreateBillingNode(w http.ResponseWriter, r *http.Request, db *sql.DB,
 	writeBillingNodesResponse(w, r, db, cfg, http.StatusCreated)
 }
 
-func handleUpdateBillingNodes(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleUpdateBillingNodes(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req updateBillingNodeRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		shared.WriteJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -204,7 +205,7 @@ func handleUpdateBillingNodes(w http.ResponseWriter, r *http.Request, db *sql.DB
 		if nodeUUID == "" {
 			continue
 		}
-		if _, execErr := db.ExecContext(r.Context(), `
+		if _, execErr := db.Exec(r.Context(), `
 			UPDATE infra_billing_nodes
 			SET next_billing_at = $1, updated_at = now()
 			WHERE uuid = $2
@@ -217,13 +218,13 @@ func handleUpdateBillingNodes(w http.ResponseWriter, r *http.Request, db *sql.DB
 	writeBillingNodesResponse(w, r, db, cfg, http.StatusOK)
 }
 
-func handleDeleteBillingNode(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleDeleteBillingNode(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	nodeUUID := uuidFromPath(r.URL.Path, "/api/infra-billing/nodes")
 	if nodeUUID == "" {
 		shared.WriteJSONError(w, http.StatusBadRequest, "uuid is required")
 		return
 	}
-	if _, err := db.ExecContext(r.Context(), `DELETE FROM infra_billing_nodes WHERE uuid = $1`, nodeUUID); err != nil {
+	if _, err := db.Exec(r.Context(), `DELETE FROM infra_billing_nodes WHERE uuid = $1`, nodeUUID); err != nil {
 		shared.SendAPIError(w, shared.ErrDeleteInfraBillingNodeFailed.WithCause(err), cfg)
 		return
 	}
@@ -231,7 +232,7 @@ func handleDeleteBillingNode(w http.ResponseWriter, r *http.Request, db *sql.DB,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleCreateBillingHistory(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreateBillingHistory(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req createBillingHistoryRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		shared.WriteJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -251,7 +252,7 @@ func handleCreateBillingHistory(w http.ResponseWriter, r *http.Request, db *sql.
 		return
 	}
 
-	_, err = db.ExecContext(r.Context(), `
+	_, err = db.Exec(r.Context(), `
 		INSERT INTO infra_billing_history (provider_uuid, amount, billed_at)
 		VALUES ($1, $2, $3)
 	`, req.ProviderUUID, req.Amount, billedAt)
@@ -263,13 +264,13 @@ func handleCreateBillingHistory(w http.ResponseWriter, r *http.Request, db *sql.
 	writeBillingHistoryResponse(w, r, db, cfg, http.StatusCreated, 0, 50)
 }
 
-func handleDeleteBillingHistory(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleDeleteBillingHistory(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	historyUUID := uuidFromPath(r.URL.Path, "/api/infra-billing/history")
 	if historyUUID == "" {
 		shared.WriteJSONError(w, http.StatusBadRequest, "uuid is required")
 		return
 	}
-	if _, err := db.ExecContext(r.Context(), `DELETE FROM infra_billing_history WHERE uuid = $1`, historyUUID); err != nil {
+	if _, err := db.Exec(r.Context(), `DELETE FROM infra_billing_history WHERE uuid = $1`, historyUUID); err != nil {
 		shared.SendAPIError(w, shared.ErrDeleteInfraBillingHistoryRecordFailed.WithCause(err), cfg)
 		return
 	}
@@ -277,7 +278,7 @@ func handleDeleteBillingHistory(w http.ResponseWriter, r *http.Request, db *sql.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func writeBillingNodesResponse(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, status int) {
+func writeBillingNodesResponse(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, status int) {
 	response, err := getBillingNodesResponse(r, db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetBillingNodesFailed.WithCause(err), cfg)
@@ -286,7 +287,7 @@ func writeBillingNodesResponse(w http.ResponseWriter, r *http.Request, db *sql.D
 	shared.WriteJSON(w, status, map[string]any{"response": response})
 }
 
-func writeBillingHistoryResponse(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, status int, start, size int) {
+func writeBillingHistoryResponse(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, status int, start, size int) {
 	response, err := getBillingHistoryResponse(r, db, start, size)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetInfraBillingHistoryRecordsFailed.WithCause(err), cfg)
@@ -295,14 +296,14 @@ func writeBillingHistoryResponse(w http.ResponseWriter, r *http.Request, db *sql
 	shared.WriteJSON(w, status, map[string]any{"response": response})
 }
 
-func getBillingNodesResponse(r *http.Request, db *sql.DB) (map[string]any, error) {
+func getBillingNodesResponse(r *http.Request, db *pgxpool.Pool) (map[string]any, error) {
 	billingNodes := make([]billingNodeRecord, 0)
 	availableNodes := make([]availableNodeRecord, 0)
 	upcomingCount := 0
 	currentMonthPayments := float64(0)
 	totalSpent := float64(0)
 
-	rows, err := db.QueryContext(r.Context(), `
+	rows, err := db.Query(r.Context(), `
 		SELECT
 			ibn.uuid, ibn.node_uuid, ibn.provider_uuid, ibn.next_billing_at, ibn.created_at, ibn.updated_at,
 			ip.uuid, ip.name, ip.login_url, ip.favicon_link,
@@ -333,7 +334,7 @@ func getBillingNodesResponse(r *http.Request, db *sql.DB) (map[string]any, error
 		return nil, err
 	}
 
-	availRows, err := db.QueryContext(r.Context(), `
+	availRows, err := db.Query(r.Context(), `
 		SELECT n.uuid, n.name, n.country_code
 		FROM nodes n
 		LEFT JOIN infra_billing_nodes ibn ON ibn.node_uuid = n.uuid
@@ -356,20 +357,20 @@ func getBillingNodesResponse(r *http.Request, db *sql.DB) (map[string]any, error
 		return nil, err
 	}
 
-	if scanErr := db.QueryRowContext(r.Context(), `
+	if scanErr := db.QueryRow(r.Context(), `
 		SELECT COUNT(*) FROM infra_billing_nodes
 		WHERE next_billing_at <= (NOW() + INTERVAL '7 days')
 	`).Scan(&upcomingCount); scanErr != nil {
 		return nil, scanErr
 	}
-	if scanErr := db.QueryRowContext(r.Context(), `
+	if scanErr := db.QueryRow(r.Context(), `
 		SELECT COALESCE(SUM(amount), 0)
 		FROM infra_billing_history
 		WHERE billed_at >= date_trunc('month', NOW())
 	`).Scan(&currentMonthPayments); scanErr != nil {
 		return nil, scanErr
 	}
-	if scanErr := db.QueryRowContext(r.Context(), `
+	if scanErr := db.QueryRow(r.Context(), `
 		SELECT COALESCE(SUM(amount), 0)
 		FROM infra_billing_history
 	`).Scan(&totalSpent); scanErr != nil {
@@ -389,13 +390,13 @@ func getBillingNodesResponse(r *http.Request, db *sql.DB) (map[string]any, error
 	}, nil
 }
 
-func getBillingHistoryResponse(r *http.Request, db *sql.DB, start, size int) (map[string]any, error) {
+func getBillingHistoryResponse(r *http.Request, db *pgxpool.Pool, start, size int) (map[string]any, error) {
 	var total int
-	if scanErr := db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM infra_billing_history`).Scan(&total); scanErr != nil {
+	if scanErr := db.QueryRow(r.Context(), `SELECT COUNT(*) FROM infra_billing_history`).Scan(&total); scanErr != nil {
 		return nil, scanErr
 	}
 
-	rows, err := db.QueryContext(r.Context(), `
+	rows, err := db.Query(r.Context(), `
 		SELECT
 			ibh.uuid, ibh.provider_uuid, ibh.amount, ibh.billed_at,
 			ip.uuid, ip.name, ip.favicon_link

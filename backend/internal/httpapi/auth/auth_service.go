@@ -1,65 +1,68 @@
 package auth
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 
 	"exodus/internal/config"
 	"exodus/internal/panelsettings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func getBootstrapData(db *sql.DB) (brandingSettings map[string]any, passwordSettings map[string]any, defaultUsername string, hasAdmin bool, err error) {
+func getBootstrapData(ctx context.Context, db *pgxpool.Pool) (brandingSettings map[string]any, passwordSettings map[string]any, defaultUsername string, hasAdmin bool, err error) {
 	brandingSettings = panelsettings.DefaultBrandingSettings()
 	passwordSettings = panelsettings.DefaultPasswordSettings()
 	defaultUsername = "admin"
 	hasAdmin = false
 
-	row := db.QueryRow(`
+	row := db.QueryRow(ctx, `
 		SELECT branding_settings, password_settings
 		FROM exodus_settings
 		WHERE id = 1
 		LIMIT 1
 	`)
 
-	var brandingRaw, passwordRaw sql.NullString
-	if scanErr := row.Scan(&brandingRaw, &passwordRaw); scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+	var brandingRaw, passwordRaw *string
+	if scanErr := row.Scan(&brandingRaw, &passwordRaw); scanErr != nil && !errors.Is(scanErr, pgx.ErrNoRows) {
 		return brandingSettings, passwordSettings, defaultUsername, hasAdmin, scanErr
 	}
 
-	if brandingRaw.Valid && strings.TrimSpace(brandingRaw.String) != "" {
+	if brandingRaw != nil && strings.TrimSpace(*brandingRaw) != "" {
 		var tmp map[string]any
-		if json.Unmarshal([]byte(brandingRaw.String), &tmp) == nil && len(tmp) > 0 {
+		if json.Unmarshal([]byte(*brandingRaw), &tmp) == nil && len(tmp) > 0 {
 			brandingSettings = tmp
 		}
 	}
-	if passwordRaw.Valid && strings.TrimSpace(passwordRaw.String) != "" {
+	if passwordRaw != nil && strings.TrimSpace(*passwordRaw) != "" {
 		var tmp map[string]any
-		if json.Unmarshal([]byte(passwordRaw.String), &tmp) == nil && len(tmp) > 0 {
+		if json.Unmarshal([]byte(*passwordRaw), &tmp) == nil && len(tmp) > 0 {
 			passwordSettings = tmp
 		}
 	}
 
 	var adminCount int
-	if countErr := db.QueryRow("SELECT COUNT(*) FROM admin").Scan(&adminCount); countErr != nil {
+	if countErr := db.QueryRow(ctx, "SELECT COUNT(*) FROM admin").Scan(&adminCount); countErr != nil {
 		return brandingSettings, passwordSettings, defaultUsername, hasAdmin, countErr
 	}
 	hasAdmin = adminCount > 0
 
 	if hasAdmin {
-		var firstUsername sql.NullString
-		if firstErr := db.QueryRow("SELECT username FROM admin ORDER BY created_at ASC LIMIT 1").Scan(&firstUsername); firstErr != nil && !errors.Is(firstErr, sql.ErrNoRows) {
+		var firstUsername *string
+		if firstErr := db.QueryRow(ctx, "SELECT username FROM admin ORDER BY created_at ASC LIMIT 1").Scan(&firstUsername); firstErr != nil && !errors.Is(firstErr, pgx.ErrNoRows) {
 			return brandingSettings, passwordSettings, defaultUsername, hasAdmin, firstErr
 		}
-		if firstUsername.Valid && strings.TrimSpace(firstUsername.String) != "" {
-			defaultUsername = firstUsername.String
+		if firstUsername != nil && strings.TrimSpace(*firstUsername) != "" {
+			defaultUsername = *firstUsername
 		}
 	}
 	return brandingSettings, passwordSettings, defaultUsername, hasAdmin, nil
 }
 
-func getAuthMethodsStatus(db *sql.DB) (passkeyEnabled bool, oauth2Providers map[string]bool) {
+func getAuthMethodsStatus(ctx context.Context, db *pgxpool.Pool) (passkeyEnabled bool, oauth2Providers map[string]bool) {
 	passkeyEnabled = false
 	oauth2Providers = map[string]bool{
 		"github":   false,
@@ -70,30 +73,30 @@ func getAuthMethodsStatus(db *sql.DB) (passkeyEnabled bool, oauth2Providers map[
 		"telegram": false,
 	}
 
-	row := db.QueryRow(`
+	row := db.QueryRow(ctx, `
 		SELECT passkey_settings, oauth2_settings
 		FROM exodus_settings
 		WHERE id = 1
 		LIMIT 1
 	`)
 
-	var passkeyRaw, oauth2Raw sql.NullString
+	var passkeyRaw, oauth2Raw *string
 	if err := row.Scan(&passkeyRaw, &oauth2Raw); err != nil {
 		return passkeyEnabled, oauth2Providers
 	}
 
-	if passkeyRaw.Valid && strings.TrimSpace(passkeyRaw.String) != "" {
+	if passkeyRaw != nil && strings.TrimSpace(*passkeyRaw) != "" {
 		var passkeyObj map[string]any
-		if json.Unmarshal([]byte(passkeyRaw.String), &passkeyObj) == nil {
+		if json.Unmarshal([]byte(*passkeyRaw), &passkeyObj) == nil {
 			if enabled, ok := passkeyObj["enabled"].(bool); ok {
 				passkeyEnabled = enabled
 			}
 		}
 	}
 
-	if oauth2Raw.Valid && strings.TrimSpace(oauth2Raw.String) != "" {
+	if oauth2Raw != nil && strings.TrimSpace(*oauth2Raw) != "" {
 		var oauthObj map[string]map[string]any
-		if json.Unmarshal([]byte(oauth2Raw.String), &oauthObj) == nil {
+		if json.Unmarshal([]byte(*oauth2Raw), &oauthObj) == nil {
 			for provider := range oauth2Providers {
 				if providerCfg, ok := oauthObj[provider]; ok {
 					if enabled, ok := providerCfg["enabled"].(bool); ok {

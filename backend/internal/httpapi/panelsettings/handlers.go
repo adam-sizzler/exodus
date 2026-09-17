@@ -1,13 +1,15 @@
 package panelsettings
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -18,7 +20,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func PanelSettingsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func PanelSettingsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -91,7 +93,7 @@ func PanelSettingsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFun
 				}
 			}
 
-			if _, execErr := db.ExecContext(r.Context(), `
+			if _, execErr := db.Exec(r.Context(), `
 				INSERT INTO exodus_settings (
 					id, passkey_settings, oauth2_settings, password_settings, branding_settings
 				) VALUES (
@@ -110,7 +112,7 @@ func PanelSettingsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFun
 			}
 
 			query := "UPDATE exodus_settings SET " + strings.Join(setClauses, ", ") + " WHERE id = 1"
-			if _, execErr := db.ExecContext(r.Context(), query, args...); execErr != nil {
+			if _, execErr := db.Exec(r.Context(), query, args...); execErr != nil {
 				cfg.Logger.Error("Failed to update panel settings", "error", execErr)
 				shared.SendAPIError(w, shared.ErrUpdatePanelSettingsFailed.WithCause(execErr), cfg)
 				return
@@ -143,7 +145,7 @@ func PanelSettingsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFun
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /tokens [get]
 // @Router       /tokens [post]
-func PanelAPITokensHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func PanelAPITokensHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -205,10 +207,10 @@ func PanelAPITokensHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFu
 				Scopes:   scopes,
 			}
 
-			if _, execErr := db.ExecContext(r.Context(), `
+			if _, execErr := db.Exec(r.Context(), `
 				INSERT INTO api_tokens (uuid, name, expire_at, scopes)
-				VALUES ($1, $2, $3, $4::text[])
-			`, record.UUID, record.Name, record.ExpireAt, postgresTextArrayLiteral(record.Scopes)); execErr != nil {
+				VALUES ($1, $2, $3, $4)
+			`, record.UUID, record.Name, record.ExpireAt, record.Scopes); execErr != nil {
 				cfg.Logger.Error("Failed to insert api token", "error", execErr)
 				shared.SendAPIError(w, shared.ErrCreateApiTokenFailed.WithCause(execErr), cfg)
 				return
@@ -244,7 +246,7 @@ func PanelAPITokensHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFu
 // @Security     BearerAuth
 // @Success      200  {object}  map[string]any
 // @Router       /tokens/scopes [get]
-func PanelAPITokenScopesHandler(_ *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func PanelAPITokenScopesHandler(_ *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -268,7 +270,7 @@ func PanelAPITokenScopesHandler(_ *sql.DB, cfg *config.BackendConfig) http.Handl
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /tokens/ott [post]
-func PanelAPITokensOttHandler(_ *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func PanelAPITokensOttHandler(_ *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -302,7 +304,7 @@ func PanelAPITokensOttHandler(_ *sql.DB, cfg *config.BackendConfig) http.Handler
 // @Failure      404  {object}  shared.ErrorResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /tokens/{uuid} [delete]
-func PanelAPITokenByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func PanelAPITokenByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenUUID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/tokens/"))
 		if tokenUUID == "" {
@@ -327,14 +329,14 @@ func PanelAPITokenByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.Hand
 		var (
 			tokenName string
 			expireAt  time.Time
-			scopesRaw string
+			scopes    []string
 		)
-		err := db.QueryRowContext(r.Context(), `
+		err := db.QueryRow(r.Context(), `
 			DELETE FROM api_tokens WHERE uuid = $1
-			RETURNING name, expire_at, array_to_json(COALESCE(scopes, ARRAY['*']::text[]))::text
-		`, tokenUUID).Scan(&tokenName, &expireAt, &scopesRaw)
+			RETURNING name, expire_at, COALESCE(scopes, ARRAY['*']::text[])
+		`, tokenUUID).Scan(&tokenName, &expireAt, &scopes)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				shared.SendAPIError(w, shared.ErrAPITokenNotFound, cfg)
 				return
 			}
@@ -351,7 +353,7 @@ func PanelAPITokenByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.Hand
 					"name":     tokenName,
 					"uuid":     tokenUUID,
 					"expireAt": expireAt.UTC().Format(time.RFC3339),
-					"scopes":   parseAPITokenScopes(scopesRaw),
+					"scopes":   scopes,
 				},
 			},
 		})
@@ -373,7 +375,7 @@ func PanelAPITokenByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.Hand
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /exodus-settings [get]
 // @Router       /exodus-settings [patch]
-func ExodusSettingsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ExodusSettingsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

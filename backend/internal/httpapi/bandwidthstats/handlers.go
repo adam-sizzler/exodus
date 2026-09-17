@@ -1,11 +1,14 @@
 package bandwidthstats
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -29,7 +32,7 @@ import (
 // @Router       /bandwidth-stats/nodes/{nodeUuid}/users [get]
 // @Router       /bandwidth-stats/nodes/usage [post]
 // @Router       /bandwidth-stats/nodes/users [post]
-func NodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/bandwidth-stats/nodes")
 		path = strings.Trim(path, "/")
@@ -89,7 +92,7 @@ func NodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      404            {object}  shared.ErrorResponse
 // @Failure      500            {object}  shared.ErrorResponse
 // @Router       /bandwidth-stats/users/{userId} [get]
-func UsersHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func UsersHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -114,8 +117,8 @@ func UsersHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	}
 }
 
-func handleGetNodesRealtimeUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
-	rows, err := db.QueryContext(r.Context(), `
+func handleGetNodesRealtimeUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
+	rows, err := db.Query(r.Context(), `
 WITH nodes_latest_updates AS (
 	SELECT
 		node_uuid,
@@ -168,14 +171,14 @@ ORDER BY total_speed_bps DESC
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": items})
 }
 
-func handleGetNodesUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetNodesUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	startDate, endDate, dates, ok := parseDateRange(w, r)
 	if !ok {
 		return
 	}
 	topLimit := parsePositiveIntWithDefault(r.URL.Query().Get("topNodesLimit"), 20)
 
-	sparkRows, err := db.QueryContext(r.Context(), `
+	sparkRows, err := db.Query(r.Context(), `
 WITH daily_traffic AS (
 	SELECT DATE_TRUNC('day', created_at AT TIME ZONE 'UTC')::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_usage_history
@@ -207,7 +210,7 @@ ORDER BY d.ord
 		return
 	}
 
-	seriesRows, err := db.QueryContext(r.Context(), `
+	seriesRows, err := db.Query(r.Context(), `
 WITH daily_usage AS (
 	SELECT
 		n.uuid, n.name, n.country_code,
@@ -241,13 +244,11 @@ ORDER BY nt.total_bytes DESC
 	series := make([]usageSeries, 0)
 	for seriesRows.Next() {
 		var s usageSeries
-		var dataRaw string
-		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &dataRaw); scanErr != nil {
+		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &s.Data); scanErr != nil {
 			shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(scanErr), cfg)
 			return
 		}
 		s.Color = colorFromUUID(s.UUID)
-		s.Data = parsePgBigintArray(dataRaw)
 		series = append(series, s)
 	}
 	if err := seriesRows.Err(); err != nil {
@@ -255,7 +256,7 @@ ORDER BY nt.total_bytes DESC
 		return
 	}
 
-	topRows, err := db.QueryContext(r.Context(), `
+	topRows, err := db.Query(r.Context(), `
 SELECT n.uuid, n.name, n.country_code, COALESCE(SUM(h.total_bytes), 0) AS total
 FROM nodes n
 INNER JOIN nodes_usage_history h ON h.node_uuid = n.uuid
@@ -295,7 +296,7 @@ LIMIT $3
 	})
 }
 
-func handleGetNodeUsersUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, nodeUUID string) {
+func handleGetNodeUsersUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, nodeUUID string) {
 	startDate, endDate, dates, ok := parseDateRange(w, r)
 	if !ok {
 		return
@@ -303,9 +304,9 @@ func handleGetNodeUsersUsage(w http.ResponseWriter, r *http.Request, db *sql.DB,
 	topLimit := parsePositiveIntWithDefault(r.URL.Query().Get("topUsersLimit"), 100)
 
 	var nodeID int64
-	err := db.QueryRowContext(r.Context(), `SELECT id FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&nodeID)
+	err := db.QueryRow(r.Context(), `SELECT id FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&nodeID)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrNodeNotFound, cfg)
 			return
 		}
@@ -313,7 +314,7 @@ func handleGetNodeUsersUsage(w http.ResponseWriter, r *http.Request, db *sql.DB,
 		return
 	}
 
-	sparkRows, err := db.QueryContext(r.Context(), `
+	sparkRows, err := db.Query(r.Context(), `
 WITH daily_traffic AS (
 	SELECT created_at::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_user_usage_history
@@ -345,7 +346,7 @@ ORDER BY d.ord
 		return
 	}
 
-	topRows, err := db.QueryContext(r.Context(), `
+	topRows, err := db.Query(r.Context(), `
 SELECT u.uuid, u.username, COALESCE(SUM(nuh.total_bytes), 0) AS total
 FROM users u
 INNER JOIN nodes_user_usage_history nuh ON nuh.user_id = u.id
@@ -388,7 +389,7 @@ LIMIT $4
 	})
 }
 
-func handleGetNodesUsersUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetNodesUsersUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	startDate, endDate, dates, ok := parseDateRange(w, r)
 	if !ok {
 		return
@@ -405,7 +406,7 @@ func handleGetNodesUsersUsage(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 
-	nodeRows, err := db.QueryContext(r.Context(), `SELECT id FROM nodes WHERE uuid = ANY($1)`, req.NodesUUIDs)
+	nodeRows, err := db.Query(r.Context(), `SELECT id FROM nodes WHERE uuid = ANY($1)`, req.NodesUUIDs)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetAllNodesFailed.WithCause(err), cfg)
 		return
@@ -430,7 +431,7 @@ func handleGetNodesUsersUsage(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 
-	sparkRows, err := db.QueryContext(r.Context(), `
+	sparkRows, err := db.Query(r.Context(), `
 WITH daily_traffic AS (
 	SELECT created_at::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_user_usage_history
@@ -462,7 +463,7 @@ ORDER BY d.ord
 		return
 	}
 
-	topRows, err := db.QueryContext(r.Context(), `
+	topRows, err := db.Query(r.Context(), `
 SELECT u.uuid, u.username, COALESCE(SUM(nuh.total_bytes), 0) AS total
 FROM users u
 INNER JOIN nodes_user_usage_history nuh ON nuh.user_id = u.id
@@ -505,7 +506,7 @@ LIMIT $4
 	})
 }
 
-func handleGetUserUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, userID int64) {
+func handleGetUserUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, userID int64) {
 	startDate, endDate, dates, ok := parseDateRange(w, r)
 	if !ok {
 		return
@@ -513,7 +514,7 @@ func handleGetUserUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg 
 	topLimit := parsePositiveIntWithDefault(r.URL.Query().Get("topNodesLimit"), 20)
 
 	var userExists bool
-	if err := db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
+	if err := db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
 		shared.SendAPIError(w, shared.ErrGetUserStatsFailed.WithCause(err), cfg)
 		return
 	}
@@ -522,7 +523,7 @@ func handleGetUserUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg 
 		return
 	}
 
-	sparkRows, err := db.QueryContext(r.Context(), `
+	sparkRows, err := db.Query(r.Context(), `
 WITH daily_traffic AS (
 	SELECT created_at::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_user_usage_history
@@ -554,7 +555,7 @@ ORDER BY d.ord
 		return
 	}
 
-	seriesRows, err := db.QueryContext(r.Context(), `
+	seriesRows, err := db.Query(r.Context(), `
 WITH daily_usage AS (
 	SELECT
 		n.uuid, n.name, n.country_code,
@@ -588,13 +589,11 @@ ORDER BY nt.total_bytes DESC
 	series := make([]usageSeries, 0)
 	for seriesRows.Next() {
 		var s usageSeries
-		var dataRaw string
-		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &dataRaw); scanErr != nil {
+		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &s.Data); scanErr != nil {
 			shared.SendAPIError(w, shared.ErrGetUserNodesSeriesFailed.WithCause(scanErr), cfg)
 			return
 		}
 		s.Color = colorFromUUID(s.UUID)
-		s.Data = parsePgBigintArray(dataRaw)
 		series = append(series, s)
 	}
 	if err := seriesRows.Err(); err != nil {
@@ -602,7 +601,7 @@ ORDER BY nt.total_bytes DESC
 		return
 	}
 
-	topRows, err := db.QueryContext(r.Context(), `
+	topRows, err := db.Query(r.Context(), `
 SELECT n.uuid, n.name, n.country_code, COALESCE(SUM(nuh.total_bytes), 0) AS total
 FROM nodes n
 INNER JOIN nodes_user_usage_history nuh ON nuh.node_id = n.id
@@ -642,7 +641,7 @@ LIMIT $4
 	})
 }
 
-func handlePostNodesUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handlePostNodesUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	startDate, endDate, _, ok := parseDateRange(w, r)
 	if !ok {
 		return
@@ -667,9 +666,9 @@ func handlePostNodesUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 		return
 	}
 
-	nodeRows, err := db.QueryContext(r.Context(), `
-		SELECT id, uuid FROM nodes WHERE uuid = ANY($1::uuid[])
-	`, pgDateArrayLiteral(req.NodesUUIDs))
+	nodeRows, err := db.Query(r.Context(), `
+		SELECT id, uuid FROM nodes WHERE uuid = ANY($1)
+	`, req.NodesUUIDs)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetAllNodesFailed.WithCause(err), cfg)
 		return
@@ -716,19 +715,13 @@ func handlePostNodesUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 		return
 	}
 
-	nodeIDStrs := make([]string, 0, len(nodeIDs))
-	for _, id := range nodeIDs {
-		nodeIDStrs = append(nodeIDStrs, strconv.FormatInt(id, 10))
-	}
-	nodeIDsLiteral := "{" + strings.Join(nodeIDStrs, ",") + "}"
-
-	rows, err := db.QueryContext(r.Context(), `
+	rows, err := db.Query(r.Context(), `
 		SELECT nuh.node_id, nuh.user_id, COALESCE(SUM(nuh.total_bytes), 0) AS total_bytes
 		FROM nodes_user_usage_history nuh
-		WHERE nuh.node_id = ANY($1::bigint[]) AND nuh.created_at >= $2 AND nuh.created_at <= $3
+		WHERE nuh.node_id = ANY($1) AND nuh.created_at >= $2 AND nuh.created_at <= $3
 		GROUP BY nuh.node_id, nuh.user_id
 		HAVING COALESCE(SUM(nuh.total_bytes), 0) >= $4
-	`, nodeIDsLiteral, startDate, endDate, minTotalBytes)
+	`, nodeIDs, startDate, endDate, minTotalBytes)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
 		return

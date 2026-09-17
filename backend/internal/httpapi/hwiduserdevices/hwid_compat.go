@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
 	"exodus/internal/httpapi/subscription"
@@ -113,7 +116,7 @@ type tableSorting struct {
 // @Router       /hwid/devices/{userId} [get]
 // @Router       /hwid/devices [post]
 // @Router       /hwid/devices/delete [post]
-func HWIDCompatDevicesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HWIDCompatDevicesHandler(db *pgxpool.Pool, sqlDB *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/hwid/devices"), "/")
 
@@ -127,7 +130,7 @@ func HWIDCompatDevicesHandler(db *sql.DB, cfg *config.BackendConfig) http.Handle
 		}
 
 		if r.Method == http.MethodPost && path == "" {
-			handleHWIDCompatCreateUserDevice(w, r, db, cfg)
+			handleHWIDCompatCreateUserDevice(w, r, db, sqlDB, cfg)
 			return
 		}
 
@@ -162,10 +165,10 @@ func HWIDCompatDevicesHandler(db *sql.DB, cfg *config.BackendConfig) http.Handle
 	}
 }
 
-func handleHWIDCompatGetUserDevices(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, userID int64) {
+func handleHWIDCompatGetUserDevices(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, userID int64) {
 	devices, err := getHWIDCompatDevicesByUserID(r.Context(), db, userID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 			return
 		}
@@ -181,7 +184,7 @@ func handleHWIDCompatGetUserDevices(w http.ResponseWriter, r *http.Request, db *
 	})
 }
 
-func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, sqlDB *sql.DB, cfg *config.BackendConfig) {
 	var req createUserHWIDDeviceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -201,9 +204,9 @@ func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db
 
 	var hwidDeviceLimit *int
 	var externalSquadUUID *string
-	err := db.QueryRowContext(ctx, `SELECT hwid_device_limit, external_squad_uuid FROM users WHERE id = $1`, userID).
+	err := db.QueryRow(ctx, `SELECT hwid_device_limit, external_squad_uuid FROM users WHERE id = $1`, userID).
 		Scan(&hwidDeviceLimit, &externalSquadUUID)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 		return
 	}
@@ -213,7 +216,7 @@ func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db
 	}
 
 	var deviceExists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM hwid_user_devices WHERE user_id = $1 AND hwid = $2)`, userID, hwid).
+	if err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM hwid_user_devices WHERE user_id = $1 AND hwid = $2)`, userID, hwid).
 		Scan(&deviceExists); err != nil {
 		shared.SendAPIError(w, shared.ErrCreateUserHwidDeviceFailed.WithCause(err), cfg)
 		return
@@ -223,7 +226,7 @@ func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db
 		return
 	}
 
-	renderService := subscription.NewRenderService(db, db, cfg)
+	renderService := subscription.NewRenderService(sqlDB, sqlDB, cfg)
 	settings, err := renderService.LoadSubscriptionSettings(ctx)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetSubscriptionSettingsFailed.WithCause(err), cfg)
@@ -236,7 +239,7 @@ func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db
 
 	if settings.HwidSettings.Enabled {
 		var existingCount int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hwid_user_devices WHERE user_id = $1`, userID).
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM hwid_user_devices WHERE user_id = $1`, userID).
 			Scan(&existingCount); err != nil {
 			shared.SendAPIError(w, shared.ErrCreateUserHwidDeviceFailed.WithCause(err), cfg)
 			return
@@ -252,7 +255,7 @@ func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db
 	}
 
 	now := time.Now().UTC()
-	_, err = db.ExecContext(ctx, `
+	_, err = db.Exec(ctx, `
 		INSERT INTO hwid_user_devices (hwid, user_id, platform, os_version, device_model, user_agent, request_ip, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 		ON CONFLICT (hwid, user_id) DO UPDATE SET
@@ -291,7 +294,7 @@ func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db
 	})
 }
 
-func handleHWIDCompatDeleteUserDevice(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleHWIDCompatDeleteUserDevice(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req deleteUserHWIDDeviceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -309,7 +312,7 @@ func handleHWIDCompatDeleteUserDevice(w http.ResponseWriter, r *http.Request, db
 	userID := req.UserID
 
 	var userExists bool
-	if err := db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
+	if err := db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
 		shared.SendAPIError(w, shared.ErrGetUserByError.WithCause(err), cfg)
 		return
 	}
@@ -318,7 +321,7 @@ func handleHWIDCompatDeleteUserDevice(w http.ResponseWriter, r *http.Request, db
 		return
 	}
 
-	row := db.QueryRowContext(r.Context(), `
+	row := db.QueryRow(r.Context(), `
 		SELECT h.hwid, h.user_id, h.platform, h.os_version, h.device_model, h.user_agent, h.request_ip, h.created_at, h.updated_at
 		FROM hwid_user_devices h
 		WHERE h.hwid = $1 AND h.user_id = $2
@@ -326,7 +329,7 @@ func handleHWIDCompatDeleteUserDevice(w http.ResponseWriter, r *http.Request, db
 	`, hwid, userID)
 	deletedDevice, err := scanHWIDCompatDevice(row)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrHwidDeviceNotFound, cfg)
 			return
 		}
@@ -334,13 +337,12 @@ func handleHWIDCompatDeleteUserDevice(w http.ResponseWriter, r *http.Request, db
 		return
 	}
 
-	result, err := db.ExecContext(r.Context(), `DELETE FROM hwid_user_devices WHERE hwid = $1 AND user_id = $2`, hwid, userID)
+	result, err := db.Exec(r.Context(), `DELETE FROM hwid_user_devices WHERE hwid = $1 AND user_id = $2`, hwid, userID)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrDeleteUserHwidDeviceFailed.WithCause(err), cfg)
 		return
 	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil || rowsAffected == 0 {
+	if result.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrHwidDeviceNotFound, cfg)
 		return
 	}
@@ -372,7 +374,7 @@ func handleHWIDCompatDeleteUserDevice(w http.ResponseWriter, r *http.Request, db
 // @Failure      404   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /hwid/devices/delete-all [post]
-func HWIDCompatDeleteAllUserDevicesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HWIDCompatDeleteAllUserDevicesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -391,7 +393,7 @@ func HWIDCompatDeleteAllUserDevicesHandler(db *sql.DB, cfg *config.BackendConfig
 		userID := req.UserID
 
 		var userExists bool
-		if err := db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
+		if err := db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
 			shared.SendAPIError(w, shared.ErrGetUserByError.WithCause(err), cfg)
 			return
 		}
@@ -400,12 +402,12 @@ func HWIDCompatDeleteAllUserDevicesHandler(db *sql.DB, cfg *config.BackendConfig
 			return
 		}
 
-		result, err := db.ExecContext(r.Context(), `DELETE FROM hwid_user_devices WHERE user_id = $1`, userID)
+		result, err := db.Exec(r.Context(), `DELETE FROM hwid_user_devices WHERE user_id = $1`, userID)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrDeleteUserHwidDeviceFailed.WithCause(err), cfg)
 			return
 		}
-		deletedCount, _ := result.RowsAffected()
+		deletedCount := result.RowsAffected()
 
 		if deletedCount > 0 {
 			emitHWIDNotification(r.Context(), cfg, notifications.EventUserHWIDDeviceDeleted, map[string]any{
@@ -432,7 +434,7 @@ func HWIDCompatDeleteAllUserDevicesHandler(db *sql.DB, cfg *config.BackendConfig
 // @Success      200  {object}  HWIDStatsResponseEnvelope
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /hwid/devices/stats [get]
-func HWIDCompatStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HWIDCompatStatsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -440,7 +442,7 @@ func HWIDCompatStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 		}
 
 		var totalDevices, uniqueDevices, uniqueUsers int
-		row := db.QueryRowContext(r.Context(), `
+		row := db.QueryRow(r.Context(), `
 			SELECT COUNT(*), COUNT(DISTINCT hwid), COUNT(DISTINCT user_id)
 			FROM hwid_user_devices
 		`)
@@ -450,7 +452,7 @@ func HWIDCompatStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 		}
 
 		byPlatform := make([]map[string]any, 0)
-		rows, err := db.QueryContext(r.Context(), `
+		rows, err := db.Query(r.Context(), `
 			SELECT COALESCE(NULLIF(platform, ''), 'Unknown') AS platform, COUNT(*) AS count
 			FROM hwid_user_devices
 			GROUP BY platform
@@ -477,7 +479,7 @@ func HWIDCompatStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 		}
 
 		byAppByPlatform := map[string][]map[string]any{}
-		rows2, err := db.QueryContext(r.Context(), `
+		rows2, err := db.Query(r.Context(), `
 			SELECT
 				COALESCE(NULLIF(platform, ''), 'Unknown') AS platform,
 				COALESCE(NULLIF(SPLIT_PART(user_agent, '/', 1), ''), 'Unknown') AS app,
@@ -546,7 +548,7 @@ func HWIDCompatStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 // @Success      200    {object}  HWIDTopUsersResponseEnvelope
 // @Failure      500    {object}  shared.ErrorResponse
 // @Router       /hwid/devices/top-users [get]
-func HWIDCompatTopUsersHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HWIDCompatTopUsersHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -560,12 +562,12 @@ func HWIDCompatTopUsersHandler(db *sql.DB, cfg *config.BackendConfig) http.Handl
 			DevicesCount int    `json:"devicesCount"`
 		}
 		var total int
-		if err := db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT user_id) FROM hwid_user_devices`).Scan(&total); err != nil {
+		if err := db.QueryRow(r.Context(), `SELECT COUNT(DISTINCT user_id) FROM hwid_user_devices`).Scan(&total); err != nil {
 			shared.SendAPIError(w, shared.ErrGetHwidStatsFailed.WithCause(err), cfg)
 			return
 		}
 
-		rows, err := db.QueryContext(r.Context(), `
+		rows, err := db.Query(r.Context(), `
 			SELECT u.id, u.username, COUNT(*) AS devices_count
 			FROM hwid_user_devices h
 			JOIN users u ON u.id = h.user_id
@@ -602,7 +604,7 @@ func HWIDCompatTopUsersHandler(db *sql.DB, cfg *config.BackendConfig) http.Handl
 	}
 }
 
-func getHWIDCompatDevices(ctx context.Context, db *sql.DB, start, size int, r *http.Request) ([]hwidCompatDevice, int, error) {
+func getHWIDCompatDevices(ctx context.Context, db *pgxpool.Pool, start, size int, r *http.Request) ([]hwidCompatDevice, int, error) {
 	columns := map[string]string{
 		"hwid":        "h.hwid",
 		"userId":      "u.id",
@@ -619,7 +621,7 @@ func getHWIDCompatDevices(ctx context.Context, db *sql.DB, start, size int, r *h
 
 	var total int
 	countQuery := `SELECT COUNT(*) FROM hwid_user_devices h JOIN users u ON u.id = h.user_id` + whereSQL
-	if err := db.QueryRowContext(ctx, countQuery, whereArgs...).Scan(&total); err != nil {
+	if err := db.QueryRow(ctx, countQuery, whereArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -630,7 +632,7 @@ func getHWIDCompatDevices(ctx context.Context, db *sql.DB, start, size int, r *h
 		JOIN users u ON u.id = h.user_id
 	`+whereSQL+orderSQL+` OFFSET $%d LIMIT $%d`, len(whereArgs)+1, len(whereArgs)+2)
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -647,16 +649,16 @@ func getHWIDCompatDevices(ctx context.Context, db *sql.DB, start, size int, r *h
 	return items, total, rows.Err()
 }
 
-func getHWIDCompatDevicesByUserID(ctx context.Context, db *sql.DB, userID int64) ([]hwidCompatDevice, error) {
+func getHWIDCompatDevicesByUserID(ctx context.Context, db *pgxpool.Pool, userID int64) ([]hwidCompatDevice, error) {
 	var userExists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
+	if err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&userExists); err != nil {
 		return nil, err
 	}
 	if !userExists {
-		return nil, sql.ErrNoRows
+		return nil, pgx.ErrNoRows
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT h.hwid, h.user_id, h.platform, h.os_version, h.device_model, h.user_agent, h.request_ip, h.created_at, h.updated_at
 		FROM hwid_user_devices h
 		WHERE h.user_id = $1
@@ -684,15 +686,15 @@ type hwidCompatScanner interface {
 
 func scanHWIDCompatDevice(scanner hwidCompatScanner) (hwidCompatDevice, error) {
 	var item hwidCompatDevice
-	var createdAt, updatedAt sql.NullTime
+	var createdAt, updatedAt *time.Time
 	if err := scanner.Scan(&item.HWID, &item.UserID, &item.Platform, &item.OSVersion, &item.DeviceModel, &item.UserAgent, &item.RequestIP, &createdAt, &updatedAt); err != nil {
 		return item, err
 	}
-	if createdAt.Valid {
-		item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")
+	if createdAt != nil {
+		item.CreatedAt = createdAt.UTC().Format("2006-01-02T15:04:05.000Z")
 	}
-	if updatedAt.Valid {
-		item.UpdatedAt = updatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")
+	if updatedAt != nil {
+		item.UpdatedAt = updatedAt.UTC().Format("2006-01-02T15:04:05.000Z")
 	}
 	return item, nil
 }

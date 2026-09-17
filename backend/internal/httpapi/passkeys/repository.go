@@ -2,46 +2,51 @@ package passkeys
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 )
 
-func loadPasskeySettings(ctx context.Context, db *sql.DB) (passkeySettings, error) {
+func loadPasskeySettings(ctx context.Context, db *pgxpool.Pool) (passkeySettings, error) {
 	var settings passkeySettings
-	var rawConfig sql.NullString
-	row := db.QueryRowContext(ctx, `
+	var rawConfig *string
+	row := db.QueryRow(ctx, `
 		SELECT passkey_settings::text
 		FROM exodus_settings
 		WHERE id = 1
 		LIMIT 1
 	`)
 	if scanErr := row.Scan(&rawConfig); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return settings, nil
+		}
 		return settings, scanErr
 	}
-	if !rawConfig.Valid || strings.TrimSpace(rawConfig.String) == "" {
+	if rawConfig == nil || strings.TrimSpace(*rawConfig) == "" {
 		return settings, nil
 	}
-	err := json.Unmarshal([]byte(rawConfig.String), &settings)
+	err := json.Unmarshal([]byte(*rawConfig), &settings)
 	return settings, err
 }
 
-func loadWebAuthnAdmin(ctx context.Context, db *sql.DB, adminUUID string) (*webAuthnAdmin, error) {
+func loadWebAuthnAdmin(ctx context.Context, db *pgxpool.Pool, adminUUID string) (*webAuthnAdmin, error) {
 	admin := &webAuthnAdmin{}
-	var row *sql.Row
+	var row pgx.Row
 	if strings.TrimSpace(adminUUID) == "" {
-		row = db.QueryRowContext(ctx, `
+		row = db.QueryRow(ctx, `
 			SELECT uuid, username
 			FROM admin
 			ORDER BY created_at ASC
 			LIMIT 1
 		`)
 	} else {
-		row = db.QueryRowContext(ctx, `
+		row = db.QueryRow(ctx, `
 			SELECT uuid, username
 			FROM admin
 			WHERE uuid = $1
@@ -50,13 +55,13 @@ func loadWebAuthnAdmin(ctx context.Context, db *sql.DB, adminUUID string) (*webA
 	}
 
 	if err := row.Scan(&admin.uuid, &admin.username); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errAdminNotFound
 		}
 		return nil, err
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT id, public_key, counter, COALESCE(transports, ''), COALESCE(device_type, ''), backed_up
 		FROM passkeys
 		WHERE admin_uuid = $1
@@ -108,7 +113,7 @@ func loadWebAuthnAdmin(ctx context.Context, db *sql.DB, adminUUID string) (*webA
 	return admin, nil
 }
 
-func saveNewCredential(ctx context.Context, db *sql.DB, adminUUID string, credential *gowebauthn.Credential) error {
+func saveNewCredential(ctx context.Context, db *pgxpool.Pool, adminUUID string, credential *gowebauthn.Credential) error {
 	credentialID := encodeCredentialID(credential.ID)
 	transports := transportsToCSV(credential.Transport)
 	deviceType := "singleDevice"
@@ -117,7 +122,7 @@ func saveNewCredential(ctx context.Context, db *sql.DB, adminUUID string, creden
 	}
 	provider := passkeyProviderName(credential.Transport)
 
-	_, err := db.ExecContext(ctx, `
+	_, err := db.Exec(ctx, `
 		INSERT INTO passkeys (
 			id, admin_uuid, public_key, counter, device_type, backed_up, transports, passkey_provider
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -125,14 +130,14 @@ func saveNewCredential(ctx context.Context, db *sql.DB, adminUUID string, creden
 	return err
 }
 
-func updateCredentialUsage(ctx context.Context, db *sql.DB, adminUUID string, credential *gowebauthn.Credential) error {
+func updateCredentialUsage(ctx context.Context, db *pgxpool.Pool, adminUUID string, credential *gowebauthn.Credential) error {
 	credentialID := encodeCredentialID(credential.ID)
 	deviceType := "singleDevice"
 	if credential.Flags.BackupEligible {
 		deviceType = "multiDevice"
 	}
 
-	result, err := db.ExecContext(ctx, `
+	result, err := db.Exec(ctx, `
 		UPDATE passkeys
 		SET counter = $1, device_type = $2, backed_up = $3, updated_at = CURRENT_TIMESTAMP
 		WHERE id = $4 AND admin_uuid = $5
@@ -140,18 +145,14 @@ func updateCredentialUsage(ctx context.Context, db *sql.DB, adminUUID string, cr
 	if err != nil {
 		return err
 	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
+	if result.RowsAffected() == 0 {
 		return errAdminNotFound
 	}
 	return nil
 }
 
-func listPasskeysForAdmin(ctx context.Context, db *sql.DB, adminUUID string) ([]passkeyRecord, error) {
-	rows, err := db.QueryContext(ctx, `
+func listPasskeysForAdmin(ctx context.Context, db *pgxpool.Pool, adminUUID string) ([]passkeyRecord, error) {
+	rows, err := db.Query(ctx, `
 		SELECT id,
 		       COALESCE(NULLIF(passkey_provider, ''), id) AS name,
 		       created_at,

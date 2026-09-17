@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"math"
@@ -18,6 +17,8 @@ import (
 	"exodus/internal/security"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var errAdminAlreadyConfigured = errors.New("admin already configured")
@@ -30,14 +31,14 @@ var errAdminAlreadyConfigured = errors.New("admin already configured")
 // @Success      200  {object}  BootstrapResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /auth/bootstrap [get]
-func AuthBootstrapHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthBootstrapHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
-		brandingSettings, passwordSettings, defaultUsername, hasAdmin, err := getBootstrapData(db)
+		brandingSettings, passwordSettings, defaultUsername, hasAdmin, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Error("Failed to read auth bootstrap data", "error", err)
 			shared.SendAPIError(w, shared.ErrGetAuthBootstrapFailed.WithCause(err), cfg)
@@ -61,14 +62,14 @@ func AuthBootstrapHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFun
 // @Success      200  {object}  AuthStatusResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /auth/status [get]
-func AuthStatusHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthStatusHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
-		brandingSettings, passwordSettings, _, hasAdmin, err := getBootstrapData(db)
+		brandingSettings, passwordSettings, _, hasAdmin, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Error("Failed to load auth status", "error", err)
 			shared.SendAPIError(w, shared.ErrGetAuthStatusFailed.WithCause(err), cfg)
@@ -80,7 +81,7 @@ func AuthStatusHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		logoURL, _ := brandingSettings["logoUrl"].(string)
 
 		if hasAdmin {
-			passkeyEnabled, oauth2Providers := getAuthMethodsStatus(db)
+			passkeyEnabled, oauth2Providers := getAuthMethodsStatus(r.Context(), db)
 			passwordEnabled := resolvePasswordAuthEnabled(
 				passwordSettings,
 				passkeyEnabled,
@@ -138,7 +139,7 @@ func AuthStatusHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      403   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /auth/login [post]
-func AuthLoginCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthLoginCompatHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -175,7 +176,7 @@ func AuthLoginCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 		}
 		cfg.Logger.Trace("Auth login attempt", "username", username, "client_ip", rateLimitKey)
 
-		_, passwordSettings, _, hasAdmin, err := getBootstrapData(db)
+		_, passwordSettings, _, hasAdmin, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Error("Failed to read auth bootstrap for login", "error", err)
 			shared.SendAPIError(w, shared.ErrValidateCredentialsFailed.WithCause(err), cfg)
@@ -189,7 +190,7 @@ func AuthLoginCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 			return
 		}
 
-		passkeyEnabled, oauth2Providers := getAuthMethodsStatus(db)
+		passkeyEnabled, oauth2Providers := getAuthMethodsStatus(r.Context(), db)
 		passwordEnabled := resolvePasswordAuthEnabled(
 			passwordSettings,
 			passkeyEnabled,
@@ -209,7 +210,7 @@ func AuthLoginCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 			role               string
 		)
 
-		row := db.QueryRow(`
+		row := db.QueryRow(r.Context(), `
 			SELECT uuid, password_hash, role
 			FROM admin
 			WHERE username = $1
@@ -217,13 +218,13 @@ func AuthLoginCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 		`, username)
 
 		scanErr := row.Scan(&adminUUID, &storedPasswordHash, &role)
-		if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		if scanErr != nil && !errors.Is(scanErr, pgx.ErrNoRows) {
 			cfg.Logger.Error("Failed to read admin credentials", "error", scanErr)
 			shared.SendAPIError(w, shared.ErrValidateCredentialsFailed.WithCause(scanErr), cfg)
 			return
 		}
 
-		if errors.Is(scanErr, sql.ErrNoRows) {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
 			_ = security.VerifyPassword(password, cfg.JWT.AuthSecret, getDummyPasswordHash(cfg.JWT.AuthSecret))
 			globalAuthRateLimiter.RecordFailedAttempt(r.Context(), rateLimitKey, cfg)
 			cfg.Logger.Warn("Auth login failed: user not found", "username", username, "client_ip", rateLimitKey)
@@ -281,7 +282,7 @@ func AuthLoginCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 // @Failure      403   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /auth/register [post]
-func AuthRegisterHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthRegisterHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -310,7 +311,7 @@ func AuthRegisterHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 		}
 
 		var adminCount int
-		if countErr := db.QueryRow("SELECT COUNT(*) FROM admin").Scan(&adminCount); countErr != nil {
+		if countErr := db.QueryRow(r.Context(), "SELECT COUNT(*) FROM admin").Scan(&adminCount); countErr != nil {
 			shared.SendAPIError(w, shared.ErrCheckAdminStatusFailed.WithCause(countErr), cfg)
 			return
 		}
@@ -321,7 +322,7 @@ func AuthRegisterHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 		}
 
 		adminUUID := uuid.NewString()
-		if _, execErr := db.Exec(`
+		if _, execErr := db.Exec(r.Context(), `
 			INSERT INTO admin (uuid, username, password_hash, role)
 			VALUES ($1, $2, $3, 'ADMIN')
 		`, adminUUID, username, passwordHash); execErr != nil {
@@ -347,7 +348,7 @@ func AuthRegisterHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 	}
 }
 
-func AuthRegisterCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthRegisterCompatHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return AuthRegisterHandler(db, cfg)
 }
 
@@ -363,7 +364,7 @@ func AuthRegisterCompatHandler(db *sql.DB, cfg *config.BackendConfig) http.Handl
 // @Failure      409   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /auth/setup [post]
-func AuthSetupHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthSetupHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -391,7 +392,7 @@ func AuthSetupHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		}
 
 		var adminCount int
-		if countErr := db.QueryRow("SELECT COUNT(*) FROM admin").Scan(&adminCount); countErr != nil {
+		if countErr := db.QueryRow(r.Context(), "SELECT COUNT(*) FROM admin").Scan(&adminCount); countErr != nil {
 			shared.SendAPIError(w, shared.ErrCheckAdminStatusFailed.WithCause(countErr), cfg)
 			return
 		}
@@ -401,7 +402,7 @@ func AuthSetupHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		}
 
 		adminUUID := uuid.NewString()
-		if _, execErr := db.Exec(`
+		if _, execErr := db.Exec(r.Context(), `
 			INSERT INTO admin (uuid, username, password_hash, role)
 			VALUES ($1, $2, $3, 'ADMIN')
 		`, adminUUID, username, passwordHash); execErr != nil {
@@ -418,7 +419,7 @@ func AuthSetupHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		}
 		setAuthCookie(w, r, cfg, accessToken, expiresAt)
 
-		brandingSettings, passwordSettings, _, _, bootstrapErr := getBootstrapData(db)
+		brandingSettings, passwordSettings, _, _, bootstrapErr := getBootstrapData(r.Context(), db)
 		if bootstrapErr != nil {
 			cfg.Logger.Warn("Failed to include bootstrap settings in setup response", "error", bootstrapErr)
 			brandingSettings = panelsettings.DefaultBrandingSettings()
@@ -440,7 +441,7 @@ func AuthSetupHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	}
 }
 
-func AuthLoginHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthLoginHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return AuthLoginCompatHandler(db, cfg)
 }
 
@@ -454,7 +455,7 @@ func AuthLoginHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      401  {object}  shared.ErrorResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /auth/me [get]
-func AuthMeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthMeHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -471,7 +472,7 @@ func AuthMeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 			adminInfo AuthAdminInfo
 			expiresAt = principal.ExpiresAt
 		)
-		row := db.QueryRow(`
+		row := db.QueryRow(r.Context(), `
 			SELECT uuid, username, role
 			FROM admin
 			WHERE uuid = $1
@@ -479,7 +480,7 @@ func AuthMeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		`, principal.AdminUUID)
 
 		if scanErr := row.Scan(&adminInfo.UUID, &adminInfo.Username, &adminInfo.Role); scanErr != nil {
-			if errors.Is(scanErr, sql.ErrNoRows) {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
 				shared.SendAPIError(w, shared.ErrUnauthorized, cfg)
 				return
 			}
@@ -490,7 +491,7 @@ func AuthMeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		adminInfo.Role = strings.ToUpper(adminInfo.Role)
 		adminInfo.SessionTTLMinutes = AuthTTLMinutes()
 
-		brandingSettings, passwordSettings, _, _, err := getBootstrapData(db)
+		brandingSettings, passwordSettings, _, _, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Warn("Failed to load branding for auth/me response", "error", err)
 			brandingSettings = panelsettings.DefaultBrandingSettings()
@@ -515,7 +516,7 @@ func AuthMeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Security     BearerAuth
 // @Success      200  {object}  map[string]string
 // @Router       /auth/logout [post]
-func AuthLogoutHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthLogoutHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -534,10 +535,6 @@ func AuthLogoutHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 			MaxAge:   -1,
 		})
 
-		// Also clear the backend-tools access cookie (issued via ?ott= exchange,
-		// see panelsettings.ToolsAuthMiddleware / BackendToolsAuthCookieName).
-		// It carries its own JWT lifetime (2h) independent from the main session,
-		// so clear it here upon explicit server logout.
 		toolsCookiePath := cfg.Backend.Trimmed() + "/api/backend-tools"
 		http.SetCookie(w, &http.Cookie{
 			Name:     "ex-tools",
@@ -564,7 +561,7 @@ func AuthLogoutHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      400   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /auth/oauth2/authorize [post]
-func OAuth2AuthorizeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func OAuth2AuthorizeHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -580,11 +577,11 @@ func OAuth2AuthorizeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 			shared.SendAPIError(w, shared.ErrOAuth2ProviderNotFound, cfg)
 			return
 		}
-		if !isLoginAllowed(db) {
+		if !isLoginAllowed(r.Context(), db) {
 			shared.SendAPIError(w, shared.ErrForbidden, cfg)
 			return
 		}
-		settings, err := loadOAuthSettings(db)
+		settings, err := loadOAuthSettings(r.Context(), db)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrOAuth2AuthorizeFailed.WithCause(err), cfg)
 			return
@@ -613,7 +610,7 @@ func OAuth2AuthorizeHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 	}
 }
 
-func OAuth2CallbackHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func OAuth2CallbackHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -636,12 +633,12 @@ func OAuth2CallbackHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFu
 			shared.SendAPIError(w, shared.ErrOAuth2StateMismatch, cfg)
 			return
 		}
-		if !isLoginAllowed(db) {
+		if !isLoginAllowed(r.Context(), db) {
 			emitExternalLoginNotification(r.Context(), cfg, notifications.EventLoginAttemptFailed, "oauth2", provider, "", "", "login_not_allowed", r)
 			shared.SendAPIError(w, shared.ErrForbidden, cfg)
 			return
 		}
-		settings, err := loadOAuthSettings(db)
+		settings, err := loadOAuthSettings(r.Context(), db)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrOAuth2CallbackFailed.WithCause(err), cfg)
 			return

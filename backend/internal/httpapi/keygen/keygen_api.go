@@ -1,10 +1,11 @@
 package keygen
 
 import (
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -36,7 +37,7 @@ type KeygenPayload struct {
 // @Success      200  {object}  KeygenResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /keygen [get]
-func KeygenHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func KeygenHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -49,7 +50,7 @@ func KeygenHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 			caCert string
 			caKey  string
 		)
-		err := db.QueryRowContext(r.Context(), `
+		err := db.QueryRow(r.Context(), `
 			SELECT pub_key, ca_cert, ca_key
 			FROM keygen
 			ORDER BY created_at ASC

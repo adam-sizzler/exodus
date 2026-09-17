@@ -2,12 +2,14 @@ package panelsettings
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	panelsettingsDefaults "exodus/internal/panelsettings"
 )
@@ -91,7 +93,7 @@ func (r *responseRecorder) Write(p []byte) (int, error) {
 }
 func (r *responseRecorder) WriteHeader(statusCode int) { r.status = statusCode }
 
-func loadPanelSettings(ctx context.Context, db *sql.DB) (map[string]any, error) {
+func loadPanelSettings(ctx context.Context, db *pgxpool.Pool) (map[string]any, error) {
 	settings := map[string]any{
 		"passkey_settings":  panelsettingsDefaults.DefaultPasskeySettings(),
 		"oauth2_settings":   panelsettingsDefaults.DefaultOAuth2Settings(),
@@ -99,35 +101,43 @@ func loadPanelSettings(ctx context.Context, db *sql.DB) (map[string]any, error) 
 		"branding_settings": panelsettingsDefaults.DefaultBrandingSettings(),
 	}
 
-	row := db.QueryRowContext(ctx, `
-		SELECT passkey_settings, oauth2_settings, password_settings, branding_settings
+	row := db.QueryRow(ctx, `
+		SELECT passkey_settings::text, oauth2_settings::text, password_settings::text, branding_settings::text
 		FROM exodus_settings
 		WHERE id = 1
 		LIMIT 1
 	`)
 
-	var passkeyRaw, oauth2Raw, passwordRaw, brandingRaw sql.NullString
+	var passkeyRaw, oauth2Raw, passwordRaw, brandingRaw *string
 	if scanErr := row.Scan(&passkeyRaw, &oauth2Raw, &passwordRaw, &brandingRaw); scanErr != nil {
-		if errors.Is(scanErr, sql.ErrNoRows) {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return settings, nil
 		}
 		return nil, scanErr
 	}
 
-	mergeJSONObject(settings, "passkey_settings", passkeyRaw.String)
-	mergeJSONObject(settings, "oauth2_settings", oauth2Raw.String)
-	mergeJSONObject(settings, "password_settings", passwordRaw.String)
-	mergeJSONObject(settings, "branding_settings", brandingRaw.String)
+	if passkeyRaw != nil {
+		mergeJSONObject(settings, "passkey_settings", *passkeyRaw)
+	}
+	if oauth2Raw != nil {
+		mergeJSONObject(settings, "oauth2_settings", *oauth2Raw)
+	}
+	if passwordRaw != nil {
+		mergeJSONObject(settings, "password_settings", *passwordRaw)
+	}
+	if brandingRaw != nil {
+		mergeJSONObject(settings, "branding_settings", *brandingRaw)
+	}
 	return settings, nil
 }
 
-func loadAPITokens(ctx context.Context, db *sql.DB) ([]APITokenRecord, error) {
-	rows, queryErr := db.QueryContext(ctx, `
+func loadAPITokens(ctx context.Context, db *pgxpool.Pool) ([]APITokenRecord, error) {
+	rows, queryErr := db.Query(ctx, `
 		SELECT
 			uuid,
 			name,
 			expire_at,
-			array_to_json(COALESCE(scopes, ARRAY['*']::text[]))::text AS scopes,
+			COALESCE(scopes, ARRAY['*']::text[]),
 			created_at,
 			updated_at
 		FROM api_tokens
@@ -141,11 +151,9 @@ func loadAPITokens(ctx context.Context, db *sql.DB) ([]APITokenRecord, error) {
 	tokens := make([]APITokenRecord, 0)
 	for rows.Next() {
 		var row APITokenRecord
-		var scopesRaw string
-		if scanErr := rows.Scan(&row.UUID, &row.Name, &row.ExpireAt, &scopesRaw, &row.CreatedAt, &row.UpdatedAt); scanErr != nil {
+		if scanErr := rows.Scan(&row.UUID, &row.Name, &row.ExpireAt, &row.Scopes, &row.CreatedAt, &row.UpdatedAt); scanErr != nil {
 			return nil, scanErr
 		}
-		row.Scopes = parseAPITokenScopes(scopesRaw)
 		tokens = append(tokens, row)
 	}
 	if err := rows.Err(); err != nil {

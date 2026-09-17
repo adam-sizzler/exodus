@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -20,6 +19,9 @@ import (
 	"exodus/internal/httpapi/middleware"
 	"exodus/internal/notifications"
 	"exodus/internal/security"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -35,17 +37,17 @@ var oauthStateCache = struct {
 	items: make(map[string]oauthStateEntry),
 }
 
-func isLoginAllowed(db *sql.DB) bool {
+func isLoginAllowed(ctx context.Context, db *pgxpool.Pool) bool {
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM admin").Scan(&count); err != nil {
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM admin").Scan(&count); err != nil {
 		return false
 	}
 	return count > 0
 }
 
-func createFirstAdminSession(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) (string, string, error) {
+func createFirstAdminSession(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) (string, string, error) {
 	var adminUUID, username, role string
-	row := db.QueryRowContext(r.Context(), `
+	row := db.QueryRow(r.Context(), `
 		SELECT uuid, username, role
 		FROM admin
 		WHERE UPPER(role) = 'ADMIN'
@@ -137,17 +139,17 @@ func externalLoginNotificationUsername(method, provider, identifier string) stri
 	}
 }
 
-func loadOAuthSettings(db *sql.DB) (oauthSettings, error) {
+func loadOAuthSettings(ctx context.Context, db *pgxpool.Pool) (oauthSettings, error) {
 	var out oauthSettings
-	var raw sql.NullString
-	if err := db.QueryRow(`SELECT oauth2_settings FROM exodus_settings WHERE id = 1 LIMIT 1`).Scan(&raw); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	var raw *string
+	if err := db.QueryRow(ctx, `SELECT oauth2_settings FROM exodus_settings WHERE id = 1 LIMIT 1`).Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return out, nil
 		}
 		return out, err
 	}
-	if raw.Valid && strings.TrimSpace(raw.String) != "" {
-		err := json.Unmarshal([]byte(raw.String), &out)
+	if raw != nil && strings.TrimSpace(*raw) != "" {
+		err := json.Unmarshal([]byte(*raw), &out)
 		return out, err
 	}
 	return out, nil

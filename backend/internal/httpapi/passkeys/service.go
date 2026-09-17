@@ -2,11 +2,12 @@ package passkeys
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/security"
@@ -111,7 +112,7 @@ func newWebAuthn(settings resolvedPasskeySettings) (*gowebauthn.WebAuthn, error)
 	})
 }
 
-func resolvePasskeySettings(ctx context.Context, db *sql.DB, r *http.Request) (resolvedPasskeySettings, error) {
+func resolvePasskeySettings(ctx context.Context, db *pgxpool.Pool, r *http.Request) (resolvedPasskeySettings, error) {
 	settings, err := loadPasskeySettings(ctx, db)
 	if err != nil {
 		return resolvedPasskeySettings{}, err
@@ -165,7 +166,7 @@ func resolvePasskeySettings(ctx context.Context, db *sql.DB, r *http.Request) (r
 	return resolvedPasskeySettings{RPID: rpID, Origins: origins}, nil
 }
 
-func createAdminSession(ctx context.Context, db *sql.DB, cfg *config.BackendConfig, admin *webAuthnAdmin) (string, int64, error) {
+func createAdminSession(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig, admin *webAuthnAdmin) (string, int64, error) {
 	_ = ctx
 	_ = db
 	return security.SignAuthJWT(cfg.JWT.AuthSecret, admin.username, admin.uuid, "ADMIN")

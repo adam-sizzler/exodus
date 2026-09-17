@@ -2,15 +2,16 @@ package auth
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"strings"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func WithPanelAuth(db *sql.DB, cfg *config.BackendConfig, next http.Handler) http.Handler {
+func WithPanelAuth(db *pgxpool.Pool, cfg *config.BackendConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, err := authenticateRequest(r, db, cfg)
 		if err != nil {
@@ -30,7 +31,7 @@ func WithPanelAuth(db *sql.DB, cfg *config.BackendConfig, next http.Handler) htt
 	})
 }
 
-func WithOptionalPanelAuth(db *sql.DB, cfg *config.BackendConfig, next http.Handler) http.Handler {
+func WithOptionalPanelAuth(db *pgxpool.Pool, cfg *config.BackendConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, _ := authenticateRequest(r, db, cfg)
 		if principal != nil {
@@ -41,18 +42,18 @@ func WithOptionalPanelAuth(db *sql.DB, cfg *config.BackendConfig, next http.Hand
 	})
 }
 
-func authenticateRequest(r *http.Request, db *sql.DB, cfg *config.BackendConfig) (*AuthPrincipal, error) {
+func authenticateRequest(r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) (*AuthPrincipal, error) {
 	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
 		if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
 			token := strings.TrimSpace(authHeader[7:])
 			if token != "" {
-				return resolveToken(token, db, cfg)
+				return resolveToken(r.Context(), token, db, cfg)
 			}
 		}
 	}
 
 	if cookie, err := r.Cookie(sessionCookieName); err == nil && strings.TrimSpace(cookie.Value) != "" {
-		return resolveToken(strings.TrimSpace(cookie.Value), db, cfg)
+		return resolveToken(r.Context(), strings.TrimSpace(cookie.Value), db, cfg)
 	}
 
 	return nil, http.ErrNoCookie

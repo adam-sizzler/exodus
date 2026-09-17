@@ -1,12 +1,13 @@
 package passkeys
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/auth"
@@ -34,7 +35,7 @@ import (
 // @Router       /passkeys [get]
 // @Router       /passkeys [patch]
 // @Router       /passkeys [delete]
-func PasskeysHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func PasskeysHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/passkeys" && r.URL.Path != "/api/passkeys/" {
 			shared.SendAPIError(w, shared.ErrNotFound, cfg)
@@ -54,7 +55,7 @@ func PasskeysHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	}
 }
 
-func handleGetPasskeys(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetPasskeys(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	adminUUID, ok := currentAdminUUID(r)
 	if !ok {
 		shared.SendAPIError(w, shared.ErrUnauthorized, cfg)
@@ -73,7 +74,7 @@ func handleGetPasskeys(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *
 	})
 }
 
-func handlePatchPasskey(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handlePatchPasskey(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	adminUUID, ok := currentAdminUUID(r)
 	if !ok {
 		shared.SendAPIError(w, shared.ErrUnauthorized, cfg)
@@ -96,7 +97,7 @@ func handlePatchPasskey(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg 
 		return
 	}
 
-	result, execErr := db.ExecContext(r.Context(), `
+	result, execErr := db.Exec(r.Context(), `
 		UPDATE passkeys
 		SET passkey_provider = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE id = $2 AND admin_uuid = $3
@@ -105,12 +106,7 @@ func handlePatchPasskey(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg 
 		shared.SendAPIError(w, shared.ErrUpdatePasskeyFailed.WithCause(execErr), cfg)
 		return
 	}
-	rows, rowsErr := result.RowsAffected()
-	if rowsErr != nil {
-		shared.SendAPIError(w, shared.ErrUpdatePasskeyFailed.WithCause(rowsErr), cfg)
-		return
-	}
-	if rows == 0 {
+	if result.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrPasskeyNotFound, cfg)
 		return
 	}
@@ -127,7 +123,7 @@ func handlePatchPasskey(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg 
 	})
 }
 
-func handleDeletePasskey(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleDeletePasskey(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	adminUUID, ok := currentAdminUUID(r)
 	if !ok {
 		shared.SendAPIError(w, shared.ErrUnauthorized, cfg)
@@ -145,17 +141,12 @@ func handleDeletePasskey(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 		return
 	}
 
-	result, execErr := db.ExecContext(r.Context(), `DELETE FROM passkeys WHERE id = $1 AND admin_uuid = $2`, req.ID, adminUUID)
+	result, execErr := db.Exec(r.Context(), `DELETE FROM passkeys WHERE id = $1 AND admin_uuid = $2`, req.ID, adminUUID)
 	if execErr != nil {
 		shared.SendAPIError(w, shared.ErrDeletePasskeyFailed.WithCause(execErr), cfg)
 		return
 	}
-	rows, rowsErr := result.RowsAffected()
-	if rowsErr != nil {
-		shared.SendAPIError(w, shared.ErrDeletePasskeyFailed.WithCause(rowsErr), cfg)
-		return
-	}
-	if rows == 0 {
+	if result.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrPasskeyNotFound, cfg)
 		return
 	}
@@ -173,7 +164,7 @@ func handleDeletePasskey(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 // @Failure      401  {object}  shared.ErrorResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /passkeys/registration/options [get]
-func RegistrationOptionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func RegistrationOptionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -237,7 +228,7 @@ func RegistrationOptionsHandler(db *sql.DB, cfg *config.BackendConfig) http.Hand
 // @Failure      403   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /passkeys/registration/verify [post]
-func VerifyRegistrationHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func VerifyRegistrationHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -318,7 +309,7 @@ func VerifyRegistrationHandler(db *sql.DB, cfg *config.BackendConfig) http.Handl
 // @Failure      403  {object}  shared.ErrorResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /auth/passkey/authentication/options [get]
-func AuthenticationOptionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func AuthenticationOptionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -370,7 +361,7 @@ func AuthenticationOptionsHandler(db *sql.DB, cfg *config.BackendConfig) http.Ha
 // @Failure      403   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /auth/passkey/authentication/verify [post]
-func VerifyAuthenticationHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func VerifyAuthenticationHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")

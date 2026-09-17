@@ -2,7 +2,6 @@ package infrabilling
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -88,7 +89,7 @@ func (field *optionalString) UnmarshalJSON(data []byte) error {
 // @Router       /infra-billing/providers [patch]
 // @Router       /infra-billing/providers/{uuid} [get]
 // @Router       /infra-billing/providers/{uuid} [delete]
-func ProvidersHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ProvidersHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		providerUUID := uuidFromPath(r.URL.Path, "/api/infra-billing/providers")
 
@@ -111,7 +112,7 @@ func ProvidersHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	}
 }
 
-func handleCreateProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreateProvider(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req createProviderRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		shared.WriteJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -135,7 +136,7 @@ func handleCreateProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	}
 
 	var providerUUID string
-	if err := db.QueryRowContext(r.Context(), `
+	if err := db.QueryRow(r.Context(), `
 		INSERT INTO infra_providers (name, favicon_link, login_url)
 		VALUES ($1, $2, $3)
 		RETURNING uuid
@@ -147,7 +148,7 @@ func handleCreateProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	writeProviderResponseWithStatus(w, r, db, cfg, providerUUID, http.StatusCreated)
 }
 
-func handleUpdateProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleUpdateProvider(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req updateProviderRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		shared.WriteJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -203,13 +204,12 @@ func handleUpdateProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	if len(updates) > 0 {
 		args = append(args, req.UUID)
 		query := fmt.Sprintf("UPDATE infra_providers SET %s, updated_at = now() WHERE uuid = $%d", strings.Join(updates, ", "), idx)
-		result, err := db.ExecContext(r.Context(), query, args...)
+		result, err := db.Exec(r.Context(), query, args...)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrUpdateInfraProviderFailed.WithCause(err), cfg)
 			return
 		}
-		affected, err := result.RowsAffected()
-		if err != nil || affected == 0 {
+		if result.RowsAffected() == 0 {
 			shared.SendAPIError(w, shared.ErrInfraProviderNotFound, cfg)
 			return
 		}
@@ -218,19 +218,18 @@ func handleUpdateProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	writeProviderResponse(w, r, db, cfg, req.UUID)
 }
 
-func handleDeleteProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, providerUUID string) {
+func handleDeleteProvider(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, providerUUID string) {
 	if providerUUID == "" {
 		shared.WriteJSONError(w, http.StatusBadRequest, "uuid is required")
 		return
 	}
 
-	result, err := db.ExecContext(r.Context(), `DELETE FROM infra_providers WHERE uuid = $1`, providerUUID)
+	result, err := db.Exec(r.Context(), `DELETE FROM infra_providers WHERE uuid = $1`, providerUUID)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrDeleteInfraProviderFailed.WithCause(err), cfg)
 		return
 	}
-	affected, err := result.RowsAffected()
-	if err != nil || affected == 0 {
+	if result.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrInfraProviderNotFound, cfg)
 		return
 	}
@@ -238,7 +237,7 @@ func handleDeleteProvider(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func writeProvidersResponse(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func writeProvidersResponse(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	items, err := getProviders(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetInfraProvidersFailed.WithCause(err), cfg)
@@ -252,11 +251,11 @@ func writeProvidersResponse(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	})
 }
 
-func writeProviderResponse(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, providerUUID string) {
+func writeProviderResponse(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, providerUUID string) {
 	writeProviderResponseWithStatus(w, r, db, cfg, providerUUID, http.StatusOK)
 }
 
-func writeProviderResponseWithStatus(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, providerUUID string, status int) {
+func writeProviderResponseWithStatus(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, providerUUID string, status int) {
 	item, err := getProvider(r.Context(), db, providerUUID)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetInfraProviderByUUIDFailed.WithCause(err), cfg)
@@ -269,12 +268,12 @@ func writeProviderResponseWithStatus(w http.ResponseWriter, r *http.Request, db 
 	shared.WriteJSON(w, status, map[string]any{"response": item})
 }
 
-func getProviders(ctx context.Context, db *sql.DB) ([]providerRecord, error) {
+func getProviders(ctx context.Context, db *pgxpool.Pool) ([]providerRecord, error) {
 	items := make([]providerRecord, 0)
 	historyByProvider := make(map[string]map[string]any)
 	nodesByProvider := make(map[string][]providerNode)
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT uuid, name, favicon_link, login_url, created_at, updated_at
 		FROM infra_providers
 		ORDER BY created_at ASC
@@ -286,15 +285,8 @@ func getProviders(ctx context.Context, db *sql.DB) ([]providerRecord, error) {
 
 	for rows.Next() {
 		var rec providerRecord
-		var favicon, loginURL sql.NullString
-		if scanErr := rows.Scan(&rec.UUID, &rec.Name, &favicon, &loginURL, &rec.CreatedAt, &rec.UpdatedAt); scanErr != nil {
+		if scanErr := rows.Scan(&rec.UUID, &rec.Name, &rec.Favicon, &rec.LoginURL, &rec.CreatedAt, &rec.UpdatedAt); scanErr != nil {
 			return nil, scanErr
-		}
-		if favicon.Valid {
-			rec.Favicon = &favicon.String
-		}
-		if loginURL.Valid {
-			rec.LoginURL = &loginURL.String
 		}
 		items = append(items, rec)
 	}
@@ -302,7 +294,7 @@ func getProviders(ctx context.Context, db *sql.DB) ([]providerRecord, error) {
 		return nil, err
 	}
 
-	histRows, err := db.QueryContext(ctx, `
+	histRows, err := db.Query(ctx, `
 		SELECT provider_uuid, COALESCE(ROUND(SUM(amount)::numeric, 2)::float8, 0), COUNT(*)
 		FROM infra_billing_history
 		GROUP BY provider_uuid
@@ -328,7 +320,7 @@ func getProviders(ctx context.Context, db *sql.DB) ([]providerRecord, error) {
 		return nil, err
 	}
 
-	nodeRows, err := db.QueryContext(ctx, `
+	nodeRows, err := db.Query(ctx, `
 		SELECT ibn.provider_uuid, ibn.node_uuid, n.name, n.country_code
 		FROM infra_billing_nodes ibn
 		JOIN nodes n ON n.uuid = ibn.node_uuid
@@ -372,7 +364,7 @@ func getProviders(ctx context.Context, db *sql.DB) ([]providerRecord, error) {
 	return items, nil
 }
 
-func getProvider(ctx context.Context, db *sql.DB, providerUUID string) (*providerRecord, error) {
+func getProvider(ctx context.Context, db *pgxpool.Pool, providerUUID string) (*providerRecord, error) {
 	providerUUID = strings.TrimSpace(providerUUID)
 	if providerUUID == "" {
 		return nil, nil

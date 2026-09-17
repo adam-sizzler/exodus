@@ -60,7 +60,7 @@ func normalizeNullableInt(value *int) interface{} {
 }
 
 func normalizeProtocolCredentialForCreate(override *bool, value *string) *string {
-	if !coalesceBool(override, false) {
+	if !util.Coalesce(override, false) {
 		return nil
 	}
 	return normalizeProtocolCredentialPointer(value)
@@ -132,10 +132,6 @@ func normalizeOptionalJSONField(raw OptionalJSON, emptyObjectAsNull bool) (bool,
 	}
 	value := json.RawMessage(raw.Raw)
 	return normalizeJSONField(&value, emptyObjectAsNull)
-}
-
-func coalesceBool(value *bool, fallback bool) bool {
-	return util.Coalesce(value, fallback)
 }
 
 func ensureStringSlice(values []string) []string {

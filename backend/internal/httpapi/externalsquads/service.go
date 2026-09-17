@@ -1,13 +1,10 @@
 package externalsquads
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
-
-	"exodus/internal/util"
 
 	"github.com/google/uuid"
 )
@@ -181,11 +178,11 @@ func convertExternalSquadToAPI(rec ExternalSquadRecord) (ExternalSquadAPI, error
 	return api, nil
 }
 
-func parseJSONRaw(raw sql.NullString) json.RawMessage {
-	if !raw.Valid || raw.String == "" {
+func parseJSONRaw(raw *string) json.RawMessage {
+	if raw == nil || *raw == "" {
 		return nil
 	}
-	return json.RawMessage(raw.String)
+	return json.RawMessage(*raw)
 }
 
 func parseJSONMap(raw string) (map[string]any, error) {
@@ -210,19 +207,16 @@ func parseJSONHeaders(raw string) (map[string]string, error) {
 	return obj, nil
 }
 
-func marshalJSON(v any) (sql.NullString, error) {
+func marshalJSON(v any) (*string, error) {
 	if v == nil {
-		return sql.NullString{Valid: false}, nil
+		return nil, nil
 	}
 	data, err := json.Marshal(v)
 	if err != nil {
-		return sql.NullString{}, err
+		return nil, err
 	}
-	return sql.NullString{String: string(data), Valid: true}, nil
-}
-
-func coalesceInt(v *int, fallback int) int {
-	return util.Coalesce(v, fallback)
+	str := string(data)
+	return &str, nil
 }
 
 func normalizeStringPtr(v *string) interface{} {
@@ -233,8 +227,4 @@ func normalizeStringPtr(v *string) interface{} {
 		return nil
 	}
 	return strings.TrimSpace(*v)
-}
-
-func isUniqueViolation(err error, constraint string) bool {
-	return util.IsUniqueViolation(err, constraint)
 }

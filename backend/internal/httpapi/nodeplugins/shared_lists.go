@@ -1,7 +1,6 @@
 package nodeplugins
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +9,9 @@ import (
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type SharedListRecord struct {
@@ -37,7 +39,7 @@ type UpdateSharedListRequest struct {
 	Config json.RawMessage `json:"config"`
 }
 
-func handleSharedLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, subpath string) {
+func handleSharedLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, subpath string) {
 	if subpath == "" {
 		switch r.Method {
 		case http.MethodGet:
@@ -79,7 +81,6 @@ func handleSharedLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *
 		return
 	}
 
-
 	name := subpath
 	switch r.Method {
 	case http.MethodGet:
@@ -91,8 +92,8 @@ func handleSharedLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *
 	}
 }
 
-func handleGetAllSharedLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
-	rows, err := db.QueryContext(r.Context(), `
+func handleGetAllSharedLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
+	rows, err := db.Query(r.Context(), `
 		SELECT name, config, created_at, updated_at
 		FROM shared_lists
 		ORDER BY created_at ASC
@@ -151,8 +152,8 @@ func handleGetAllSharedLists(w http.ResponseWriter, r *http.Request, db *sql.DB,
 	})
 }
 
-func handleGetSharedListByName(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, name string) {
-	row := db.QueryRowContext(r.Context(), `
+func handleGetSharedListByName(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, name string) {
+	row := db.QueryRow(r.Context(), `
 		SELECT name, config, created_at, updated_at
 		FROM shared_lists
 		WHERE name = $1
@@ -161,7 +162,7 @@ func handleGetSharedListByName(w http.ResponseWriter, r *http.Request, db *sql.D
 	var item SharedListRecord
 	var configBytes []byte
 	if err := row.Scan(&item.Name, &configBytes, &item.CreatedAt, &item.UpdatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSharedListNotFound, cfg)
 			return
 		}
@@ -175,7 +176,7 @@ func handleGetSharedListByName(w http.ResponseWriter, r *http.Request, db *sql.D
 	})
 }
 
-func handleCreateSharedList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreateSharedList(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req CreateSharedListRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
@@ -194,7 +195,7 @@ func handleCreateSharedList(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 
 	var item SharedListRecord
 	var configBytes []byte
-	err := db.QueryRowContext(r.Context(), `
+	err := db.QueryRow(r.Context(), `
 		INSERT INTO shared_lists (name, config, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
 		RETURNING name, config, created_at, updated_at
@@ -210,7 +211,7 @@ func handleCreateSharedList(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 	})
 }
 
-func handleUpdateSharedList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleUpdateSharedList(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req UpdateSharedListRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
@@ -229,14 +230,14 @@ func handleUpdateSharedList(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 
 	var item SharedListRecord
 	var configBytes []byte
-	err := db.QueryRowContext(r.Context(), `
+	err := db.QueryRow(r.Context(), `
 		UPDATE shared_lists
 		SET config = $1, updated_at = NOW()
 		WHERE name = $2
 		RETURNING name, config, created_at, updated_at
 	`, configJSON, name).Scan(&item.Name, &configBytes, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSharedListNotFound, cfg)
 			return
 		}
@@ -253,7 +254,7 @@ func handleUpdateSharedList(w http.ResponseWriter, r *http.Request, db *sql.DB, 
 // handleDeleteSharedListByBody handles DELETE /api/node-plugins/shared-lists,
 // where the contract (DeleteSharedListCommand.RequestBodySchema) sends the
 // target list's name in a JSON body rather than as a URL path segment.
-func handleDeleteSharedListByBody(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleDeleteSharedListByBody(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -269,19 +270,13 @@ func handleDeleteSharedListByBody(w http.ResponseWriter, r *http.Request, db *sq
 	handleDeleteSharedList(w, r, db, cfg, name)
 }
 
-
-func handleDeleteSharedList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, name string) {
-	res, err := db.ExecContext(r.Context(), `DELETE FROM shared_lists WHERE name = $1`, name)
+func handleDeleteSharedList(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, name string) {
+	res, err := db.Exec(r.Context(), `DELETE FROM shared_lists WHERE name = $1`, name)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrDeleteSharedListFailed.WithCause(err), cfg)
 		return
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrDeleteSharedListFailed.WithCause(err), cfg)
-		return
-	}
-	if n == 0 {
+	if res.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrSharedListNotFound, cfg)
 		return
 	}

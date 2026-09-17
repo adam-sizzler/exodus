@@ -1,7 +1,6 @@
 package externalsquads
 
 import (
-	"database/sql"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -35,20 +34,29 @@ func TestConvertExternalSquadToAPI_ResponseHeadersRemove(t *testing.T) {
 	}
 }
 
+func strPtr(s string) *string {
+	return &s
+}
+
 func TestParseJSONRaw(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    sql.NullString
+		input    *string
 		expected string
 	}{
 		{
 			name:     "null string",
-			input:    sql.NullString{Valid: false},
+			input:    nil,
+			expected: "",
+		},
+		{
+			name:     "empty string",
+			input:    strPtr(""),
 			expected: "",
 		},
 		{
 			name:     "valid json string",
-			input:    sql.NullString{Valid: true, String: `["announce"]`},
+			input:    strPtr(`["announce"]`),
 			expected: `["announce"]`,
 		},
 	}

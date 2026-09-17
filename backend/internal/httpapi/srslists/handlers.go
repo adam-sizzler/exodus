@@ -2,7 +2,6 @@ package srslists
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +15,8 @@ import (
 	monitor "exodus/internal/subscriptionnodes"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // SRSListsHandler godoc
@@ -33,7 +34,7 @@ import (
 // @Router       /srs-lists [get]
 // @Router       /srs-lists [post]
 // @Router       /srs-lists [patch]
-func SRSListsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SRSListsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -62,7 +63,7 @@ func SRSListsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /srs-lists/{uuid} [get]
 // @Router       /srs-lists/{uuid} [delete]
-func SRSListByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SRSListByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uuidStr := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/srs-lists/"))
 		if uuidStr == "" {
@@ -99,7 +100,7 @@ func SRSListByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFun
 // @Router       /srs-lists/actions/reorder [post]
 // @Router       /srs-lists/actions/check [post]
 // @Router       /srs-lists/actions/sync [post]
-func SRSListsActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SRSListsActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -136,7 +137,7 @@ func SRSListsActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 // @Router       /srs-lists/bulk/enable [post]
 // @Router       /srs-lists/bulk/disable [post]
 // @Router       /srs-lists/bulk/set-interval [post]
-func SRSListsBulkHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SRSListsBulkHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -158,8 +159,8 @@ func SRSListsBulkHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 	}
 }
 
-func handleGetSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
-	items, err := srscore.LoadAllSql(r.Context(), db)
+func handleGetSRSLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
+	items, err := srscore.LoadAll(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetSrsListsFailed.WithCause(err), cfg)
 		return
@@ -191,8 +192,8 @@ func handleGetSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": map[string]any{"srsLists": apiItems}})
 }
 
-func handleGetSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, listUUID string) {
-	items, err := srscore.LoadAllSql(r.Context(), db)
+func handleGetSRSList(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, listUUID string) {
+	items, err := srscore.LoadAll(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetSrsListByUUIDFailed.WithCause(err), cfg)
 		return
@@ -226,7 +227,7 @@ func handleGetSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *c
 	shared.SendAPIError(w, shared.ErrSrsListNotFound, cfg)
 }
 
-func handleCreateSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreateSRSLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	reqStarted := time.Now()
 	defer func() {
 		cfg.Logger.Debug("SRS create request completed", "duration_ms", time.Since(reqStarted).Milliseconds())
@@ -317,28 +318,28 @@ func handleCreateSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	}
 
 	dbStarted := time.Now()
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := db.Begin(r.Context())
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrCreateSRSListFailed.WithCause(err), cfg)
 		return
 	}
 	defer func() {
-		_ = tx.Rollback()
+		_ = tx.Rollback(context.Background())
 	}()
 
-	var maxPos sql.NullInt64
-	if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(view_position), -1) FROM srs_lists`).Scan(&maxPos); err != nil {
+	var maxPos *int64
+	if err := tx.QueryRow(r.Context(), `SELECT COALESCE(MAX(view_position), -1) FROM srs_lists`).Scan(&maxPos); err != nil {
 		shared.SendAPIError(w, shared.ErrCreateSRSListFailed.WithCause(err), cfg)
 		return
 	}
 	currentPos := int64(-1)
-	if maxPos.Valid {
-		currentPos = maxPos.Int64
+	if maxPos != nil {
+		currentPos = *maxPos
 	}
 
 	for _, item := range toCreate {
 		currentPos++
-		if _, err := tx.ExecContext(r.Context(), `
+		if _, err := tx.Exec(r.Context(), `
 			INSERT INTO srs_lists (tags, format, url, update_interval, path, file_name, view_position, is_enabled, is_available, created_at, updated_at)
 			VALUES ($1::text[], $2, $3, $4, $5, $6, $7, $8, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		`, shared.PostgresTextArrayLiteral(item.Tags), item.Format, item.URL, item.UpdateInterval, item.Path, item.FileName, currentPos, item.IsEnabled); err != nil {
@@ -347,7 +348,7 @@ func handleCreateSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(r.Context()); err != nil {
 		shared.SendAPIError(w, shared.ErrCreateSRSListFailed.WithCause(err), cfg)
 		return
 	}
@@ -355,7 +356,7 @@ func handleCreateSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	cfg.Logger.Debug("SRS create DB write completed", "duration_ms", time.Since(dbStarted).Milliseconds(), "created", len(toCreate))
 
 	checkStarted := time.Now()
-	if _, err := srscore.CheckAndUpdateAvailabilitySql(context.Background(), db, cfg); err != nil {
+	if _, err := srscore.CheckAndUpdateAvailability(context.Background(), db, cfg); err != nil {
 		cfg.Logger.Warn("Failed to check SRS lists right after create", "error", err)
 	}
 	cfg.Logger.Debug("SRS create availability check completed", "duration_ms", time.Since(checkStarted).Milliseconds())
@@ -363,7 +364,7 @@ func handleCreateSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	handleGetSRSLists(w, r, db, cfg)
 }
 
-func handleUpdateSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleUpdateSRSList(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	reqStarted := time.Now()
 	defer func() {
 		cfg.Logger.Debug("SRS update request completed", "duration_ms", time.Since(reqStarted).Milliseconds())
@@ -459,17 +460,12 @@ func handleUpdateSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 	query := fmt.Sprintf("UPDATE srs_lists SET %s WHERE uuid = $%d", strings.Join(updates, ", "), idx)
 
 	dbStarted := time.Now()
-	res, execErr := db.ExecContext(r.Context(), query, args...)
+	res, execErr := db.Exec(r.Context(), query, args...)
 	if execErr != nil {
 		shared.SendAPIError(w, shared.ErrUpdateSRSListFailed.WithCause(execErr), cfg)
 		return
 	}
-	rows, rowsErr := res.RowsAffected()
-	if rowsErr != nil {
-		shared.SendAPIError(w, shared.ErrUpdateSRSListFailed.WithCause(rowsErr), cfg)
-		return
-	}
-	if rows == 0 {
+	if res.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrSrsListNotFound, cfg)
 		return
 	}
@@ -477,7 +473,7 @@ func handleUpdateSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 	cfg.Logger.Debug("SRS update DB write completed", "duration_ms", time.Since(dbStarted).Milliseconds(), "uuid", strings.TrimSpace(req.UUID))
 
 	checkStarted := time.Now()
-	if _, err := srscore.CheckAndUpdateAvailabilitySql(context.Background(), db, cfg); err != nil {
+	if _, err := srscore.CheckAndUpdateAvailability(context.Background(), db, cfg); err != nil {
 		cfg.Logger.Warn("Failed to check SRS list after update", "error", err)
 	}
 	cfg.Logger.Debug("SRS update availability check completed", "duration_ms", time.Since(checkStarted).Milliseconds(), "uuid", strings.TrimSpace(req.UUID))
@@ -485,25 +481,20 @@ func handleUpdateSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 	handleGetSRSLists(w, r, db, cfg)
 }
 
-func handleDeleteSRSList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, listUUID string) {
-	res, execErr := db.ExecContext(r.Context(), `DELETE FROM srs_lists WHERE uuid = $1`, listUUID)
+func handleDeleteSRSList(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, listUUID string) {
+	res, execErr := db.Exec(r.Context(), `DELETE FROM srs_lists WHERE uuid = $1`, listUUID)
 	if execErr != nil {
 		shared.SendAPIError(w, shared.ErrDeleteSRSListFailed.WithCause(execErr), cfg)
 		return
 	}
-	rows, rowsErr := res.RowsAffected()
-	if rowsErr != nil {
-		shared.SendAPIError(w, shared.ErrDeleteSRSListFailed.WithCause(rowsErr), cfg)
-		return
-	}
-	if rows == 0 {
+	if res.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrSrsListNotFound, cfg)
 		return
 	}
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": map[string]any{"deleted": true}})
 }
 
-func handleBulkDeleteSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleBulkDeleteSRSLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req bulkDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid request payload", err, cfg)
@@ -519,7 +510,7 @@ func handleBulkDeleteSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 
-	_, execErr := db.ExecContext(r.Context(), `DELETE FROM srs_lists WHERE uuid = ANY($1)`, cleanUUIDs)
+	_, execErr := db.Exec(r.Context(), `DELETE FROM srs_lists WHERE uuid = ANY($1)`, cleanUUIDs)
 	if execErr != nil {
 		shared.SendAPIError(w, shared.ErrDeleteSRSListFailed.WithCause(execErr), cfg)
 		return
@@ -527,7 +518,7 @@ func handleBulkDeleteSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": map[string]any{"deleted": true}})
 }
 
-func handleBulkEnableSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, enabled bool) {
+func handleBulkEnableSRSLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, enabled bool) {
 	var req bulkEnableRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid request payload", err, cfg)
@@ -543,7 +534,7 @@ func handleBulkEnableSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB
 		return
 	}
 
-	_, execErr := db.ExecContext(r.Context(), `
+	_, execErr := db.Exec(r.Context(), `
 		UPDATE srs_lists
 		SET is_enabled = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE uuid = ANY($2)
@@ -556,7 +547,7 @@ func handleBulkEnableSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB
 	handleGetSRSLists(w, r, db, cfg)
 }
 
-func handleBulkSetIntervalSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleBulkSetIntervalSRSLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req bulkSetIntervalRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid request payload", err, cfg)
@@ -577,7 +568,7 @@ func handleBulkSetIntervalSRSLists(w http.ResponseWriter, r *http.Request, db *s
 		return
 	}
 
-	_, execErr := db.ExecContext(r.Context(), `
+	_, execErr := db.Exec(r.Context(), `
 		UPDATE srs_lists
 		SET update_interval = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE uuid = ANY($2)
@@ -590,7 +581,7 @@ func handleBulkSetIntervalSRSLists(w http.ResponseWriter, r *http.Request, db *s
 	handleGetSRSLists(w, r, db, cfg)
 }
 
-func handleReorderSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleReorderSRSLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req reorderSRSListsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid request payload", err, cfg)
@@ -601,13 +592,13 @@ func handleReorderSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, c
 		return
 	}
 
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := db.Begin(r.Context())
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrReorderSRSListsFailed.WithCause(err), cfg)
 		return
 	}
 	defer func() {
-		_ = tx.Rollback()
+		_ = tx.Rollback(context.Background())
 	}()
 
 	uuids := make([]string, len(req.Items))
@@ -623,7 +614,7 @@ func handleReorderSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, c
 	}
 
 	// Single batched UPDATE via UNNEST instead of one round-trip per item.
-	if _, err := tx.ExecContext(r.Context(), `
+	if _, err := tx.Exec(r.Context(), `
 		UPDATE srs_lists AS s
 		SET view_position = v.view_position, updated_at = CURRENT_TIMESTAMP
 		FROM (
@@ -635,7 +626,7 @@ func handleReorderSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, c
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(r.Context()); err != nil {
 		shared.SendAPIError(w, shared.ErrReorderSRSListsFailed.WithCause(err), cfg)
 		return
 	}
@@ -643,7 +634,7 @@ func handleReorderSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, c
 	handleGetSRSLists(w, r, db, cfg)
 }
 
-func handleCheckSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCheckSRSLists(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	started := time.Now()
 	defer func() {
 		cfg.Logger.Debug("SRS check request completed", "duration_ms", time.Since(started).Milliseconds())
@@ -658,7 +649,7 @@ func handleCheckSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 			return
 		}
 	} else {
-		if _, err := srscore.CheckAndUpdateAvailabilitySql(r.Context(), db, cfg); err != nil {
+		if _, err := srscore.CheckAndUpdateAvailability(r.Context(), db, cfg); err != nil {
 			shared.SendAPIError(w, shared.ErrGetAllSRSListsFailed.WithCause(err), cfg)
 			return
 		}
@@ -678,7 +669,7 @@ func handleCheckSRSLists(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /srs-lists/tags [get]
 // @Router       /srs-lists/tags [patch]
-func SRSListsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SRSListsTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -691,7 +682,7 @@ func SRSListsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 	}
 }
 
-func handleGetSRSListTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetSRSListTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	tags, err := getAllTags(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetSrsListsFailed.WithCause(err), cfg)
@@ -704,7 +695,7 @@ func handleGetSRSListTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 	})
 }
 
-func handleSetSRSListTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleSetSRSListTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req shared.SetEntityTagsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -717,7 +708,7 @@ func handleSetSRSListTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cf
 
 	sanitized := shared.SanitizeTags(req.Tags)
 	if err := setTags(r.Context(), db, req.UUID, sanitized); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSrsListNotFound, cfg)
 			return
 		}

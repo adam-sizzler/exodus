@@ -2,18 +2,18 @@ package nodeplugins
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"exodus/internal/db"
 	"exodus/internal/httpapi/shared"
 	monitor "exodus/internal/nodes"
 	"exodus/internal/util"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type responseEnvelope[T any] struct {
@@ -179,8 +179,8 @@ func normalizeHaproxyInboundTags(raw []string) []string {
 	return result
 }
 
-func loadPlugins(ctx context.Context, db *sql.DB) ([]nodePlugin, error) {
-	rows, err := db.QueryContext(ctx, `
+func loadPlugins(ctx context.Context, db *pgxpool.Pool) ([]nodePlugin, error) {
+	rows, err := db.Query(ctx, `
 		SELECT uuid::text, name, tags, plugin_config::text, view_position, created_at, updated_at
 		FROM node_plugin
 		ORDER BY view_position ASC, created_at ASC
@@ -204,9 +204,9 @@ func loadPlugins(ctx context.Context, db *sql.DB) ([]nodePlugin, error) {
 	return plugins, nil
 }
 
-func loadPluginByUUID(ctx context.Context, db *sql.DB, pluginUUID string) (nodePlugin, error) {
+func loadPluginByUUID(ctx context.Context, db *pgxpool.Pool, pluginUUID string) (nodePlugin, error) {
 	var plugin nodePlugin
-	row := db.QueryRowContext(ctx, `
+	row := db.QueryRow(ctx, `
 		SELECT uuid::text, name, tags, plugin_config::text, view_position, created_at, updated_at
 		FROM node_plugin
 		WHERE uuid::text = $1
@@ -215,10 +215,10 @@ func loadPluginByUUID(ctx context.Context, db *sql.DB, pluginUUID string) (nodeP
 	return plugin, err
 }
 
-func createPlugin(ctx context.Context, db *sql.DB, name string, tags []string, configJSON json.RawMessage) (nodePlugin, error) {
+func createPlugin(ctx context.Context, db *pgxpool.Pool, name string, tags []string, configJSON json.RawMessage) (nodePlugin, error) {
 	sanitized := shared.SanitizeTags(tags)
 	var plugin nodePlugin
-	row := db.QueryRowContext(ctx, `
+	row := db.QueryRow(ctx, `
 		INSERT INTO node_plugin (name, tags, plugin_config)
 		VALUES ($1, $2::text[], $3::jsonb)
 		RETURNING uuid::text, name, tags, plugin_config::text, view_position, created_at, updated_at
@@ -227,7 +227,7 @@ func createPlugin(ctx context.Context, db *sql.DB, name string, tags []string, c
 	return plugin, err
 }
 
-func updatePlugin(ctx context.Context, db *sql.DB, pluginUUID string, name *string, tags []string, configJSON *json.RawMessage, viewPosition *int) (nodePlugin, error) {
+func updatePlugin(ctx context.Context, db *pgxpool.Pool, pluginUUID string, name *string, tags []string, configJSON *json.RawMessage, viewPosition *int) (nodePlugin, error) {
 	current, err := loadPluginByUUID(ctx, db, pluginUUID)
 	if err != nil {
 		return nodePlugin{}, err
@@ -250,7 +250,7 @@ func updatePlugin(ctx context.Context, db *sql.DB, pluginUUID string, name *stri
 	}
 
 	var plugin nodePlugin
-	row := db.QueryRowContext(ctx, `
+	row := db.QueryRow(ctx, `
 		UPDATE node_plugin
 		SET name = $1, tags = $2::text[], plugin_config = $3::jsonb, view_position = $4, updated_at = CURRENT_TIMESTAMP
 		WHERE uuid::text = $5
@@ -260,24 +260,24 @@ func updatePlugin(ctx context.Context, db *sql.DB, pluginUUID string, name *stri
 	return plugin, err
 }
 
-func deletePlugin(ctx context.Context, db *sql.DB, pluginUUID string) error {
-	tx, err := db.BeginTx(ctx, nil)
+func deletePlugin(ctx context.Context, db *pgxpool.Pool, pluginUUID string) error {
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = tx.Rollback()
+		_ = tx.Rollback(context.Background())
 	}()
-	if _, err = tx.ExecContext(ctx, `UPDATE nodes SET active_plugin_uuid = NULL WHERE active_plugin_uuid::text = $1`, pluginUUID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE nodes SET active_plugin_uuid = NULL WHERE active_plugin_uuid::text = $1`, pluginUUID); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM node_plugin WHERE uuid::text = $1`, pluginUUID); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM node_plugin WHERE uuid::text = $1`, pluginUUID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return tx.Commit(ctx)
 }
 
-func reorderPlugins(ctx context.Context, db *sql.DB, req reorderRequest) error {
+func reorderPlugins(ctx context.Context, db *pgxpool.Pool, req reorderRequest) error {
 	if len(req.Items) == 0 {
 		return nil
 	}
@@ -292,16 +292,16 @@ func reorderPlugins(ctx context.Context, db *sql.DB, req reorderRequest) error {
 		positions[i] = int32(item.ViewPosition)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = tx.Rollback()
+		_ = tx.Rollback(context.Background())
 	}()
 
 	// Single batched UPDATE via UNNEST instead of one round-trip per plugin.
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE node_plugin AS p
 		SET view_position = v.view_position, updated_at = CURRENT_TIMESTAMP
 		FROM (
@@ -311,10 +311,10 @@ func reorderPlugins(ctx context.Context, db *sql.DB, req reorderRequest) error {
 	`, uuids, positions); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return tx.Commit(ctx)
 }
 
-func clonePlugin(ctx context.Context, db *sql.DB, req cloneRequest) (nodePlugin, error) {
+func clonePlugin(ctx context.Context, db *pgxpool.Pool, req cloneRequest) (nodePlugin, error) {
 	source, err := loadPluginByUUID(ctx, db, strings.TrimSpace(req.CloneFromUUID))
 	if err != nil {
 		return nodePlugin{}, err
@@ -328,8 +328,8 @@ func clonePlugin(ctx context.Context, db *sql.DB, req cloneRequest) (nodePlugin,
 	return createPlugin(ctx, db, name, source.Tags, source.PluginConfig)
 }
 
-func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func getAllTags(ctx context.Context, db *pgxpool.Pool) ([]string, error) {
+	rows, err := db.Query(ctx, `
 		SELECT DISTINCT unnest(tags) AS tag
 		FROM node_plugin
 		WHERE tags IS NOT NULL AND cardinality(tags) > 0
@@ -353,9 +353,9 @@ func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
 	return tags, rows.Err()
 }
 
-func setTags(ctx context.Context, db *sql.DB, pluginUUID string, tags []string) error {
+func setTags(ctx context.Context, db *pgxpool.Pool, pluginUUID string, tags []string) error {
 	sanitized := shared.SanitizeTags(tags)
-	result, err := db.ExecContext(ctx, `
+	result, err := db.Exec(ctx, `
 		UPDATE node_plugin
 		SET tags = $1::text[], updated_at = CURRENT_TIMESTAMP
 		WHERE uuid::text = $2
@@ -363,23 +363,19 @@ func setTags(ctx context.Context, db *sql.DB, pluginUUID string, tags []string) 
 	if err != nil {
 		return err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return sql.ErrNoRows
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }
 
-func ensureNodesExist(ctx context.Context, db *sql.DB, nodeUUIDs []string) error {
+func ensureNodesExist(ctx context.Context, db *pgxpool.Pool, nodeUUIDs []string) error {
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE uuid::text = ANY($1)`, nodeUUIDs).Scan(&count); err != nil {
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM nodes WHERE uuid::text = ANY($1)`, nodeUUIDs).Scan(&count); err != nil {
 		return err
 	}
 	if count != len(nodeUUIDs) {
-		return sql.ErrNoRows
+		return pgx.ErrNoRows
 	}
 	return nil
 }
@@ -392,7 +388,7 @@ type pluginScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanPlugin(rows *sql.Rows) (nodePlugin, error) {
+func scanPlugin(rows pgx.Rows) (nodePlugin, error) {
 	var plugin nodePlugin
 	err := scanPluginRow(rows, &plugin)
 	return plugin, err
@@ -400,7 +396,7 @@ func scanPlugin(rows *sql.Rows) (nodePlugin, error) {
 
 func scanPluginRow(scanner pluginScanner, plugin *nodePlugin) error {
 	var rawConfig string
-	var tags db.StringArray
+	var tags []string
 	if err := scanner.Scan(
 		&plugin.UUID,
 		&plugin.Name,
@@ -412,7 +408,7 @@ func scanPluginRow(scanner pluginScanner, plugin *nodePlugin) error {
 	); err != nil {
 		return err
 	}
-	plugin.Tags = tags.Slice()
+	plugin.Tags = tags
 	if plugin.Tags == nil {
 		plugin.Tags = []string{}
 	}
@@ -420,13 +416,13 @@ func scanPluginRow(scanner pluginScanner, plugin *nodePlugin) error {
 	return nil
 }
 
-func syncPlugin(ctx context.Context, db *sql.DB, pluginUUID string) error {
+func syncPlugin(ctx context.Context, db *pgxpool.Pool, pluginUUID string) error {
 	var id string
-	if err := db.QueryRowContext(ctx, `SELECT uuid::text FROM node_plugin WHERE uuid::text = $1`, pluginUUID).Scan(&id); err != nil {
+	if err := db.QueryRow(ctx, `SELECT uuid::text FROM node_plugin WHERE uuid::text = $1`, pluginUUID).Scan(&id); err != nil {
 		return err
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT uuid::text FROM nodes WHERE active_plugin_uuid::text = $1 AND is_disabled = false`, pluginUUID)
+	rows, err := db.Query(ctx, `SELECT uuid::text FROM nodes WHERE active_plugin_uuid::text = $1 AND is_disabled = false`, pluginUUID)
 	if err != nil {
 		return err
 	}

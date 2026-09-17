@@ -1,10 +1,11 @@
 package hosts
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"regexp"
+
+	"github.com/jackc/pgx/v5"
 
 	"exodus/internal/httpapi/shared"
 )
@@ -54,7 +55,7 @@ var (
 	errConfigProfileInboundNotFound = errors.New("config profile inbound not found")
 	errTemplateNotFound             = errors.New("subscription template not found")
 	errTemplateTypeNotAllowed       = errors.New("template type not allowed")
-	errHostNotFound                 = sql.ErrNoRows
+	errHostNotFound                 = pgx.ErrNoRows
 )
 
 type HostInternalSquads struct {

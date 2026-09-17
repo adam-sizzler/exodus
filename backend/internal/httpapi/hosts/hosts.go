@@ -1,7 +1,6 @@
 package hosts
 
 import (
-	"database/sql"
 	"net/http"
 	"strings"
 
@@ -9,6 +8,7 @@ import (
 	"exodus/internal/httpapi/shared"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // HostsHandler godoc
@@ -26,7 +26,7 @@ import (
 // @Router       /hosts [get]
 // @Router       /hosts [post]
 // @Router       /hosts [patch]
-func HostsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HostsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewHostRepository(db)
 	service := NewHostService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +57,7 @@ func HostsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /hosts/{uuid} [get]
 // @Router       /hosts/{uuid} [delete]
-func HostByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HostByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewHostRepository(db)
 	service := NewHostService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +109,7 @@ func HostByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /hosts/actions/reorder [post]
 // @Router       /hosts/actions/clone [post]
-func HostsActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HostsActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewHostRepository(db)
 	service := NewHostService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +148,7 @@ func HostsActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 // @Router       /hosts/bulk/set-inbound [post]
 // @Router       /hosts/bulk/set-port [post]
 // @Router       /hosts/bulk/update [patch]
-func HostsBulkHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HostsBulkHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewHostRepository(db)
 	service := NewHostService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -209,7 +209,7 @@ func HostsBulkHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /hosts/tags [get]
-func HostsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HostsTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewHostRepository(db)
 	service := NewHostService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {

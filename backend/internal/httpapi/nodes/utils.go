@@ -3,8 +3,6 @@ package nodes
 import (
 	"math"
 	"strings"
-
-	"exodus/internal/util"
 )
 
 func normalizeCountryCode(value *string) string {
@@ -53,26 +51,6 @@ func normalizeNullableString(value *string) any {
 		return nil
 	}
 	return strings.TrimSpace(*value)
-}
-
-func coalesceBool(value *bool, fallback bool) bool {
-	return util.Coalesce(value, fallback)
-}
-
-func coalesceInt(value *int, fallback int) int {
-	return util.Coalesce(value, fallback)
-}
-
-func coalesceInt64(value *int64, fallback int64) int64 {
-	return util.Coalesce(value, fallback)
-}
-
-func coalesceFloat(value *float64, fallback float64) float64 {
-	return util.Coalesce(value, fallback)
-}
-
-func coalesceInt64Ptr(value *int64) int64 {
-	return util.Coalesce(value, int64(0))
 }
 
 func toNanoMultiplier(value float64) int64 {

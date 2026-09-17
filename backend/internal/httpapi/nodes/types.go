@@ -1,11 +1,12 @@
 package nodes
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"regexp"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"exodus/internal/httpapi/shared"
 )
@@ -19,7 +20,7 @@ var (
 	errConfigProfileNotFound       = errors.New("config profile not found")
 	errConfigProfileInboundInvalid = errors.New("config profile inbound not found in specified profile")
 	errNoEnabledNodes              = errors.New("enabled nodes not found")
-	errNodeNotFound                = sql.ErrNoRows
+	errNodeNotFound                = pgx.ErrNoRows
 	errNodeNameExists              = errors.New("node with this name already exists")
 	errNodeAddressExists           = errors.New("node with this address already exists")
 )

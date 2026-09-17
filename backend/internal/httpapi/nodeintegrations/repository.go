@@ -2,10 +2,12 @@ package nodeintegrations
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -13,15 +15,15 @@ var (
 )
 
 type Repository struct {
-	db *sql.DB
+	db *pgxpool.Pool
 }
 
-func NewRepository(db *sql.DB) *Repository {
+func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
 func (r *Repository) GetAll(ctx context.Context) ([]NodeIntegrationAPI, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT uuid, name, description, config, created_at, updated_at
 		FROM integrations
 		ORDER BY created_at ASC
@@ -49,7 +51,7 @@ func (r *Repository) GetAll(ctx context.Context) ([]NodeIntegrationAPI, error) {
 }
 
 func (r *Repository) GetByUUID(ctx context.Context, uuid string) (*NodeIntegrationAPI, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.db.QueryRow(ctx, `
 		SELECT uuid, name, description, config, created_at, updated_at
 		FROM integrations
 		WHERE uuid = $1
@@ -58,7 +60,7 @@ func (r *Repository) GetByUUID(ctx context.Context, uuid string) (*NodeIntegrati
 	var item NodeIntegrationAPI
 	var configBytes []byte
 	if err := row.Scan(&item.UUID, &item.Name, &item.Description, &configBytes, &item.CreatedAt, &item.UpdatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errIntegrationNotFound
 		}
 		return nil, err
@@ -75,7 +77,7 @@ func (r *Repository) Create(ctx context.Context, req CreateNodeIntegrationReques
 		configJSON = []byte("{}")
 	}
 
-	err := r.db.QueryRowContext(ctx, `
+	err := r.db.QueryRow(ctx, `
 		INSERT INTO integrations (name, description, config, created_at, updated_at)
 		VALUES ($1, $2, $3, NOW(), NOW())
 		RETURNING uuid, name, description, config, created_at, updated_at
@@ -112,7 +114,7 @@ func (r *Repository) Update(ctx context.Context, req UpdateNodeIntegrationReques
 
 	var item NodeIntegrationAPI
 	var configBytes []byte
-	err = r.db.QueryRowContext(ctx, `
+	err = r.db.QueryRow(ctx, `
 		UPDATE integrations
 		SET name = $1, description = $2, config = $3, updated_at = NOW()
 		WHERE uuid = $4
@@ -128,15 +130,11 @@ func (r *Repository) Update(ctx context.Context, req UpdateNodeIntegrationReques
 }
 
 func (r *Repository) Delete(ctx context.Context, uuid string) error {
-	res, err := r.db.ExecContext(ctx, `DELETE FROM integrations WHERE uuid = $1`, uuid)
+	res, err := r.db.Exec(ctx, `DELETE FROM integrations WHERE uuid = $1`, uuid)
 	if err != nil {
 		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	if res.RowsAffected() == 0 {
 		return errIntegrationNotFound
 	}
 	return nil

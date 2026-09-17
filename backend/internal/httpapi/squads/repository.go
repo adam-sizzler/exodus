@@ -2,26 +2,29 @@ package squads
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"exodus/internal/db"
+	exodusdb "exodus/internal/db"
 	"exodus/internal/httpapi/shared"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type SquadRepository struct {
-	db *sql.DB
+	db *pgxpool.Pool
 }
 
-func NewSquadRepository(db *sql.DB) *SquadRepository {
+func NewSquadRepository(db *pgxpool.Pool) *SquadRepository {
 	return &SquadRepository{db: db}
 }
 
 func (r *SquadRepository) getSquads(ctx context.Context) ([]InternalSquad, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT uuid, view_position, name, tags, created_at, updated_at
 		FROM internal_squads
 		ORDER BY view_position ASC, name ASC
@@ -46,7 +49,7 @@ func (r *SquadRepository) getSquads(ctx context.Context) ([]InternalSquad, error
 }
 
 func (r *SquadRepository) getSquadByUUID(ctx context.Context, squadUUID string) (InternalSquad, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.db.QueryRow(ctx, `
 		SELECT uuid, view_position, name, tags, created_at, updated_at
 		FROM internal_squads WHERE uuid = $1
 	`, squadUUID)
@@ -55,14 +58,14 @@ func (r *SquadRepository) getSquadByUUID(ctx context.Context, squadUUID string) 
 
 func (r *SquadRepository) getSquadMembersCount(ctx context.Context, squadUUID string) (int, error) {
 	var count int
-	err := r.db.QueryRowContext(ctx, `
+	err := r.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM internal_squad_members WHERE internal_squad_uuid = $1
 	`, squadUUID).Scan(&count)
 	return count, err
 }
 
 func (r *SquadRepository) getSquadInbounds(ctx context.Context, squadUUID string) ([]InternalSquadInboundAPI, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT cpi.uuid, cpi.profile_uuid, cpi.tag, cpi.type, cpi.network, cpi.security, cpi.port, cpi.raw_inbound
 		FROM internal_squad_inbounds isi
 		JOIN config_profile_inbounds cpi ON cpi.uuid = isi.inbound_uuid
@@ -77,8 +80,8 @@ func (r *SquadRepository) getSquadInbounds(ctx context.Context, squadUUID string
 	inbounds := []InternalSquadInboundAPI{}
 	for rows.Next() {
 		var inbound InternalSquadInboundAPI
-		var network, security, rawInbound sql.NullString
-		var port sql.NullInt64
+		var network, security, rawInbound *string
+		var port *int
 		if scanErr := rows.Scan(
 			&inbound.UUID,
 			&inbound.ProfileUUID,
@@ -91,18 +94,11 @@ func (r *SquadRepository) getSquadInbounds(ctx context.Context, squadUUID string
 		); scanErr != nil {
 			return nil, scanErr
 		}
-		if network.Valid {
-			inbound.Network = &network.String
-		}
-		if security.Valid {
-			inbound.Security = &security.String
-		}
-		if port.Valid {
-			p := int(port.Int64)
-			inbound.Port = &p
-		}
-		if rawInbound.Valid {
-			inbound.RawInbound = json.RawMessage(rawInbound.String)
+		inbound.Network = network
+		inbound.Security = security
+		inbound.Port = port
+		if rawInbound != nil && *rawInbound != "" {
+			inbound.RawInbound = json.RawMessage(*rawInbound)
 		}
 		inbounds = append(inbounds, inbound)
 	}
@@ -114,14 +110,14 @@ func (r *SquadRepository) getSquadInbounds(ctx context.Context, squadUUID string
 
 func (r *SquadRepository) getSquadAccessibleNodes(ctx context.Context, squadUUID string) ([]InternalSquadAccessibleNode, error) {
 	var exists int
-	if err := r.db.QueryRowContext(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
-		if err == sql.ErrNoRows {
+	if err := r.db.QueryRow(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errInternalSquadNotFound
 		}
 		return nil, err
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT
 			n.uuid,
 			n.name,
@@ -179,7 +175,7 @@ func (r *SquadRepository) getSquadAccessibleNodes(ctx context.Context, squadUUID
 }
 
 func (r *SquadRepository) getConfigProfilesWithInbounds(ctx context.Context) ([]ConfigProfileWithInbounds, error) {
-	profileRows, err := r.db.QueryContext(ctx, `
+	profileRows, err := r.db.Query(ctx, `
 		SELECT uuid, view_position, name, config, created_at, updated_at
 		FROM config_profiles
 		ORDER BY view_position ASC, name ASC
@@ -201,18 +197,18 @@ func (r *SquadRepository) getConfigProfilesWithInbounds(ctx context.Context) ([]
 
 	for profileRows.Next() {
 		var tp tempProfile
-		var viewPosition sql.NullInt64
-		var configStr sql.NullString
+		var viewPosition *int
+		var configStr *string
 
 		if err := profileRows.Scan(&tp.UUID, &viewPosition, &tp.Name, &configStr, &tp.CreatedAt, &tp.UpdatedAt); err != nil {
 			return nil, err
 		}
 
-		if viewPosition.Valid {
-			tp.ViewPosition = int(viewPosition.Int64)
+		if viewPosition != nil {
+			tp.ViewPosition = *viewPosition
 		}
-		if configStr.Valid {
-			tp.Config = json.RawMessage(configStr.String)
+		if configStr != nil {
+			tp.Config = json.RawMessage(*configStr)
 		}
 
 		tempProfiles = append(tempProfiles, tp)
@@ -221,7 +217,7 @@ func (r *SquadRepository) getConfigProfilesWithInbounds(ctx context.Context) ([]
 		return nil, err
 	}
 
-	inboundRows, err := r.db.QueryContext(ctx, `
+	inboundRows, err := r.db.Query(ctx, `
 		SELECT uuid, profile_uuid, tag, type, network, security, port, raw_inbound
 		FROM config_profile_inbounds
 		ORDER BY profile_uuid, tag
@@ -235,25 +231,18 @@ func (r *SquadRepository) getConfigProfilesWithInbounds(ctx context.Context) ([]
 	for inboundRows.Next() {
 		var ib InboundInfo
 		var profileUUID string
-		var network, security, rawInbound sql.NullString
-		var port sql.NullInt64
+		var network, security, rawInbound *string
+		var port *int
 
 		if err := inboundRows.Scan(&ib.UUID, &profileUUID, &ib.Tag, &ib.Type, &network, &security, &port, &rawInbound); err != nil {
 			return nil, err
 		}
 
-		if network.Valid {
-			ib.Network = &network.String
-		}
-		if security.Valid {
-			ib.Security = &security.String
-		}
-		if port.Valid {
-			p := int(port.Int64)
-			ib.Port = &p
-		}
-		if rawInbound.Valid {
-			ib.RawInbound = json.RawMessage(rawInbound.String)
+		ib.Network = network
+		ib.Security = security
+		ib.Port = port
+		if rawInbound != nil && *rawInbound != "" {
+			ib.RawInbound = json.RawMessage(*rawInbound)
 		}
 
 		inboundsByProfile[profileUUID] = append(inboundsByProfile[profileUUID], ib)
@@ -300,7 +289,7 @@ func (r *SquadRepository) getInboundAssignments(ctx context.Context, nodeUUID st
 			ORDER BY node_uuid, config_profile_inbound_uuid`
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -326,12 +315,12 @@ func (r *SquadRepository) createSquad(ctx context.Context, squadUUID string, req
 		INSERT INTO internal_squads (
 			uuid, view_position, name, tags, created_at, updated_at
 		) VALUES ($1, $2, $3, $4::text[], CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-	_, err := r.db.ExecContext(ctx, query, squadUUID, req.ViewPosition, req.Name, shared.PostgresTextArrayLiteral(tags))
+	_, err := r.db.Exec(ctx, query, squadUUID, req.ViewPosition, req.Name, shared.PostgresTextArrayLiteral(tags))
 	return err
 }
 
 func (r *SquadRepository) getAllTags(ctx context.Context) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT unnest(tags) AS tag
 		FROM internal_squads
 		WHERE tags IS NOT NULL AND cardinality(tags) > 0
@@ -357,7 +346,7 @@ func (r *SquadRepository) getAllTags(ctx context.Context) ([]string, error) {
 
 func (r *SquadRepository) setTags(ctx context.Context, squadUUID string, tags []string) error {
 	sanitized := shared.SanitizeTags(tags)
-	result, err := r.db.ExecContext(ctx, `
+	tag, err := r.db.Exec(ctx, `
 		UPDATE internal_squads
 		SET tags = $1::text[], updated_at = CURRENT_TIMESTAMP
 		WHERE uuid = $2
@@ -365,55 +354,41 @@ func (r *SquadRepository) setTags(ctx context.Context, squadUUID string, tags []
 	if err != nil {
 		return err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
+	if tag.RowsAffected() == 0 {
 		return errInternalSquadNotFound
 	}
 	return nil
 }
 
 func (r *SquadRepository) updateSquad(ctx context.Context, squadUUID string, clauses []string, args []any, inboundUUIDs []string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		if len(clauses) > 0 {
+			updateArgs := append(args, squadUUID)
+			query := fmt.Sprintf("UPDATE internal_squads SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", strings.Join(clauses, ", "), len(updateArgs))
+			tag, err := tx.Exec(ctx, query, updateArgs...)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				return pgx.ErrNoRows
+			}
+		}
 
-	if len(clauses) > 0 {
-		args = append(args, squadUUID)
-		query := fmt.Sprintf("UPDATE internal_squads SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", strings.Join(clauses, ", "), len(args))
-		result, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
-			return err
+		if inboundUUIDs != nil {
+			if err := r.replaceSquadInbounds(ctx, tx, squadUUID, inboundUUIDs); err != nil {
+				return err
+			}
 		}
-		rows, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if rows == 0 {
-			return sql.ErrNoRows
-		}
-	}
 
-	if inboundUUIDs != nil {
-		if err := r.replaceSquadInbounds(ctx, tx, squadUUID, inboundUUIDs); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+		return nil
+	})
 }
 
 // replaceSquadInbounds clears and re-inserts a squad's inbounds within an existing
 // transaction. Existence is validated in a single batch query and rows are inserted
-// in a single batch statement, instead of one SELECT + one INSERT per inbound.
-func (r *SquadRepository) replaceSquadInbounds(ctx context.Context, tx *sql.Tx, squadUUID string, inboundUUIDs []string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM internal_squad_inbounds WHERE internal_squad_uuid = $1`, squadUUID); err != nil {
+// in a single batch statement.
+func (r *SquadRepository) replaceSquadInbounds(ctx context.Context, tx pgx.Tx, squadUUID string, inboundUUIDs []string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM internal_squad_inbounds WHERE internal_squad_uuid = $1`, squadUUID); err != nil {
 		return fmt.Errorf("failed to clear existing inbounds: %w", err)
 	}
 
@@ -434,7 +409,7 @@ func (r *SquadRepository) replaceSquadInbounds(ctx context.Context, tx *sql.Tx, 
 		return nil
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT uuid FROM config_profile_inbounds WHERE uuid = ANY($1)`, cleaned)
+	rows, err := tx.Query(ctx, `SELECT uuid FROM config_profile_inbounds WHERE uuid = ANY($1)`, cleaned)
 	if err != nil {
 		return err
 	}
@@ -448,10 +423,8 @@ func (r *SquadRepository) replaceSquadInbounds(ctx context.Context, tx *sql.Tx, 
 		existing[u] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	for _, u := range cleaned {
 		if _, ok := existing[u]; !ok {
@@ -459,7 +432,7 @@ func (r *SquadRepository) replaceSquadInbounds(ctx context.Context, tx *sql.Tx, 
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO internal_squad_inbounds (internal_squad_uuid, inbound_uuid)
 		SELECT $1, unnest($2::uuid[])
 	`, squadUUID, cleaned); err != nil {
@@ -471,10 +444,10 @@ func (r *SquadRepository) replaceSquadInbounds(ctx context.Context, tx *sql.Tx, 
 
 func (r *SquadRepository) deleteSquad(ctx context.Context, squadUUID string) (string, error) {
 	var squadName string
-	if err := r.db.QueryRowContext(ctx, "SELECT name FROM internal_squads WHERE uuid = $1", squadUUID).Scan(&squadName); err != nil {
+	if err := r.db.QueryRow(ctx, "SELECT name FROM internal_squads WHERE uuid = $1", squadUUID).Scan(&squadName); err != nil {
 		return "", err
 	}
-	if _, err := r.db.ExecContext(ctx, "DELETE FROM internal_squads WHERE uuid = $1", squadUUID); err != nil {
+	if _, err := r.db.Exec(ctx, "DELETE FROM internal_squads WHERE uuid = $1", squadUUID); err != nil {
 		return "", err
 	}
 	return squadName, nil
@@ -485,15 +458,6 @@ func (r *SquadRepository) reorderSquads(ctx context.Context, items []reorderSqua
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	// Single batched UPDATE via UNNEST instead of one round-trip per squad.
 	uuids := make([]string, len(items))
 	positions := make([]int32, len(items))
 	for i, item := range items {
@@ -501,45 +465,41 @@ func (r *SquadRepository) reorderSquads(ctx context.Context, items []reorderSqua
 		positions[i] = int32(item.ViewPosition)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE internal_squads AS s
-		SET view_position = v.view_position
-		FROM (
-			SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
-		) AS v
-		WHERE s.uuid = v.uuid
-	`, uuids, positions); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT setval('internal_squads_view_position_seq', (SELECT COALESCE(MAX(view_position), 0) FROM internal_squads) + 1)`); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE internal_squads AS s
+			SET view_position = v.view_position
+			FROM (
+				SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
+			) AS v
+			WHERE s.uuid = v.uuid
+		`, uuids, positions); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT setval('internal_squads_view_position_seq', (SELECT COALESCE(MAX(view_position), 0) FROM internal_squads) + 1)`); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (r *SquadRepository) setInboundAssignments(ctx context.Context, nodeUUID string, inboundUUIDs []string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM config_profile_inbounds_to_nodes WHERE node_uuid = $1`, nodeUUID); err != nil {
-		return err
-	}
-
-	for _, inboundUUID := range inboundUUIDs {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO config_profile_inbounds_to_nodes (config_profile_inbound_uuid, node_uuid)
-			VALUES ($1, $2)`, inboundUUID, nodeUUID)
-		if err != nil {
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM config_profile_inbounds_to_nodes WHERE node_uuid = $1`, nodeUUID); err != nil {
 			return err
 		}
-	}
 
-	return tx.Commit()
+		for _, inboundUUID := range inboundUUIDs {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO config_profile_inbounds_to_nodes (config_profile_inbound_uuid, node_uuid)
+				VALUES ($1, $2)`, inboundUUID, nodeUUID)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 func (r *SquadRepository) getSquadInboundBindings(ctx context.Context, squadUUID string) ([]InternalSquadInbound, error) {
@@ -560,7 +520,7 @@ func (r *SquadRepository) getSquadInboundBindings(ctx context.Context, squadUUID
 			ORDER BY internal_squad_uuid, inbound_uuid`
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -581,28 +541,18 @@ func (r *SquadRepository) getSquadInboundBindings(ctx context.Context, squadUUID
 }
 
 func (r *SquadRepository) setSquadInbounds(ctx context.Context, squadUUID string, inboundUUIDs []string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	var squadID string
-	err = tx.QueryRowContext(ctx, "SELECT uuid FROM internal_squads WHERE uuid = $1", squadUUID).Scan(&squadID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("squad not found")
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		var squadID string
+		err := tx.QueryRow(ctx, "SELECT uuid FROM internal_squads WHERE uuid = $1", squadUUID).Scan(&squadID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("squad not found")
+			}
+			return err
 		}
-		return err
-	}
 
-	if err := r.replaceSquadInbounds(ctx, tx, squadUUID, inboundUUIDs); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+		return r.replaceSquadInbounds(ctx, tx, squadUUID, inboundUUIDs)
+	})
 }
 
 func (r *SquadRepository) getSquadMembers(ctx context.Context, squadUUID string) ([]InternalSquadMember, error) {
@@ -625,7 +575,7 @@ func (r *SquadRepository) getSquadMembers(ctx context.Context, squadUUID string)
 			ORDER BY m.internal_squad_uuid, m.user_id`
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -646,67 +596,57 @@ func (r *SquadRepository) getSquadMembers(ctx context.Context, squadUUID string)
 }
 
 func (r *SquadRepository) setSquadMembers(ctx context.Context, squadUUID string, userIDs []int64) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	var squadID string
-	err = tx.QueryRowContext(ctx, "SELECT uuid FROM internal_squads WHERE uuid = $1", squadUUID).Scan(&squadID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("squad not found")
-		}
-		return err
-	}
-
-	_, err = tx.ExecContext(ctx, "DELETE FROM internal_squad_members WHERE internal_squad_uuid = $1", squadUUID)
-	if err != nil {
-		return fmt.Errorf("failed to clear existing members: %w", err)
-	}
-
-	if len(userIDs) == 0 {
-		return tx.Commit()
-	}
-
-	// Batch-validate existence in a single query instead of one SELECT per user.
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM users WHERE id = ANY($1)`, userIDs)
-	if err != nil {
-		return err
-	}
-	existing := make(map[int64]struct{}, len(userIDs))
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		var squadID string
+		err := tx.QueryRow(ctx, "SELECT uuid FROM internal_squads WHERE uuid = $1", squadUUID).Scan(&squadID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("squad not found")
+			}
 			return err
 		}
-		existing[id] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
 
-	for _, userID := range userIDs {
-		if _, ok := existing[userID]; !ok {
-			return fmt.Errorf("user not found: %d", userID)
+		_, err = tx.Exec(ctx, "DELETE FROM internal_squad_members WHERE internal_squad_uuid = $1", squadUUID)
+		if err != nil {
+			return fmt.Errorf("failed to clear existing members: %w", err)
 		}
-	}
 
-	// Batch-insert all rows in a single statement instead of one INSERT per member.
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
-		SELECT $1, unnest($2::bigint[])
-	`, squadUUID, userIDs); err != nil {
-		return fmt.Errorf("failed to insert members: %w", err)
-	}
+		if len(userIDs) == 0 {
+			return nil
+		}
 
-	return tx.Commit()
+		rows, err := tx.Query(ctx, `SELECT id FROM users WHERE id = ANY($1)`, userIDs)
+		if err != nil {
+			return err
+		}
+		existing := make(map[int64]struct{}, len(userIDs))
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			existing[id] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		for _, userID := range userIDs {
+			if _, ok := existing[userID]; !ok {
+				return fmt.Errorf("user not found: %d", userID)
+			}
+		}
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
+			SELECT $1, unnest($2::bigint[])
+		`, squadUUID, userIDs); err != nil {
+			return fmt.Errorf("failed to insert members: %w", err)
+		}
+
+		return nil
+	})
 }
 
 func (r *SquadRepository) getSquadDetails(ctx context.Context, squadUUID string) (SquadDetails, error) {
@@ -716,18 +656,18 @@ func (r *SquadRepository) getSquadDetails(ctx context.Context, squadUUID string)
 		FROM internal_squads
 		WHERE uuid = $1`
 
-	var viewPosition sql.NullInt64
-	err := r.db.QueryRowContext(ctx, query, squadUUID).Scan(
+	var viewPosition *int
+	err := r.db.QueryRow(ctx, query, squadUUID).Scan(
 		&squad.UUID, &viewPosition, &squad.Name, &squad.CreatedAt, &squad.UpdatedAt)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return squad, fmt.Errorf("squad not found")
 		}
 		return squad, err
 	}
 
-	if viewPosition.Valid {
-		squad.ViewPosition = int(viewPosition.Int64)
+	if viewPosition != nil {
+		squad.ViewPosition = *viewPosition
 	}
 
 	squad.Inbounds = []InboundInfo{}
@@ -740,7 +680,7 @@ func (r *SquadRepository) getSquadDetails(ctx context.Context, squadUUID string)
 		WHERE si.internal_squad_uuid = $1
 		ORDER BY i.tag`
 
-	rows, err := r.db.QueryContext(ctx, inboundQuery, squadUUID)
+	rows, err := r.db.Query(ctx, inboundQuery, squadUUID)
 	if err != nil {
 		return squad, err
 	}
@@ -748,24 +688,17 @@ func (r *SquadRepository) getSquadDetails(ctx context.Context, squadUUID string)
 
 	for rows.Next() {
 		var inbound InboundInfo
-		var network, security sql.NullString
-		var port sql.NullInt64
+		var network, security *string
+		var port *int
 		var rawInbound string
 
 		if err := rows.Scan(&inbound.UUID, &inbound.Tag, &inbound.Type, &network, &security, &port, &rawInbound); err != nil {
 			return squad, err
 		}
 
-		if network.Valid {
-			inbound.Network = &network.String
-		}
-		if security.Valid {
-			inbound.Security = &security.String
-		}
-		if port.Valid {
-			p := int(port.Int64)
-			inbound.Port = &p
-		}
+		inbound.Network = network
+		inbound.Security = security
+		inbound.Port = port
 		inbound.RawInbound = json.RawMessage(rawInbound)
 
 		squad.Inbounds = append(squad.Inbounds, inbound)
@@ -781,7 +714,7 @@ func (r *SquadRepository) getSquadDetails(ctx context.Context, squadUUID string)
 		WHERE m.internal_squad_uuid = $1
 		ORDER BY u.username`
 
-	memberRows, err := r.db.QueryContext(ctx, memberQuery, squadUUID)
+	memberRows, err := r.db.Query(ctx, memberQuery, squadUUID)
 	if err != nil {
 		return squad, err
 	}
@@ -815,7 +748,7 @@ func (r *SquadRepository) getAllSquadsSummary(ctx context.Context) ([]SquadSumma
 		GROUP BY s.uuid, s.view_position, s.name
 		ORDER BY s.view_position ASC, s.name ASC`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.db.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -824,21 +757,20 @@ func (r *SquadRepository) getAllSquadsSummary(ctx context.Context) ([]SquadSumma
 	var squads []SquadSummary
 	for rows.Next() {
 		var squad SquadSummary
-		var viewPosition sql.NullInt64
-		var membersCount, inboundsCount sql.NullInt64
+		var viewPosition, membersCount, inboundsCount *int64
 
 		if err := rows.Scan(&squad.UUID, &viewPosition, &squad.Name, &membersCount, &inboundsCount); err != nil {
 			return nil, err
 		}
 
-		if viewPosition.Valid {
-			squad.ViewPosition = int(viewPosition.Int64)
+		if viewPosition != nil {
+			squad.ViewPosition = int(*viewPosition)
 		}
-		if membersCount.Valid {
-			squad.MembersCount = int(membersCount.Int64)
+		if membersCount != nil {
+			squad.MembersCount = int(*membersCount)
 		}
-		if inboundsCount.Valid {
-			squad.InboundsCount = int(inboundsCount.Int64)
+		if inboundsCount != nil {
+			squad.InboundsCount = int(*inboundsCount)
 		}
 
 		squads = append(squads, squad)
@@ -868,7 +800,7 @@ func (r *SquadRepository) getNodesWithConfig(ctx context.Context) ([]NodeWithCon
 		LEFT JOIN config_profiles cp ON n.active_config_profile_uuid = cp.uuid
 		ORDER BY n.view_position ASC, n.name ASC`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.db.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -877,9 +809,9 @@ func (r *SquadRepository) getNodesWithConfig(ctx context.Context) ([]NodeWithCon
 	var nodes []NodeWithConfig
 	for rows.Next() {
 		var node NodeWithConfig
-		var id sql.NullInt64
-		var activeConfigProfileUUID, configProfileName sql.NullString
-		var tags db.StringArray
+		var id *int64
+		var activeConfigProfileUUID, configProfileName *string
+		var tags []string
 
 		if err := rows.Scan(&node.UUID, &id, &node.Name, &node.Address, &node.Port,
 			&activeConfigProfileUUID, &configProfileName, &node.IsConnected, &node.IsDisabled,
@@ -887,19 +819,16 @@ func (r *SquadRepository) getNodesWithConfig(ctx context.Context) ([]NodeWithCon
 			return nil, err
 		}
 
-		if id.Valid {
-			node.ID = &id.Int64
-		}
-
-		if activeConfigProfileUUID.Valid && activeConfigProfileUUID.String != "" {
-			node.ActiveConfigProfileUUID = &activeConfigProfileUUID.String
-			if configProfileName.Valid && configProfileName.String != "" {
-				node.ConfigProfileName = &configProfileName.String
+		node.ID = id
+		if activeConfigProfileUUID != nil && *activeConfigProfileUUID != "" {
+			node.ActiveConfigProfileUUID = activeConfigProfileUUID
+			if configProfileName != nil && *configProfileName != "" {
+				node.ConfigProfileName = configProfileName
 			}
 		}
 
 		if len(tags) > 0 {
-			node.Tags = tags.Slice()
+			node.Tags = tags
 		} else {
 			node.Tags = []string{}
 		}
@@ -925,7 +854,7 @@ func (r *SquadRepository) getInboundsWithProfiles(ctx context.Context) ([]Inboun
 		JOIN config_profiles p ON p.uuid = i.profile_uuid
 		ORDER BY p.name, i.tag`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.db.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -934,17 +863,13 @@ func (r *SquadRepository) getInboundsWithProfiles(ctx context.Context) ([]Inboun
 	var inbounds []InboundWithProfile
 	for rows.Next() {
 		var ib InboundWithProfile
-		var port sql.NullInt64
+		var port *int
 
 		if err := rows.Scan(&ib.ProfileUUID, &ib.ProfileName, &ib.InboundUUID, &ib.InboundTag, &ib.InboundType, &port); err != nil {
 			return nil, err
 		}
 
-		if port.Valid {
-			p := int(port.Int64)
-			ib.InboundPort = &p
-		}
-
+		ib.InboundPort = port
 		inbounds = append(inbounds, ib)
 	}
 	if err := rows.Err(); err != nil {

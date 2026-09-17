@@ -2,7 +2,6 @@ package nodes
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,20 +9,24 @@ import (
 	"strings"
 	"time"
 
-	"exodus/internal/db"
+	exodusdb "exodus/internal/db"
 	"exodus/internal/httpapi/shared"
+	"exodus/internal/util"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type NodeRepository struct {
-	db *sql.DB
+	db *pgxpool.Pool
 }
 
-func NewNodeRepository(db *sql.DB) *NodeRepository {
+func NewNodeRepository(db *pgxpool.Pool) *NodeRepository {
 	return &NodeRepository{db: db}
 }
 
 func (r *NodeRepository) getAllNodeRecords(ctx context.Context) ([]nodeRecord, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT
 			uuid, id, name, address, port, proxy_url, api_schema, api_path, grpc_auth_token, active_config_profile_uuid, active_plugin_uuid,
 			is_connected, is_connecting, is_disabled, last_status_change, last_status_message,
@@ -54,7 +57,7 @@ func (r *NodeRepository) getAllNodeRecords(ctx context.Context) ([]nodeRecord, e
 }
 
 func (r *NodeRepository) getNodeByUUID(ctx context.Context, nodeUUID string) (nodeRecord, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.db.QueryRow(ctx, `
 		SELECT
 			uuid, id, name, address, port, proxy_url, api_schema, api_path, grpc_auth_token, active_config_profile_uuid, active_plugin_uuid,
 			is_connected, is_connecting, is_disabled, last_status_change, last_status_message,
@@ -70,21 +73,21 @@ func (r *NodeRepository) getNodeByUUID(ctx context.Context, nodeUUID string) (no
 
 func scanNodeRecord(scanner shared.RowScanner) (nodeRecord, error) {
 	var node nodeRecord
-	var id sql.NullInt64
-	var port sql.NullInt64
-	var proxyURL sql.NullString
-	var activeConfigProfileUUID sql.NullString
-	var activePluginUUID sql.NullString
-	var lastStatusChange sql.NullTime
-	var lastStatusMessage sql.NullString
-	var trafficResetDay sql.NullInt64
-	var trafficLimitBytes sql.NullInt64
-	var trafficUsedBytes sql.NullInt64
-	var notifyPercent sql.NullInt64
-	var providerUUID sql.NullString
-	var tags db.StringArray
+	var id *int64
+	var port *int
+	var proxyURL *string
+	var activeConfigProfileUUID *string
+	var activePluginUUID *string
+	var lastStatusChange *time.Time
+	var lastStatusMessage *string
+	var trafficResetDay *int
+	var trafficLimitBytes *int64
+	var trafficUsedBytes *int64
+	var notifyPercent *int
+	var providerUUID *string
+	var tags []string
 	var ipsRaw []byte
-	var note sql.NullString
+	var note *string
 
 	err := scanner.Scan(
 		&node.UUID,
@@ -130,49 +133,24 @@ func scanNodeRecord(scanner shared.RowScanner) (nodeRecord, error) {
 		node.IPs = []NodeIPItem{}
 	}
 
-	if id.Valid {
-		node.ID = &id.Int64
+	node.ID = id
+	node.Port = port
+	node.ProxyURL = proxyURL
+	node.ActiveConfigProfileUUID = activeConfigProfileUUID
+	node.ActivePluginUUID = activePluginUUID
+	node.LastStatusChange = lastStatusChange
+	node.LastStatusMessage = lastStatusMessage
+	node.TrafficResetDay = trafficResetDay
+	node.TrafficLimitBytes = trafficLimitBytes
+	node.TrafficUsedBytes = trafficUsedBytes
+	node.NotifyPercent = notifyPercent
+	node.ProviderUUID = providerUUID
+	if tags != nil {
+		node.Tags = tags
+	} else {
+		node.Tags = []string{}
 	}
-	if port.Valid {
-		value := int(port.Int64)
-		node.Port = &value
-	}
-	if proxyURL.Valid {
-		node.ProxyURL = &proxyURL.String
-	}
-	if activeConfigProfileUUID.Valid {
-		node.ActiveConfigProfileUUID = &activeConfigProfileUUID.String
-	}
-	if activePluginUUID.Valid {
-		node.ActivePluginUUID = &activePluginUUID.String
-	}
-	if lastStatusChange.Valid {
-		node.LastStatusChange = &lastStatusChange.Time
-	}
-	if lastStatusMessage.Valid {
-		node.LastStatusMessage = &lastStatusMessage.String
-	}
-	if trafficResetDay.Valid {
-		value := int(trafficResetDay.Int64)
-		node.TrafficResetDay = &value
-	}
-	if trafficLimitBytes.Valid {
-		node.TrafficLimitBytes = &trafficLimitBytes.Int64
-	}
-	if trafficUsedBytes.Valid {
-		node.TrafficUsedBytes = &trafficUsedBytes.Int64
-	}
-	if notifyPercent.Valid {
-		value := int(notifyPercent.Int64)
-		node.NotifyPercent = &value
-	}
-	if providerUUID.Valid {
-		node.ProviderUUID = &providerUUID.String
-	}
-	node.Tags = tags.Slice()
-	if note.Valid {
-		node.Note = &note.String
-	}
+	node.Note = note
 
 	return node, nil
 }
@@ -182,7 +160,7 @@ func (r *NodeRepository) getNodeInbounds(ctx context.Context, nodeUUIDs []string
 	if len(nodeUUIDs) == 0 {
 		return result, nil
 	}
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT
 			cpitn.node_uuid,
 			cpi.uuid, cpi.profile_uuid, cpi.tag, cpi.type, cpi.network, cpi.security, cpi.port, cpi.raw_inbound
@@ -199,9 +177,9 @@ func (r *NodeRepository) getNodeInbounds(ctx context.Context, nodeUUIDs []string
 	for rows.Next() {
 		var nodeUUID string
 		var inbound configProfileInboundResponse
-		var network sql.NullString
-		var security sql.NullString
-		var port sql.NullInt64
+		var network *string
+		var security *string
+		var port *int
 		var rawInbound []byte
 		if err := rows.Scan(
 			&nodeUUID,
@@ -216,16 +194,9 @@ func (r *NodeRepository) getNodeInbounds(ctx context.Context, nodeUUIDs []string
 		); err != nil {
 			return nil, err
 		}
-		if network.Valid {
-			inbound.Network = &network.String
-		}
-		if security.Valid {
-			inbound.Security = &security.String
-		}
-		if port.Valid {
-			value := int(port.Int64)
-			inbound.Port = &value
-		}
+		inbound.Network = network
+		inbound.Security = security
+		inbound.Port = port
 		inbound.RawInbound = json.RawMessage(rawInbound)
 		result[nodeUUID] = append(result[nodeUUID], inbound)
 	}
@@ -240,7 +211,7 @@ func (r *NodeRepository) getProviders(ctx context.Context, providerUUIDs []strin
 	if len(providerUUIDs) == 0 {
 		return result, nil
 	}
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT uuid, name, favicon_link, login_url, created_at, updated_at
 		FROM infra_providers
 		WHERE uuid = ANY($1)
@@ -252,19 +223,15 @@ func (r *NodeRepository) getProviders(ctx context.Context, providerUUIDs []strin
 
 	for rows.Next() {
 		var item providerResponse
-		var favicon sql.NullString
-		var loginURL sql.NullString
+		var favicon *string
+		var loginURL *string
 		var createdAt time.Time
 		var updatedAt time.Time
 		if err := rows.Scan(&item.UUID, &item.Name, &favicon, &loginURL, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		if favicon.Valid {
-			item.FaviconLink = &favicon.String
-		}
-		if loginURL.Valid {
-			item.LoginURL = &loginURL.String
-		}
+		item.FaviconLink = favicon
+		item.LoginURL = loginURL
 		item.CreatedAt = &createdAt
 		item.UpdatedAt = &updatedAt
 		result[item.UUID] = &item
@@ -275,12 +242,12 @@ func (r *NodeRepository) getProviders(ctx context.Context, providerUUIDs []strin
 	return result, nil
 }
 
-func (r *NodeRepository) replaceNodeInboundsTx(ctx context.Context, tx *sql.Tx, nodeUUID string, inboundUUIDs []string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM config_profile_inbounds_to_nodes WHERE node_uuid = $1`, nodeUUID); err != nil {
+func (r *NodeRepository) replaceNodeInboundsTx(ctx context.Context, tx pgx.Tx, nodeUUID string, inboundUUIDs []string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM config_profile_inbounds_to_nodes WHERE node_uuid = $1`, nodeUUID); err != nil {
 		return err
 	}
 	for _, inboundUUID := range dedupeStrings(inboundUUIDs) {
-		if _, err := tx.ExecContext(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO config_profile_inbounds_to_nodes (config_profile_inbound_uuid, node_uuid)
 			VALUES ($1, $2)
 		`, inboundUUID, nodeUUID); err != nil {
@@ -291,7 +258,7 @@ func (r *NodeRepository) replaceNodeInboundsTx(ctx context.Context, tx *sql.Tx, 
 }
 
 func (r *NodeRepository) getNodeTags(ctx context.Context) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT unnest(tags) AS tag FROM nodes ORDER BY tag ASC`)
+	rows, err := r.db.Query(ctx, `SELECT DISTINCT unnest(tags) AS tag FROM nodes ORDER BY tag ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -315,85 +282,66 @@ func (r *NodeRepository) getNodeTags(ctx context.Context) ([]string, error) {
 }
 
 func (r *NodeRepository) createNode(ctx context.Context, nodeUUID string, req createNodeRequest, grpcAuthToken string, now time.Time) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
 	ipsJSON, _ := json.Marshal(normalizeNodeIPs(req.IPs))
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO nodes (
-			uuid, name, address, port, proxy_url, api_schema, api_path, grpc_auth_token, active_config_profile_uuid, active_plugin_uuid,
-			is_connected, is_connecting, is_disabled, last_status_change, last_status_message,
-			consumption_multiplier, node_consumption_multiplier,
-			is_traffic_tracking_active, traffic_reset_day, traffic_limit_bytes, traffic_used_bytes,
-			notify_percent, provider_uuid, country_code, tags, ips, note, created_at, updated_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24, $25, $26, $27, $28, $29
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO nodes (
+				uuid, name, address, port, proxy_url, api_schema, api_path, grpc_auth_token, active_config_profile_uuid, active_plugin_uuid,
+				is_connected, is_connecting, is_disabled, last_status_change, last_status_message,
+				consumption_multiplier, node_consumption_multiplier,
+				is_traffic_tracking_active, traffic_reset_day, traffic_limit_bytes, traffic_used_bytes,
+				notify_percent, provider_uuid, country_code, tags, ips, note, created_at, updated_at
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+				$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+				$21, $22, $23, $24, $25, $26, $27, $28, $29
+			)
+		`,
+			nodeUUID,
+			strings.TrimSpace(req.Name),
+			strings.TrimSpace(req.Address),
+			req.Port,
+			normalizeNullableString(req.ProxyURL),
+			normalizeAPISchema(req.APISchema),
+			normalizeAPIPath(req.APIPath),
+			grpcAuthToken,
+			req.ConfigProfile.ActiveConfigProfileUUID,
+			normalizeNullableString(req.ActivePluginUUID),
+			false,
+			false,
+			false,
+			nil,
+			nil,
+			toNanoMultiplier(util.Coalesce(req.ConsumptionMultiplier, 1)),
+			toNanoMultiplier(util.Coalesce(req.NodeConsumptionMultiplier, 1)),
+			util.Coalesce(req.IsTrafficTrackingActive, false),
+			util.Coalesce(req.TrafficResetDay, 1),
+			util.Coalesce(req.TrafficLimitBytes, int64(0)),
+			0,
+			util.Coalesce(req.NotifyPercent, 0),
+			normalizeNullableString(req.ProviderUUID),
+			normalizeCountryCode(req.CountryCode),
+			normalizeTags(req.Tags),
+			string(ipsJSON),
+			normalizeNullableString(req.Note),
+			now,
+			now,
 		)
-	`,
-		nodeUUID,
-		strings.TrimSpace(req.Name),
-		strings.TrimSpace(req.Address),
-		req.Port,
-		normalizeNullableString(req.ProxyURL),
-		normalizeAPISchema(req.APISchema),
-		normalizeAPIPath(req.APIPath),
-		grpcAuthToken,
-		req.ConfigProfile.ActiveConfigProfileUUID,
-		normalizeNullableString(req.ActivePluginUUID),
-		false,
-		false,
-		false,
-		nil,
-		nil,
-		toNanoMultiplier(coalesceFloat(req.ConsumptionMultiplier, 1)),
-		toNanoMultiplier(coalesceFloat(req.NodeConsumptionMultiplier, 1)),
-		coalesceBool(req.IsTrafficTrackingActive, false),
-		coalesceInt(req.TrafficResetDay, 1),
-		coalesceInt64(req.TrafficLimitBytes, 0),
-		0,
-		coalesceInt(req.NotifyPercent, 0),
-		normalizeNullableString(req.ProviderUUID),
-		normalizeCountryCode(req.CountryCode),
-		normalizeTags(req.Tags),
-		string(ipsJSON),
-		normalizeNullableString(req.Note),
-		now,
-		now,
-	)
-	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "nodes_name_key") {
-			return fmt.Errorf("node with this name already exists")
+		if err != nil {
+			if util.IsUniqueViolation(err, "nodes_name_key") {
+				return fmt.Errorf("node with this name already exists")
+			}
+			if util.IsUniqueViolation(err, "nodes_address_key") {
+				return fmt.Errorf("node with this address already exists")
+			}
+			return err
 		}
-		if strings.Contains(errStr, "nodes_address_key") {
-			return fmt.Errorf("node with this address already exists")
-		}
-		return err
-	}
 
-	if err := r.replaceNodeInboundsTx(ctx, tx, nodeUUID, req.ConfigProfile.ActiveInbounds); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+		return r.replaceNodeInboundsTx(ctx, tx, nodeUUID, req.ConfigProfile.ActiveInbounds)
+	})
 }
 
 func (r *NodeRepository) updateNode(ctx context.Context, req updateNodeRequest, grpcAuthToken *string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
 	clauses := make([]string, 0)
 	args := make([]any, 0)
 	idx := 1
@@ -481,73 +429,58 @@ func (r *NodeRepository) updateNode(ctx context.Context, req updateNodeRequest, 
 		add("active_config_profile_uuid", req.ConfigProfile.ActiveConfigProfileUUID)
 	}
 
-	if len(clauses) > 0 {
-		args = append(args, req.UUID)
-		query := fmt.Sprintf("UPDATE nodes SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", strings.Join(clauses, ", "), idx)
-		result, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
-			errStr := err.Error()
-			if strings.Contains(errStr, "nodes_name_key") {
-				return fmt.Errorf("node with this name already exists")
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		if len(clauses) > 0 {
+			updateArgs := append(args, req.UUID)
+			query := fmt.Sprintf("UPDATE nodes SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", strings.Join(clauses, ", "), idx)
+			tag, err := tx.Exec(ctx, query, updateArgs...)
+			if err != nil {
+				if util.IsUniqueViolation(err, "nodes_name_key") {
+					return fmt.Errorf("node with this name already exists")
+				}
+				if util.IsUniqueViolation(err, "nodes_address_key") {
+					return fmt.Errorf("node with this address already exists")
+				}
+				return err
 			}
-			if strings.Contains(errStr, "nodes_address_key") {
-				return fmt.Errorf("node with this address already exists")
+			if tag.RowsAffected() == 0 {
+				return pgx.ErrNoRows
 			}
-			return err
 		}
-		rows, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if rows == 0 {
-			return sql.ErrNoRows
-		}
-	}
 
-	if req.ConfigProfile != nil {
-		if err := r.replaceNodeInboundsTx(ctx, tx, req.UUID, req.ConfigProfile.ActiveInbounds); err != nil {
-			return err
+		if req.ConfigProfile != nil {
+			if err := r.replaceNodeInboundsTx(ctx, tx, req.UUID, req.ConfigProfile.ActiveInbounds); err != nil {
+				return err
+			}
 		}
-	}
 
-	return tx.Commit()
+		return nil
+	})
 }
 
 func (r *NodeRepository) deleteNode(ctx context.Context, nodeUUID string) error {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM nodes WHERE uuid = $1`, nodeUUID)
+	tag, err := r.db.Exec(ctx, `DELETE FROM nodes WHERE uuid = $1`, nodeUUID)
 	if err != nil {
 		return err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return sql.ErrNoRows
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }
 
 func (r *NodeRepository) resetNodeTraffic(ctx context.Context, nodeUUID string, node nodeRecord) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO nodes_traffic_usage_history (node_uuid, traffic_bytes, reset_at)
+			VALUES ($1, $2, $3)
+		`, nodeUUID, util.Coalesce(node.TrafficUsedBytes, int64(0)), time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE nodes SET traffic_used_bytes = 0, updated_at = CURRENT_TIMESTAMP WHERE uuid = $1`, nodeUUID)
 		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO nodes_traffic_usage_history (node_uuid, traffic_bytes, reset_at)
-		VALUES ($1, $2, $3)
-	`, nodeUUID, coalesceInt64Ptr(node.TrafficUsedBytes), time.Now().UTC())
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET traffic_used_bytes = 0, updated_at = CURRENT_TIMESTAMP WHERE uuid = $1`, nodeUUID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	})
 }
 
 func (r *NodeRepository) reorderNodes(ctx context.Context, items []reorderNodeItem) error {
@@ -555,15 +488,6 @@ func (r *NodeRepository) reorderNodes(ctx context.Context, items []reorderNodeIt
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	// Single batched UPDATE via UNNEST instead of one round-trip per node.
 	uuids := make([]string, len(items))
 	positions := make([]int32, len(items))
 	for i, item := range items {
@@ -571,25 +495,27 @@ func (r *NodeRepository) reorderNodes(ctx context.Context, items []reorderNodeIt
 		positions[i] = int32(item.ViewPosition)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE nodes AS n
-		SET view_position = v.view_position
-		FROM (
-			SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
-		) AS v
-		WHERE n.uuid = v.uuid
-	`, uuids, positions); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT setval('nodes_view_position_seq', (SELECT COALESCE(MAX(view_position), 0) FROM nodes) + 1)`); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE nodes AS n
+			SET view_position = v.view_position
+			FROM (
+				SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
+			) AS v
+			WHERE n.uuid = v.uuid
+		`, uuids, positions); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT setval('nodes_view_position_seq', (SELECT COALESCE(MAX(view_position), 0) FROM nodes) + 1)`); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (r *NodeRepository) enableNodeRecord(ctx context.Context, nodeUUID string, node nodeRecord, inbounds []configProfileInboundResponse) error {
 	if node.ActiveConfigProfileUUID == nil || len(inbounds) == 0 {
-		_, execErr := r.db.ExecContext(ctx, `
+		_, execErr := r.db.Exec(ctx, `
 			UPDATE nodes
 			SET is_disabled = true, active_config_profile_uuid = NULL, is_connecting = false,
 				is_connected = false, last_status_message = NULL, last_status_change = $1
@@ -597,17 +523,17 @@ func (r *NodeRepository) enableNodeRecord(ctx context.Context, nodeUUID string, 
 		`, time.Now().UTC(), nodeUUID)
 		return execErr
 	}
-	_, execErr := r.db.ExecContext(ctx, `UPDATE nodes SET is_disabled = false, updated_at = CURRENT_TIMESTAMP WHERE uuid = $1`, nodeUUID)
+	_, execErr := r.db.Exec(ctx, `UPDATE nodes SET is_disabled = false, updated_at = CURRENT_TIMESTAMP WHERE uuid = $1`, nodeUUID)
 	return execErr
 }
 
 func (r *NodeRepository) disableNodeRecord(ctx context.Context, nodeUUID string, node nodeRecord, inbounds []configProfileInboundResponse) error {
 	if node.ActiveConfigProfileUUID == nil || len(inbounds) == 0 {
-		if _, execErr := r.db.ExecContext(ctx, `UPDATE nodes SET active_config_profile_uuid = NULL WHERE uuid = $1`, nodeUUID); execErr != nil {
+		if _, execErr := r.db.Exec(ctx, `UPDATE nodes SET active_config_profile_uuid = NULL WHERE uuid = $1`, nodeUUID); execErr != nil {
 			return execErr
 		}
 	}
-	_, execErr := r.db.ExecContext(ctx, `
+	_, execErr := r.db.Exec(ctx, `
 		UPDATE nodes
 		SET is_disabled = true, is_connecting = false, is_connected = false,
 			last_status_message = NULL, last_status_change = $1,
@@ -618,23 +544,17 @@ func (r *NodeRepository) disableNodeRecord(ctx context.Context, nodeUUID string,
 }
 
 func (r *NodeRepository) bulkProfileModification(ctx context.Context, uuids []string, activeConfigProfileUUID string, activeInbounds []string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	for _, nodeUUID := range uuids {
-		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET active_config_profile_uuid = $1, updated_at = CURRENT_TIMESTAMP WHERE uuid = $2`, activeConfigProfileUUID, nodeUUID); err != nil {
-			return err
+	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		for _, nodeUUID := range uuids {
+			if _, err := tx.Exec(ctx, `UPDATE nodes SET active_config_profile_uuid = $1, updated_at = CURRENT_TIMESTAMP WHERE uuid = $2`, activeConfigProfileUUID, nodeUUID); err != nil {
+				return err
+			}
+			if err := r.replaceNodeInboundsTx(ctx, tx, nodeUUID, activeInbounds); err != nil {
+				return err
+			}
 		}
-		if err := r.replaceNodeInboundsTx(ctx, tx, nodeUUID, activeInbounds); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 func (r *NodeRepository) bulkUpdateNodes(ctx context.Context, uuids []string, clauses []string, args []any) error {
@@ -643,21 +563,21 @@ func (r *NodeRepository) bulkUpdateNodes(ctx context.Context, uuids []string, cl
 	}
 	args = append(args, uuids)
 	query := fmt.Sprintf("UPDATE nodes SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = ANY($%d)", strings.Join(clauses, ", "), len(args))
-	_, execErr := r.db.ExecContext(ctx, query, args...)
+	_, execErr := r.db.Exec(ctx, query, args...)
 	return execErr
 }
 
 func (r *NodeRepository) ensureConfigProfileInbounds(ctx context.Context, profileUUID string, inboundUUIDs []string) error {
 	var exists int
-	if err := r.db.QueryRowContext(ctx, `SELECT 1 FROM config_profiles WHERE uuid = $1`, profileUUID).Scan(&exists); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if err := r.db.QueryRow(ctx, `SELECT 1 FROM config_profiles WHERE uuid = $1`, profileUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return errConfigProfileNotFound
 		}
 		return err
 	}
 
 	found := make(map[string]struct{}, len(inboundUUIDs))
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT uuid
 		FROM config_profile_inbounds
 		WHERE profile_uuid = $1 AND uuid = ANY($2)

@@ -1,7 +1,6 @@
 package nodes
 
 import (
-	"database/sql"
 	"net/http"
 	"strings"
 
@@ -9,6 +8,7 @@ import (
 	"exodus/internal/httpapi/shared"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // NodesHandler godoc
@@ -26,7 +26,7 @@ import (
 // @Router       /nodes [get]
 // @Router       /nodes [post]
 // @Router       /nodes [patch]
-func NodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewNodeRepository(db)
 	service := NewNodeService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +61,7 @@ func NodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Router       /nodes/{uuid}/actions/disable [post]
 // @Router       /nodes/{uuid}/actions/restart [post]
 // @Router       /nodes/{uuid}/actions/reset-traffic [post]
-func NodeByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodeByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewNodeRepository(db)
 	service := NewNodeService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,7 @@ func NodeByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /nodes/actions/restart-all [post]
 // @Router       /nodes/actions/reorder [post]
-func NodesActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewNodeRepository(db)
 	service := NewNodeService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +170,7 @@ func NodesActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 // @Router       /nodes/bulk-actions [post]
 // @Router       /nodes/bulk-actions/update [post]
 // @Router       /nodes/bulk-actions/profile-modification [post]
-func NodesBulkActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesBulkActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewNodeRepository(db)
 	service := NewNodeService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +202,7 @@ func NodesBulkActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.Handler
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /nodes/tags [get]
-func NodesTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewNodeRepository(db)
 	service := NewNodeService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {

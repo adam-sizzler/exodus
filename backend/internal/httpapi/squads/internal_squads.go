@@ -1,8 +1,8 @@
 package squads
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -13,6 +13,8 @@ import (
 	"exodus/internal/httpapi/shared"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // InternalSquadsHandler godoc
@@ -30,7 +32,7 @@ import (
 // @Router       /internal-squads [get]
 // @Router       /internal-squads [post]
 // @Router       /internal-squads [patch]
-func InternalSquadsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func InternalSquadsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSquadRepository(db)
 	service := NewSquadService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +61,7 @@ func InternalSquadsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFu
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /internal-squads/tags [get]
 // @Router       /internal-squads/tags [patch]
-func InternalSquadsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func InternalSquadsTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSquadRepository(db)
 	service := NewSquadService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +88,7 @@ func InternalSquadsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.Handl
 // @Failure      400   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /internal-squads/actions/reorder [post]
-func InternalSquadsReorderHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func InternalSquadsReorderHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSquadRepository(db)
 	service := NewSquadService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +117,7 @@ func InternalSquadsReorderHandler(db *sql.DB, cfg *config.BackendConfig) http.Ha
 // @Router       /internal-squads/{uuid} [delete]
 // @Router       /internal-squads/{uuid}/bulk-actions/add-many-users [post]
 // @Router       /internal-squads/{uuid}/bulk-actions/remove-many-users [post]
-func InternalSquadByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func InternalSquadByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSquadRepository(db)
 	service := NewSquadService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -164,10 +166,6 @@ func InternalSquadByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.Hand
 					return
 				}
 			}
-			if len(parts) == 2 && parts[1] == "accessible-nodes" && r.Method == http.MethodGet {
-				handleGetInternalSquadAccessibleNodes(w, r, service, squadUUID)
-				return
-			}
 			if len(parts) == 2 && parts[1] == "usage" && r.Method == http.MethodGet {
 				handleGetInternalSquadUsage(w, r, db, cfg, squadUUID)
 				return
@@ -187,11 +185,11 @@ func InternalSquadByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.Hand
 	}
 }
 
-func handleBulkAddUsersToInternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleBulkAddUsersToInternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	ctx := r.Context()
 	var exists int
-	if err := db.QueryRowContext(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
-		if err == sql.ErrNoRows {
+	if err := db.QueryRow(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrInternalSquadNotFound, cfg)
 			return
 		}
@@ -199,7 +197,7 @@ func handleBulkAddUsersToInternalSquad(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	_, err := db.ExecContext(ctx, `
+	_, err := db.Exec(ctx, `
 		INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
 		SELECT $1, id FROM users
 		ON CONFLICT (internal_squad_uuid, user_id) DO NOTHING
@@ -212,11 +210,11 @@ func handleBulkAddUsersToInternalSquad(w http.ResponseWriter, r *http.Request, d
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func handleBulkRemoveUsersFromInternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleBulkRemoveUsersFromInternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	ctx := r.Context()
 	var exists int
-	if err := db.QueryRowContext(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
-		if err == sql.ErrNoRows {
+	if err := db.QueryRow(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrInternalSquadNotFound, cfg)
 			return
 		}
@@ -224,7 +222,7 @@ func handleBulkRemoveUsersFromInternalSquad(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	_, err := db.ExecContext(ctx, `
+	_, err := db.Exec(ctx, `
 		DELETE FROM internal_squad_members WHERE internal_squad_uuid = $1
 	`, squadUUID)
 	if err != nil {
@@ -235,11 +233,11 @@ func handleBulkRemoveUsersFromInternalSquad(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func handleBulkAddManyUsersToInternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleBulkAddManyUsersToInternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	ctx := r.Context()
 	var exists int
-	if err := db.QueryRowContext(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
-		if err == sql.ErrNoRows {
+	if err := db.QueryRow(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrInternalSquadNotFound, cfg)
 			return
 		}
@@ -255,7 +253,7 @@ func handleBulkAddManyUsersToInternalSquad(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	_, err := db.ExecContext(ctx, `
+	_, err := db.Exec(ctx, `
 		INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
 		SELECT $1, unnest($2::bigint[])
 		ON CONFLICT (internal_squad_uuid, user_id) DO NOTHING
@@ -268,11 +266,11 @@ func handleBulkAddManyUsersToInternalSquad(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func handleBulkRemoveManyUsersFromInternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleBulkRemoveManyUsersFromInternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	ctx := r.Context()
 	var exists int
-	if err := db.QueryRowContext(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
-		if err == sql.ErrNoRows {
+	if err := db.QueryRow(ctx, `SELECT 1 FROM internal_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrInternalSquadNotFound, cfg)
 			return
 		}
@@ -288,7 +286,7 @@ func handleBulkRemoveManyUsersFromInternalSquad(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	_, err := db.ExecContext(ctx, `
+	_, err := db.Exec(ctx, `
 		DELETE FROM internal_squad_members
 		WHERE internal_squad_uuid = $1 AND user_id = ANY($2::bigint[])
 	`, squadUUID, req.UserIDs)
@@ -300,7 +298,7 @@ func handleBulkRemoveManyUsersFromInternalSquad(w http.ResponseWriter, r *http.R
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func handleGetInternalSquadUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleGetInternalSquadUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	q := r.URL.Query()
 	limit := 250
 	if limitStr := q.Get("limit"); limitStr != "" {
@@ -322,9 +320,9 @@ func handleGetInternalSquadUsage(w http.ResponseWriter, r *http.Request, db *sql
 	}
 
 	var total int64
-	_ = db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM internal_squad_members WHERE internal_squad_uuid = $1`, squadUUID).Scan(&total)
+	_ = db.QueryRow(r.Context(), `SELECT COUNT(*) FROM internal_squad_members WHERE internal_squad_uuid = $1`, squadUUID).Scan(&total)
 
-	rows, err := db.QueryContext(r.Context(), `
+	rows, err := db.Query(r.Context(), `
 		SELECT u.id, COALESCE(SUM(nuh.total_bytes), 0) AS total_bytes
 		FROM internal_squad_members ism
 		JOIN users u ON ism.user_id = u.id
@@ -399,7 +397,7 @@ func handleGetInternalSquadUsage(w http.ResponseWriter, r *http.Request, db *sql
 // @Failure      500     {object}  shared.ErrorResponse
 // @Router       /bandwidth-stats/internal-squads/{uuid}/usage [get]
 // @Router       /bandwidth-stats/internal-squads/{uuid}/users/{userId}/usage [get]
-func BandwidthStatsInternalSquadsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func BandwidthStatsInternalSquadsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/bandwidth-stats/internal-squads")
 		path = strings.Trim(path, "/")
@@ -428,7 +426,7 @@ func BandwidthStatsInternalSquadsHandler(db *sql.DB, cfg *config.BackendConfig) 
 	}
 }
 
-func handleGetInternalSquadUserUsage(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string, userID int64) {
+func handleGetInternalSquadUserUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string, userID int64) {
 	q := r.URL.Query()
 	startStr := q.Get("start")
 	endStr := q.Get("end")
@@ -448,7 +446,7 @@ func handleGetInternalSquadUserUsage(w http.ResponseWriter, r *http.Request, db 
 	}
 
 	var squadExists bool
-	if err := db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM internal_squads WHERE uuid = $1)`, squadUUID).Scan(&squadExists); err != nil {
+	if err := db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM internal_squads WHERE uuid = $1)`, squadUUID).Scan(&squadExists); err != nil {
 		shared.SendAPIError(w, shared.ErrGetInternalSquadByUUIDFailed.WithCause(err), cfg)
 		return
 	}
@@ -471,7 +469,7 @@ func handleGetInternalSquadUserUsage(w http.ResponseWriter, r *http.Request, db 
 		dates = append(dates, d.Format("2006-01-02"))
 	}
 
-	nodeRows, err := db.QueryContext(r.Context(), `
+	nodeRows, err := db.Query(r.Context(), `
 		SELECT DISTINCT n.id, n.uuid
 		FROM internal_squad_inbounds isi
 		JOIN config_profile_inbounds_to_nodes cpin ON cpin.config_profile_inbound_uuid = isi.inbound_uuid
@@ -484,7 +482,7 @@ func handleGetInternalSquadUserUsage(w http.ResponseWriter, r *http.Request, db 
 	}
 
 	nodeUUIDByID := make(map[int64]string)
-	nodeIDs := make([]string, 0)
+	nodeIDs := make([]int64, 0)
 	for nodeRows.Next() {
 		var id int64
 		var nodeUUID string
@@ -494,7 +492,7 @@ func handleGetInternalSquadUserUsage(w http.ResponseWriter, r *http.Request, db 
 			return
 		}
 		nodeUUIDByID[id] = nodeUUID
-		nodeIDs = append(nodeIDs, strconv.FormatInt(id, 10))
+		nodeIDs = append(nodeIDs, id)
 	}
 	nodeRows.Close()
 	if err := nodeRows.Err(); err != nil {
@@ -504,13 +502,12 @@ func handleGetInternalSquadUserUsage(w http.ResponseWriter, r *http.Request, db 
 
 	byDate := make(map[string][]dayNode)
 	if len(nodeIDs) > 0 {
-		nodeIDsLiteral := "{" + strings.Join(nodeIDs, ",") + "}"
-		usageRows, err := db.QueryContext(r.Context(), `
+		usageRows, err := db.Query(r.Context(), `
 			SELECT nuh.created_at, nuh.node_id, COALESCE(SUM(nuh.total_bytes), 0) AS total_bytes
 			FROM nodes_user_usage_history nuh
 			WHERE nuh.user_id = $1 AND nuh.node_id = ANY($2::bigint[]) AND nuh.created_at >= $3 AND nuh.created_at <= $4
 			GROUP BY nuh.created_at, nuh.node_id
-		`, userID, nodeIDsLiteral, startDate, endDate)
+		`, userID, nodeIDs, startDate, endDate)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrInternalServerError.WithCause(err), cfg)
 			return

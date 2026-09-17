@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"exodus/internal/config"
-	"exodus/internal/logger"
 	"exodus/internal/db"
 	"exodus/internal/httpapi/asynqmon"
 	"exodus/internal/httpapi/auth"
@@ -40,6 +39,7 @@ import (
 	"exodus/internal/httpapi/system"
 	"exodus/internal/httpapi/users"
 	"exodus/internal/jobqueue"
+	"exodus/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -177,17 +177,17 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/tokens", auth.RequireAdminRole(panelsettings.PanelAPITokensHandler(pgxDB, cfg)))
 	mux.HandleFunc("/api/tokens/", auth.RequireAdminRole(panelsettings.PanelAPITokenByUUIDHandler(pgxDB, cfg)))
 
-	mux.HandleFunc("/api/nodes", nodes.NodesHandler(db, cfg))
-	mux.HandleFunc("/api/nodes/", nodes.NodeByUUIDHandler(db, cfg))
-	mux.HandleFunc("/api/nodes/actions/", nodes.NodesActionsHandler(db, cfg))
-	mux.HandleFunc("/api/nodes/bulk-actions", nodes.NodesBulkActionsHandler(db, cfg))
-	mux.HandleFunc("/api/nodes/bulk-actions/", nodes.NodesBulkActionsHandler(db, cfg))
-	mux.HandleFunc("/api/nodes/tags", nodes.NodesTagsHandler(db, cfg))
-	mux.HandleFunc("/api/node-plugins/tags", nodeplugins.NodePluginsTagsHandler(db, cfg))
-	mux.HandleFunc("/api/node-plugins", nodeplugins.Handler(db, cfg))
-	mux.HandleFunc("/api/node-plugins/", nodeplugins.Handler(db, cfg))
-	mux.HandleFunc("/api/node-integrations", nodeintegrations.Handler(db, cfg))
-	mux.HandleFunc("/api/node-integrations/", nodeintegrations.Handler(db, cfg))
+	mux.HandleFunc("/api/nodes", nodes.NodesHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/nodes/", nodes.NodeByUUIDHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/nodes/actions/", nodes.NodesActionsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/nodes/bulk-actions", nodes.NodesBulkActionsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/nodes/bulk-actions/", nodes.NodesBulkActionsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/nodes/tags", nodes.NodesTagsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-plugins/tags", nodeplugins.NodePluginsTagsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-plugins", nodeplugins.Handler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-plugins/", nodeplugins.Handler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-integrations", nodeintegrations.Handler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-integrations/", nodeintegrations.Handler(pgxDB, cfg))
 	mux.HandleFunc("/api/connections/", connections.Handler(pgxDB, cfg))
 	mux.HandleFunc("/api/node-ssh/", nodessh.NodeSSHDispatcherHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/node-ssh", nodessh.NodeSSHDispatcherHandler(pgxDB, cfg))
@@ -206,11 +206,11 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/subscription-connections/bulk-actions/", subscriptionconnections.NodesBulkActionsHandler(db, cfg))
 	mux.HandleFunc("/api/subscription-connections/tags", subscriptionconnections.NodesTagsHandler(db, cfg))
 
-	mux.HandleFunc("/api/hosts", hosts.HostsHandler(db, cfg))
-	mux.HandleFunc("/api/hosts/", hosts.HostByUUIDHandler(db, cfg))
-	mux.HandleFunc("/api/hosts/actions/", hosts.HostsActionsHandler(db, cfg))
-	mux.HandleFunc("/api/hosts/bulk/", hosts.HostsBulkHandler(db, cfg))
-	mux.HandleFunc("/api/hosts/tags", hosts.HostsTagsHandler(db, cfg))
+	mux.HandleFunc("/api/hosts", hosts.HostsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/hosts/", hosts.HostByUUIDHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/hosts/actions/", hosts.HostsActionsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/hosts/bulk/", hosts.HostsBulkHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/hosts/tags", hosts.HostsTagsHandler(pgxDB, cfg))
 
 	mux.HandleFunc("/api/users", users.UsersHandler(db, cfg))
 	mux.HandleFunc("/api/users/", users.UserByUUIDHandler(db, cfg))
@@ -229,31 +229,31 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/bandwidth-stats/nodes/", bandwidthstats.NodesHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/bandwidth-stats/users", bandwidthstats.UsersHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/bandwidth-stats/users/", bandwidthstats.UsersHandler(pgxDB, cfg))
-	mux.HandleFunc("/api/bandwidth-stats/internal-squads/", squads.BandwidthStatsInternalSquadsHandler(db, cfg))
+	mux.HandleFunc("/api/bandwidth-stats/internal-squads/", squads.BandwidthStatsInternalSquadsHandler(pgxDB, cfg))
 
-	mux.HandleFunc("/api/config-profiles/tags", configprofiles.ConfigProfilesTagsHandler(db, cfg))
-	mux.HandleFunc("/api/config-profiles", configprofiles.ConfigProfilesHandler(db, cfg))
-	mux.HandleFunc("/api/config-profiles/", configprofiles.ConfigProfileByUUIDHandler(db, cfg))
-	mux.HandleFunc("/api/config-profiles/actions/", configprofiles.ConfigProfilesActionsHandler(db, cfg))
-	mux.HandleFunc("/api/config-profiles/inbounds", configprofiles.ConfigProfilesInboundsHandler(db, cfg))
-	mux.HandleFunc("/api/snippets", configprofiles.ConfigProfileSnippetsHandler(db, cfg))
-	mux.HandleFunc("/api/snippets/", configprofiles.ConfigProfileSnippetsHandler(db, cfg))
+	mux.HandleFunc("/api/config-profiles/tags", configprofiles.ConfigProfilesTagsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/config-profiles", configprofiles.ConfigProfilesHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/config-profiles/", configprofiles.ConfigProfileByUUIDHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/config-profiles/actions/", configprofiles.ConfigProfilesActionsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/config-profiles/inbounds", configprofiles.ConfigProfilesInboundsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/snippets", configprofiles.ConfigProfileSnippetsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/snippets/", configprofiles.ConfigProfileSnippetsHandler(pgxDB, cfg))
 
-	mux.HandleFunc("/api/internal-squads/tags", squads.InternalSquadsTagsHandler(db, cfg))
-	mux.HandleFunc("/api/internal-squads", squads.InternalSquadsHandler(db, cfg))
-	mux.HandleFunc("/api/internal-squads/", squads.InternalSquadByUUIDHandler(db, cfg))
-	mux.HandleFunc("/api/internal-squads/actions/reorder", squads.InternalSquadsReorderHandler(db, cfg))
+	mux.HandleFunc("/api/internal-squads/tags", squads.InternalSquadsTagsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/internal-squads", squads.InternalSquadsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/internal-squads/", squads.InternalSquadByUUIDHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/internal-squads/actions/reorder", squads.InternalSquadsReorderHandler(pgxDB, cfg))
 
-	mux.HandleFunc("/api/external-squads/tags", externalsquads.ExternalSquadsTagsHandler(db, cfg))
-	mux.HandleFunc("/api/external-squads", externalsquads.ExternalSquadsHandler(db, cfg))
-	mux.HandleFunc("/api/external-squads/", externalsquads.ExternalSquadByUUIDHandler(db, cfg))
-	mux.HandleFunc("/api/external-squads/actions/reorder", externalsquads.ExternalSquadsReorderHandler(db, cfg))
+	mux.HandleFunc("/api/external-squads/tags", externalsquads.ExternalSquadsTagsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/external-squads", externalsquads.ExternalSquadsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/external-squads/", externalsquads.ExternalSquadByUUIDHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/external-squads/actions/reorder", externalsquads.ExternalSquadsReorderHandler(pgxDB, cfg))
 
-	mux.HandleFunc("/api/srs-lists/tags", srslists.SRSListsTagsHandler(db, cfg))
-	mux.HandleFunc("/api/srs-lists", srslists.SRSListsHandler(db, cfg))
-	mux.HandleFunc("/api/srs-lists/", srslists.SRSListByUUIDHandler(db, cfg))
-	mux.HandleFunc("/api/srs-lists/actions/", srslists.SRSListsActionsHandler(db, cfg))
-	mux.HandleFunc("/api/srs-lists/bulk/", srslists.SRSListsBulkHandler(db, cfg))
+	mux.HandleFunc("/api/srs-lists/tags", srslists.SRSListsTagsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/srs-lists", srslists.SRSListsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/srs-lists/", srslists.SRSListByUUIDHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/srs-lists/actions/", srslists.SRSListsActionsHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/srs-lists/bulk/", srslists.SRSListsBulkHandler(pgxDB, cfg))
 
 	mux.HandleFunc("/api/hwid/devices/delete-all", hwiduserdevices.HWIDCompatDeleteAllUserDevicesHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/hwid/devices/delete", hwiduserdevices.HWIDCompatDevicesHandler(pgxDB, db, cfg))

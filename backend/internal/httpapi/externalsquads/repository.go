@@ -2,13 +2,14 @@ package externalsquads
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"time"
 
-	"exodus/internal/db"
 	"exodus/internal/httpapi/shared"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type ExternalSquadRecord struct {
@@ -27,8 +28,8 @@ type ExternalSquadRecord struct {
 	UpdatedAt             time.Time       `json:"updated_at"`
 }
 
-func getExternalSquads(ctx context.Context, dbConn *sql.DB) ([]ExternalSquadRecord, error) {
-	rows, err := dbConn.QueryContext(ctx, `
+func getExternalSquads(ctx context.Context, dbConn *pgxpool.Pool) ([]ExternalSquadRecord, error) {
+	rows, err := dbConn.Query(ctx, `
 		SELECT uuid, view_position, name, tags,
 			subscription_settings, host_overrides, response_headers_add,
 			array_to_json(COALESCE(response_headers_remove, ARRAY[]::text[]))::text AS response_headers_remove,
@@ -56,13 +57,13 @@ func getExternalSquads(ctx context.Context, dbConn *sql.DB) ([]ExternalSquadReco
 
 // getExternalSquadsMembersCount batch-loads member counts for a set of external squads
 // in a single query, instead of one COUNT(*) query per squad.
-func getExternalSquadsMembersCount(ctx context.Context, db *sql.DB, squadUUIDs []string) (map[string]int, error) {
+func getExternalSquadsMembersCount(ctx context.Context, db *pgxpool.Pool, squadUUIDs []string) (map[string]int, error) {
 	result := make(map[string]int, len(squadUUIDs))
 	if len(squadUUIDs) == 0 {
 		return result, nil
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT external_squad_uuid, COUNT(*)
 		FROM users
 		WHERE external_squad_uuid = ANY($1)
@@ -86,7 +87,7 @@ func getExternalSquadsMembersCount(ctx context.Context, db *sql.DB, squadUUIDs [
 
 // getExternalSquadsTemplates batch-loads templates for a set of external squads
 // in a single query, instead of one query per squad.
-func getExternalSquadsTemplates(ctx context.Context, db *sql.DB, squadUUIDs []string) (map[string][]ExternalSquadTemplate, error) {
+func getExternalSquadsTemplates(ctx context.Context, db *pgxpool.Pool, squadUUIDs []string) (map[string][]ExternalSquadTemplate, error) {
 	result := make(map[string][]ExternalSquadTemplate, len(squadUUIDs))
 	for _, id := range squadUUIDs {
 		result[id] = make([]ExternalSquadTemplate, 0)
@@ -95,7 +96,7 @@ func getExternalSquadsTemplates(ctx context.Context, db *sql.DB, squadUUIDs []st
 		return result, nil
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT external_squad_uuid, template_uuid, template_type
 		FROM external_squads_templates
 		WHERE external_squad_uuid = ANY($1)
@@ -116,8 +117,8 @@ func getExternalSquadsTemplates(ctx context.Context, db *sql.DB, squadUUIDs []st
 	return result, rows.Err()
 }
 
-func getExternalSquadByUUID(ctx context.Context, dbConn *sql.DB, squadUUID string) (ExternalSquadRecord, error) {
-	row := dbConn.QueryRowContext(ctx, `
+func getExternalSquadByUUID(ctx context.Context, dbConn *pgxpool.Pool, squadUUID string) (ExternalSquadRecord, error) {
+	row := dbConn.QueryRow(ctx, `
 		SELECT uuid, view_position, name, tags,
 			subscription_settings, host_overrides, response_headers_add,
 			array_to_json(COALESCE(response_headers_remove, ARRAY[]::text[]))::text AS response_headers_remove,
@@ -130,8 +131,8 @@ func getExternalSquadByUUID(ctx context.Context, dbConn *sql.DB, squadUUID strin
 	return scanExternalSquad(row)
 }
 
-func getAllTags(ctx context.Context, dbConn *sql.DB) ([]string, error) {
-	rows, err := dbConn.QueryContext(ctx, `
+func getAllTags(ctx context.Context, dbConn *pgxpool.Pool) ([]string, error) {
+	rows, err := dbConn.Query(ctx, `
 		SELECT DISTINCT unnest(tags) AS tag
 		FROM external_squads
 		WHERE tags IS NOT NULL AND cardinality(tags) > 0
@@ -155,9 +156,9 @@ func getAllTags(ctx context.Context, dbConn *sql.DB) ([]string, error) {
 	return tags, rows.Err()
 }
 
-func setTags(ctx context.Context, dbConn *sql.DB, squadUUID string, tags []string) error {
+func setTags(ctx context.Context, dbConn *pgxpool.Pool, squadUUID string, tags []string) error {
 	sanitized := shared.SanitizeTags(tags)
-	result, err := dbConn.ExecContext(ctx, `
+	result, err := dbConn.Exec(ctx, `
 		UPDATE external_squads
 		SET tags = $1::text[], updated_at = CURRENT_TIMESTAMP
 		WHERE uuid = $2
@@ -165,21 +166,17 @@ func setTags(ctx context.Context, dbConn *sql.DB, squadUUID string, tags []strin
 	if err != nil {
 		return err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return sql.ErrNoRows
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }
 
 func scanExternalSquad(scanner shared.RowScanner) (ExternalSquadRecord, error) {
 	var rec ExternalSquadRecord
-	var tags db.StringArray
-	var subSettings, hostOverrides, respHeadersAdd, respHeadersRemove, hwidSettings, customRemarks sql.NullString
-	var subpageConfigUUID sql.NullString
+	var tags []string
+	var subSettings, hostOverrides, respHeadersAdd, respHeadersRemove, hwidSettings, customRemarks *string
+	var subpageConfigUUID *string
 
 	err := scanner.Scan(
 		&rec.UUID,
@@ -200,7 +197,7 @@ func scanExternalSquad(scanner shared.RowScanner) (ExternalSquadRecord, error) {
 		return rec, err
 	}
 
-	rec.Tags = tags.Slice()
+	rec.Tags = tags
 	if rec.Tags == nil {
 		rec.Tags = []string{}
 	}
@@ -211,9 +208,7 @@ func scanExternalSquad(scanner shared.RowScanner) (ExternalSquadRecord, error) {
 	rec.ResponseHeadersRemove = parseJSONRaw(respHeadersRemove)
 	rec.HWIDSettings = parseJSONRaw(hwidSettings)
 	rec.CustomRemarks = parseJSONRaw(customRemarks)
-	if subpageConfigUUID.Valid {
-		rec.SubpageConfigUUID = &subpageConfigUUID.String
-	}
+	rec.SubpageConfigUUID = subpageConfigUUID
 
 	return rec, nil
 }

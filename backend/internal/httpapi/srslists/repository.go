@@ -2,7 +2,6 @@ package srslists
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"time"
 
@@ -10,6 +9,9 @@ import (
 	"exodus/internal/httpapi/shared"
 	srscore "exodus/internal/srslists"
 	"exodus/internal/util"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type srsListAPI struct {
@@ -74,8 +76,8 @@ type checkListsRequest struct {
 	UUIDs []string `json:"uuids"`
 }
 
-func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func getAllTags(ctx context.Context, db *pgxpool.Pool) ([]string, error) {
+	rows, err := db.Query(ctx, `
 		SELECT DISTINCT unnest(tags) AS tag
 		FROM srs_lists
 		ORDER BY tag ASC
@@ -99,9 +101,9 @@ func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
 	return tags, rows.Err()
 }
 
-func setTags(ctx context.Context, db *sql.DB, srsUUID string, tags []string) error {
+func setTags(ctx context.Context, db *pgxpool.Pool, srsUUID string, tags []string) error {
 	sanitized := shared.SanitizeTags(tags)
-	result, err := db.ExecContext(ctx, `
+	result, err := db.Exec(ctx, `
 		UPDATE srs_lists
 		SET tags = $1::text[], updated_at = CURRENT_TIMESTAMP
 		WHERE uuid::text = $2
@@ -109,17 +111,13 @@ func setTags(ctx context.Context, db *sql.DB, srsUUID string, tags []string) err
 	if err != nil {
 		return err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return sql.ErrNoRows
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }
 
-func checkSelectedLists(ctx context.Context, db *sql.DB, cfg *config.BackendConfig, uuids []string) error {
+func checkSelectedLists(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig, uuids []string) error {
 	clean, err := normalizeUUIDs(uuids)
 	if err != nil {
 		return err
@@ -129,7 +127,7 @@ func checkSelectedLists(ctx context.Context, db *sql.DB, cfg *config.BackendConf
 	}
 
 	itemsByUUID := make(map[string]string, len(clean))
-	rows, err := db.QueryContext(ctx, `SELECT uuid, url FROM srs_lists WHERE uuid = ANY($1)`, clean)
+	rows, err := db.Query(ctx, `SELECT uuid, url FROM srs_lists WHERE uuid = ANY($1)`, clean)
 	if err != nil {
 		return err
 	}
@@ -152,7 +150,7 @@ func checkSelectedLists(ctx context.Context, db *sql.DB, cfg *config.BackendConf
 		if err != nil {
 			errText = err.Error()
 		}
-		if _, writeErr := db.ExecContext(ctx, `
+		if _, writeErr := db.Exec(ctx, `
 			UPDATE srs_lists
 			SET is_available = $1,
 				last_checked_at = CURRENT_TIMESTAMP,

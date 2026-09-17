@@ -1,7 +1,6 @@
 package configprofiles
 
 import (
-	"database/sql"
 	"net/http"
 	"strings"
 
@@ -9,6 +8,7 @@ import (
 	"exodus/internal/httpapi/shared"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ConfigProfilesHandler godoc
@@ -26,7 +26,7 @@ import (
 // @Router       /config-profiles [get]
 // @Router       /config-profiles [post]
 // @Router       /config-profiles [patch]
-func ConfigProfilesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ConfigProfilesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewConfigProfileRepository(db)
 	service := NewConfigProfileService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +59,7 @@ func ConfigProfilesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFu
 // @Router       /config-profiles/{uuid} [delete]
 // @Router       /config-profiles/{uuid}/inbounds [get]
 // @Router       /config-profiles/{uuid}/computed-config [get]
-func ConfigProfileByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ConfigProfileByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewConfigProfileRepository(db)
 	service := NewConfigProfileService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +124,7 @@ func ConfigProfileByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.Hand
 // @Failure      400   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /config-profiles/actions/reorder [post]
-func ConfigProfilesActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ConfigProfilesActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewConfigProfileRepository(db)
 	service := NewConfigProfileService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +155,7 @@ func ConfigProfilesActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.Ha
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /config-profiles/tags [get]
 // @Router       /config-profiles/tags [patch]
-func ConfigProfilesTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ConfigProfilesTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewConfigProfileRepository(db)
 	service := NewConfigProfileService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +179,7 @@ func ConfigProfilesTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.Handl
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /config-profiles/inbounds [get]
-func ConfigProfilesInboundsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ConfigProfilesInboundsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewConfigProfileRepository(db)
 	service := NewConfigProfileService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +211,7 @@ func ConfigProfilesInboundsHandler(db *sql.DB, cfg *config.BackendConfig) http.H
 // @Router       /snippets [post]
 // @Router       /snippets [patch]
 // @Router       /snippets [delete]
-func ConfigProfileSnippetsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ConfigProfileSnippetsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewConfigProfileRepository(db)
 	service := NewConfigProfileService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {

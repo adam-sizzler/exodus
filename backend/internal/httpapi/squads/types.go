@@ -1,7 +1,6 @@
 package squads
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,11 +8,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 var (
 	errInternalSquadNotFound = errors.New("internal squad not found")
-	errSquadNotFound         = sql.ErrNoRows
+	errSquadNotFound         = pgx.ErrNoRows
 )
 
 // InternalSquad represents an internal squad entity for API responses.

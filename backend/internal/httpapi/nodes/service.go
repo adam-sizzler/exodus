@@ -2,10 +2,11 @@ package nodes
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"exodus/internal/config"
 	"exodus/internal/nodehotcache"
@@ -95,7 +96,7 @@ func (s *NodeService) RestartNode(ctx context.Context, nodeUUID string, forceRes
 
 func (s *NodeService) RestartAllNodes(ctx context.Context, forceRestart bool) error {
 	var enabledCount int
-	err := s.repo.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE is_disabled = false`).Scan(&enabledCount)
+	err := s.repo.db.QueryRow(ctx, `SELECT COUNT(*) FROM nodes WHERE is_disabled = false`).Scan(&enabledCount)
 	if err != nil {
 		return err
 	}
@@ -191,7 +192,7 @@ func (s *NodeService) UpdateNode(ctx context.Context, req updateNodeRequest) (no
 
 func (s *NodeService) DeleteNode(ctx context.Context, nodeUUID string) error {
 	node, nodeErr := s.repo.getNodeByUUID(ctx, nodeUUID)
-	if nodeErr != nil && !errors.Is(nodeErr, sql.ErrNoRows) {
+	if nodeErr != nil && !errors.Is(nodeErr, pgx.ErrNoRows) {
 		return nodeErr
 	}
 

@@ -1,7 +1,6 @@
 package nodeplugins
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +11,8 @@ import (
 	monitor "exodus/internal/nodes"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Handler godoc
@@ -35,7 +36,7 @@ import (
 // @Router       /node-plugins/{uuid} [get]
 // @Router       /node-plugins/{uuid} [delete]
 // @Router       /node-plugins/actions/reorder [post]
-func Handler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func Handler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if cfg != nil {
@@ -68,7 +69,7 @@ func Handler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	}
 }
 
-func handleList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleList(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	plugins, err := loadPlugins(r.Context(), db)
 	if err != nil {
 		cfg.Logger.Error("Failed to load node plugins", "error", err)
@@ -80,7 +81,7 @@ func handleList(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.
 	})
 }
 
-func handleCreate(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreate(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req createRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
@@ -106,74 +107,57 @@ func handleCreate(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *confi
 	shared.WriteJSON(w, http.StatusCreated, responseEnvelope[nodePlugin]{Response: plugin})
 }
 
-func handleByUUID(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, rawPath string) {
-	parts := strings.Split(strings.Trim(rawPath, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
+func handleByUUID(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, rawPath string) {
+	uuidStr := strings.TrimPrefix(rawPath, "/")
+	if uuidStr == "" {
+		shared.WriteJSONError(w, http.StatusBadRequest, "missing uuid")
 		return
 	}
-	pluginUUID := parts[0]
-	if _, err := uuid.Parse(pluginUUID); err != nil {
+	if _, err := uuid.Parse(uuidStr); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid uuid", nil, cfg)
-		return
-	}
-
-	if len(parts) > 1 {
-		shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		plugin, err := loadPluginByUUID(r.Context(), db, pluginUUID)
+		plugin, err := loadPluginByUUID(r.Context(), db, uuidStr)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
 				return
 			}
-			cfg.Logger.Error("Failed to load node plugin", "uuid", pluginUUID, "error", err)
+			cfg.Logger.Error("Failed to get node plugin", "error", err)
 			shared.SendAPIError(w, shared.ErrGetNodePluginsFailed.WithCause(err), cfg)
 			return
 		}
 		shared.WriteJSON(w, http.StatusOK, responseEnvelope[nodePlugin]{Response: plugin})
 	case http.MethodPatch:
-		handleUpdate(w, r, db, cfg, pluginUUID)
+		handleUpdate(w, r, db, cfg, uuidStr)
 	case http.MethodDelete:
-		handleDelete(w, r, db, cfg, pluginUUID)
+		handleDelete(w, r, db, cfg, uuidStr)
 	default:
 		shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handleUpdate(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, urlUUID string) {
+func handleUpdate(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, urlUUID string) {
 	var req updateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
 		return
 	}
-
-	pluginUUID := urlUUID
-	if pluginUUID == "" {
-		if req.UUID == nil || *req.UUID == "" {
-			shared.SendError(w, http.StatusBadRequest, "uuid is required", nil, cfg)
-			return
-		}
-		pluginUUID = *req.UUID
+	targetUUID := urlUUID
+	if targetUUID == "" && req.UUID != nil {
+		targetUUID = *req.UUID
 	}
-
-	if _, err := uuid.Parse(pluginUUID); err != nil {
-		shared.SendError(w, http.StatusBadRequest, "invalid uuid", nil, cfg)
+	targetUUID = strings.TrimSpace(targetUUID)
+	if targetUUID == "" {
+		shared.SendError(w, http.StatusBadRequest, "uuid is required", nil, cfg)
 		return
 	}
-
-	var name *string
-	if req.Name != nil {
-		trimmed := strings.TrimSpace(*req.Name)
-		if trimmed == "" {
-			shared.SendError(w, http.StatusBadRequest, "name cannot be empty", nil, cfg)
-			return
-		}
-		name = &trimmed
+	if _, err := uuid.Parse(targetUUID); err != nil {
+		shared.SendError(w, http.StatusBadRequest, "invalid uuid", nil, cfg)
+		return
 	}
 
 	var configJSON *json.RawMessage
@@ -186,39 +170,66 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *confi
 		configJSON = &normalized
 	}
 
-	plugin, err := updatePlugin(r.Context(), db, pluginUUID, name, req.Tags, configJSON, req.ViewPosition)
+	plugin, err := updatePlugin(r.Context(), db, targetUUID, req.Name, req.Tags, configJSON, req.ViewPosition)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
 			return
 		}
-		cfg.Logger.Error("Failed to update node plugin", "uuid", pluginUUID, "error", err)
+		cfg.Logger.Error("Failed to update node plugin", "error", err)
 		shared.SendAPIError(w, shared.ErrUpdateNodePluginFailed.WithCause(err), cfg)
 		return
 	}
 	shared.WriteJSON(w, http.StatusOK, responseEnvelope[nodePlugin]{Response: plugin})
 }
 
-func handleDelete(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, pluginUUID string) {
+func handleDelete(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, pluginUUID string) {
 	if err := deletePlugin(r.Context(), db, pluginUUID); err != nil {
-		cfg.Logger.Error("Failed to delete node plugin", "uuid", pluginUUID, "error", err)
+		cfg.Logger.Error("Failed to delete node plugin", "error", err)
 		shared.SendAPIError(w, shared.ErrDeleteNodePluginFailed.WithCause(err), cfg)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleExecutor(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleExecutor(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	if r.Method != http.MethodPost {
 		shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-
 	var req executorRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
 		return
 	}
+	if len(req.Command.Raw) == 0 || string(req.Command.Raw) == "null" {
+		shared.SendError(w, http.StatusBadRequest, "command is required", nil, cfg)
+		return
+	}
+
+	target := strings.ToUpper(strings.TrimSpace(req.TargetNodes.Target))
+	nodeUUIDs := normalizeUUIDList(req.TargetNodes.NodeUUIDs)
+	switch target {
+	case "ALL":
+	case "SELECTED_NODES":
+		if len(nodeUUIDs) == 0 {
+			shared.SendError(w, http.StatusBadRequest, "targetNodes.nodeUuids cannot be empty", nil, cfg)
+			return
+		}
+		if err := ensureNodesExist(r.Context(), db, nodeUUIDs); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				shared.SendAPIError(w, shared.ErrNodeNotFound, cfg)
+				return
+			}
+			cfg.Logger.Error("Failed to validate target nodes", "error", err)
+			shared.SendAPIError(w, shared.ErrNodeNotFound.WithCause(err), cfg)
+			return
+		}
+	default:
+		shared.SendError(w, http.StatusBadRequest, "invalid targetNodes.target", nil, cfg)
+		return
+	}
+
 	command := strings.TrimSpace(req.Command.Command)
 	switch command {
 	case "blockIps", "unblockIps", "recreateTables":
@@ -226,38 +237,13 @@ func handleExecutor(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *con
 		shared.SendError(w, http.StatusBadRequest, "unsupported executor command", nil, cfg)
 		return
 	}
-	if req.TargetNodes.Target != "specificNodes" {
-		shared.SendError(w, http.StatusBadRequest, "targetNodes.target must be specificNodes", nil, cfg)
-		return
-	}
-	targetNodeUUIDs := normalizeUUIDList(req.TargetNodes.NodeUUIDs)
-	if len(targetNodeUUIDs) == 0 {
-		shared.SendError(w, http.StatusBadRequest, "nodeUuids are required", nil, cfg)
-		return
-	}
-	for _, nodeUUID := range targetNodeUUIDs {
-		if _, err := uuid.Parse(nodeUUID); err != nil {
-			shared.SendError(w, http.StatusBadRequest, "invalid node uuid", nil, cfg)
-			return
-		}
-	}
-
-	if err := ensureNodesExist(r.Context(), db, targetNodeUUIDs); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			shared.SendError(w, http.StatusBadRequest, "one or more nodes were not found", nil, cfg)
-			return
-		}
-		cfg.Logger.Error("Failed to validate node plugin executor targets", "error", err)
-		shared.SendAPIError(w, shared.ErrExecuteNodePluginFailed.WithCause(err), cfg)
-		return
-	}
 
 	cfg.Logger.Info(
 		"Node plugin executor command accepted",
 		"command", command,
-		"nodes", strings.Join(targetNodeUUIDs, ","),
+		"nodes", strings.Join(nodeUUIDs, ","),
 	)
-	if err := monitor.RequestNodePluginExecutor(req.Command.Raw, targetNodeUUIDs...); err != nil {
+	if err := monitor.RequestNodePluginExecutor(req.Command.Raw, nodeUUIDs...); err != nil {
 		cfg.Logger.Warn("Failed to send node plugin executor command", "command", command, "error", err)
 		shared.SendAPIError(w, shared.ErrExecuteNodePluginFailed.WithCause(err), cfg)
 		return
@@ -265,84 +251,96 @@ func handleExecutor(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *con
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func handleAction(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, action string) {
+func handleAction(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, action string) {
 	if r.Method != http.MethodPost {
 		shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	switch strings.Trim(action, "/") {
+	switch action {
 	case "executor":
 		handleExecutor(w, r, db, cfg)
 	case "reorder":
-		var req reorderRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
-			return
-		}
-		if len(req.Items) == 0 {
-			shared.SendError(w, http.StatusBadRequest, "items are required", nil, cfg)
-			return
-		}
-		if err := reorderPlugins(r.Context(), db, req); err != nil {
-			cfg.Logger.Error("Failed to reorder node plugins", "error", err)
-			shared.SendAPIError(w, shared.ErrReorderNodePluginsFailed.WithCause(err), cfg)
-			return
-		}
-		plugins, err := loadPlugins(r.Context(), db)
-		if err != nil {
-			cfg.Logger.Error("Failed to load reordered node plugins", "error", err)
-			shared.SendAPIError(w, shared.ErrGetNodePluginsFailed.WithCause(err), cfg)
-			return
-		}
-		shared.WriteJSON(w, http.StatusOK, responseEnvelope[listPayload]{Response: listPayload{NodePlugins: plugins, Total: len(plugins)}})
+		handleReorder(w, r, db, cfg)
 	case "clone":
-		var req cloneRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
-			return
-		}
-		if _, err := uuid.Parse(strings.TrimSpace(req.CloneFromUUID)); err != nil {
-			shared.SendError(w, http.StatusBadRequest, "invalid cloneFromUuid", nil, cfg)
-			return
-		}
-		plugin, err := clonePlugin(r.Context(), db, req)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
-				return
-			}
-			cfg.Logger.Error("Failed to clone node plugin", "error", err)
-			shared.SendAPIError(w, shared.ErrCloneNodePluginFailed.WithCause(err), cfg)
-			return
-		}
-		shared.WriteJSON(w, http.StatusCreated, responseEnvelope[nodePlugin]{Response: plugin})
+		handleClone(w, r, db, cfg)
 	case "sync":
-		var req struct {
-			UUID string `json:"uuid"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
-			return
-		}
-		pluginUUID := strings.TrimSpace(req.UUID)
-		if _, err := uuid.Parse(pluginUUID); err != nil {
-			shared.SendError(w, http.StatusBadRequest, "invalid uuid", nil, cfg)
-			return
-		}
-		if err := syncPlugin(r.Context(), db, pluginUUID); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
-				return
-			}
-			cfg.Logger.Error("Failed to sync node plugin", "uuid", pluginUUID, "error", err)
-			shared.SendAPIError(w, shared.ErrSyncNodePluginFailed.WithCause(err), cfg)
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
+		handleSync(w, r, db, cfg)
 	default:
 		shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
 	}
+}
+
+func handleReorder(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
+	var req reorderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
+		return
+	}
+	if len(req.Items) == 0 {
+		shared.SendError(w, http.StatusBadRequest, "items are required", nil, cfg)
+		return
+	}
+	if err := reorderPlugins(r.Context(), db, req); err != nil {
+		cfg.Logger.Error("Failed to reorder node plugins", "error", err)
+		shared.SendAPIError(w, shared.ErrReorderNodePluginsFailed.WithCause(err), cfg)
+		return
+	}
+	plugins, err := loadPlugins(r.Context(), db)
+	if err != nil {
+		cfg.Logger.Error("Failed to load reordered node plugins", "error", err)
+		shared.SendAPIError(w, shared.ErrGetNodePluginsFailed.WithCause(err), cfg)
+		return
+	}
+	shared.WriteJSON(w, http.StatusOK, responseEnvelope[listPayload]{Response: listPayload{NodePlugins: plugins, Total: len(plugins)}})
+}
+
+func handleClone(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
+	var req cloneRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
+		return
+	}
+	plugin, err := clonePlugin(r.Context(), db, req)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
+			return
+		}
+		cfg.Logger.Error("Failed to clone node plugin", "error", err)
+		shared.SendAPIError(w, shared.ErrCloneNodePluginFailed.WithCause(err), cfg)
+		return
+	}
+	shared.WriteJSON(w, http.StatusCreated, responseEnvelope[nodePlugin]{Response: plugin})
+}
+
+func handleSync(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
+	var req struct {
+		UUID string `json:"uuid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
+		return
+	}
+	targetUUID := strings.TrimSpace(req.UUID)
+	if targetUUID == "" {
+		shared.SendError(w, http.StatusBadRequest, "uuid is required", nil, cfg)
+		return
+	}
+	if _, err := uuid.Parse(targetUUID); err != nil {
+		shared.SendError(w, http.StatusBadRequest, "invalid uuid", nil, cfg)
+		return
+	}
+	if err := syncPlugin(r.Context(), db, targetUUID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
+			return
+		}
+		cfg.Logger.Error("Failed to sync node plugin", "error", err)
+		shared.SendAPIError(w, shared.ErrSyncNodePluginFailed.WithCause(err), cfg)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // NodePluginsTagsHandler godoc
@@ -357,7 +355,7 @@ func handleAction(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *confi
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /node-plugins/tags [get]
 // @Router       /node-plugins/tags [patch]
-func NodePluginsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodePluginsTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -370,9 +368,10 @@ func NodePluginsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerF
 	}
 }
 
-func handleGetNodePluginTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetNodePluginTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	tags, err := getAllTags(r.Context(), db)
 	if err != nil {
+		cfg.Logger.Error("Failed to get node plugin tags", "error", err)
 		shared.SendAPIError(w, shared.ErrGetNodePluginsFailed.WithCause(err), cfg)
 		return
 	}
@@ -383,7 +382,7 @@ func handleGetNodePluginTags(w http.ResponseWriter, r *http.Request, db *sql.DB,
 	})
 }
 
-func handleSetNodePluginTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleSetNodePluginTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req shared.SetEntityTagsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -394,16 +393,17 @@ func handleSetNodePluginTags(w http.ResponseWriter, r *http.Request, db *sql.DB,
 		return
 	}
 
-	if err := setTags(r.Context(), db, req.UUID, req.Tags); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	sanitized := shared.SanitizeTags(req.Tags)
+	if err := setTags(r.Context(), db, req.UUID, sanitized); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrNodePluginNotFound, cfg)
 			return
 		}
+		cfg.Logger.Error("Failed to set node plugin tags", "error", err)
 		shared.SendAPIError(w, shared.ErrUpdateNodePluginFailed.WithCause(err), cfg)
 		return
 	}
 
-	sanitized := shared.SanitizeTags(req.Tags)
 	shared.WriteJSON(w, http.StatusOK, map[string]any{
 		"response": map[string]any{
 			"uuid": req.UUID,

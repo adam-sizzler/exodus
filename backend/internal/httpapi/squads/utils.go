@@ -1,16 +1,13 @@
 package squads
 
 import (
-	"database/sql"
-
-	"exodus/internal/db"
 	"exodus/internal/httpapi/shared"
 )
 
 func scanInternalSquad(scanner shared.RowScanner) (InternalSquad, error) {
 	var squad InternalSquad
-	var viewPosition sql.NullInt64
-	var tags db.StringArray
+	var viewPosition *int
+	var tags []string
 
 	err := scanner.Scan(
 		&squad.UUID,
@@ -24,12 +21,13 @@ func scanInternalSquad(scanner shared.RowScanner) (InternalSquad, error) {
 		return squad, err
 	}
 
-	if viewPosition.Valid {
-		squad.ViewPosition = int(viewPosition.Int64)
+	if viewPosition != nil {
+		squad.ViewPosition = *viewPosition
 	}
 
-	squad.Tags = tags.Slice()
-	if squad.Tags == nil {
+	if tags != nil {
+		squad.Tags = tags
+	} else {
 		squad.Tags = []string{}
 	}
 

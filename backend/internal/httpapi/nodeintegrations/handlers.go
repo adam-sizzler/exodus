@@ -1,7 +1,6 @@
 package nodeintegrations
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,9 +10,10 @@ import (
 	"exodus/internal/httpapi/shared"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Handler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func Handler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewRepository(db)
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/node-integrations")

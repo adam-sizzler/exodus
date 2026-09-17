@@ -1,7 +1,6 @@
 package externalsquads
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +10,11 @@ import (
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
+	"exodus/internal/util"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ExternalSquadsHandler godoc
@@ -30,7 +32,7 @@ import (
 // @Router       /external-squads [get]
 // @Router       /external-squads [post]
 // @Router       /external-squads [patch]
-func ExternalSquadsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ExternalSquadsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -59,7 +61,7 @@ func ExternalSquadsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFu
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /external-squads/{uuid} [get]
 // @Router       /external-squads/{uuid} [delete]
-func ExternalSquadByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ExternalSquadByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimSpace(trimExternalSquadsPath(r.URL.Path))
 
@@ -140,7 +142,7 @@ func trimExternalSquadsPath(p string) string {
 // @Failure      400   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /external-squads/actions/reorder [post]
-func ExternalSquadsReorderHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ExternalSquadsReorderHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -169,15 +171,15 @@ func ExternalSquadsReorderHandler(db *sql.DB, cfg *config.BackendConfig) http.Ha
 			}
 		}
 
-		tx, err := db.BeginTx(r.Context(), nil)
+		tx, err := db.Begin(r.Context())
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrReorderExternalSquadsFailed.WithCause(err), cfg)
 			return
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer func() { _ = tx.Rollback(r.Context()) }()
 
 		for _, item := range req.Squads {
-			if _, err := tx.ExecContext(r.Context(),
+			if _, err := tx.Exec(r.Context(),
 				`UPDATE external_squads SET view_position = $1 WHERE uuid = $2`,
 				item.ViewPosition, item.UUID); err != nil {
 				shared.SendAPIError(w, shared.ErrReorderExternalSquadsFailed.WithCause(err), cfg)
@@ -185,7 +187,7 @@ func ExternalSquadsReorderHandler(db *sql.DB, cfg *config.BackendConfig) http.Ha
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(r.Context()); err != nil {
 			shared.SendAPIError(w, shared.ErrReorderExternalSquadsFailed.WithCause(err), cfg)
 			return
 		}
@@ -194,7 +196,7 @@ func ExternalSquadsReorderHandler(db *sql.DB, cfg *config.BackendConfig) http.Ha
 	}
 }
 
-func handleGetExternalSquads(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetExternalSquads(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	records, err := getExternalSquads(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetExternalSquadsFailed.WithCause(err), cfg)
@@ -241,10 +243,10 @@ func handleGetExternalSquads(w http.ResponseWriter, r *http.Request, db *sql.DB,
 	})
 }
 
-func handleGetExternalSquadByUUID(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleGetExternalSquadByUUID(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	record, err := getExternalSquadByUUID(r.Context(), db, squadUUID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrExternalSquadNotFound, cfg)
 			return
 		}
@@ -258,8 +260,8 @@ func handleGetExternalSquadByUUID(w http.ResponseWriter, r *http.Request, db *sq
 		return
 	}
 
-	_ = db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE external_squad_uuid = $1`, api.UUID).Scan(&api.Info.MembersCount)
-	rows, err := db.QueryContext(r.Context(), `SELECT template_uuid, template_type FROM external_squads_templates WHERE external_squad_uuid = $1`, api.UUID)
+	_ = db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users WHERE external_squad_uuid = $1`, api.UUID).Scan(&api.Info.MembersCount)
+	rows, err := db.Query(r.Context(), `SELECT template_uuid, template_type FROM external_squads_templates WHERE external_squad_uuid = $1`, api.UUID)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -274,7 +276,7 @@ func handleGetExternalSquadByUUID(w http.ResponseWriter, r *http.Request, db *sq
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": api})
 }
 
-func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		shared.SendError(w, http.StatusBadRequest, "failed to read body", err, cfg)
@@ -294,12 +296,12 @@ func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 
 	squadUUID := uuid.NewString()
 
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := db.Begin(r.Context())
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrCreateExternalSquadFailed.WithCause(err), cfg)
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = tx.Rollback(r.Context()) }()
 
 	subSettings, err := marshalJSON(req.SubscriptionSettings)
 	if err != nil {
@@ -330,7 +332,7 @@ func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 
 	tags := shared.SanitizeTags(req.Tags)
 
-	_, err = tx.ExecContext(r.Context(), `
+	_, err = tx.Exec(r.Context(), `
 		INSERT INTO external_squads (
 			uuid, view_position, name, tags,
 			subscription_settings, host_overrides, response_headers_add, response_headers_remove,
@@ -338,7 +340,7 @@ func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 		) VALUES ($1, $2, $3, $4::text[], $5, $6, $7, $8, $9, $10, $11)
 	`,
 		squadUUID,
-		coalesceInt(req.ViewPosition, 0),
+		util.Coalesce(req.ViewPosition, 0),
 		strings.TrimSpace(req.Name),
 		shared.PostgresTextArrayLiteral(tags),
 		subSettings,
@@ -350,7 +352,7 @@ func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 		normalizeStringPtr(req.SubpageConfigUUID),
 	)
 	if err != nil {
-		if isUniqueViolation(err, "external_squads_name_key") {
+		if util.IsUniqueViolation(err, "external_squads_name_key") {
 			shared.SendAPIError(w, shared.ErrExternalSquadNameAlreadyExists, cfg)
 			return
 		}
@@ -358,7 +360,7 @@ func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(r.Context()); err != nil {
 		shared.SendAPIError(w, shared.ErrCreateExternalSquadFailed.WithCause(err), cfg)
 		return
 	}
@@ -366,7 +368,7 @@ func handleCreateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 	handleGetExternalSquadByUUID(w, r, db, cfg, squadUUID)
 }
 
-func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		shared.SendError(w, http.StatusBadRequest, "failed to read body", err, cfg)
@@ -389,12 +391,12 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 		return
 	}
 
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := db.Begin(r.Context())
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrUpdateExternalSquadFailed.WithCause(err), cfg)
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = tx.Rollback(r.Context()) }()
 
 	clauses := make([]string, 0)
 	args := make([]any, 0)
@@ -474,8 +476,8 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 			WHERE uuid = $%d
 		`, strings.Join(clauses, ", "), idx)
 
-		if _, err := tx.ExecContext(r.Context(), query, args...); err != nil {
-			if isUniqueViolation(err, "external_squads_name_key") {
+		if _, err := tx.Exec(r.Context(), query, args...); err != nil {
+			if util.IsUniqueViolation(err, "external_squads_name_key") {
 				shared.SendAPIError(w, shared.ErrExternalSquadNameAlreadyExists, cfg)
 				return
 			}
@@ -483,7 +485,7 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 			return
 		}
 	} else if req.Templates != nil {
-		_, err := tx.ExecContext(r.Context(), `
+		_, err := tx.Exec(r.Context(), `
 			UPDATE external_squads 
 			SET updated_at = CURRENT_TIMESTAMP 
 			WHERE uuid = $1
@@ -495,14 +497,14 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 	}
 
 	if req.Templates != nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM external_squads_templates WHERE external_squad_uuid = $1`, req.UUID)
+		_, err = tx.Exec(r.Context(), `DELETE FROM external_squads_templates WHERE external_squad_uuid = $1`, req.UUID)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrUpdateExternalSquadFailed.WithCause(err), cfg)
 			return
 		}
 
 		for _, t := range *req.Templates {
-			_, err = tx.ExecContext(r.Context(), `
+			_, err = tx.Exec(r.Context(), `
 				INSERT INTO external_squads_templates (external_squad_uuid, template_uuid, template_type)
 				VALUES ($1, $2, $3)
 			`, req.UUID, t.TemplateUUID, t.TemplateType)
@@ -518,7 +520,7 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(r.Context()); err != nil {
 		shared.SendAPIError(w, shared.ErrUpdateExternalSquadFailed.WithCause(err), cfg)
 		return
 	}
@@ -530,14 +532,13 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 	handleGetExternalSquadByUUID(w, r, db, cfg, req.UUID)
 }
 
-func handleDeleteExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
-	result, err := db.ExecContext(r.Context(), `DELETE FROM external_squads WHERE uuid = $1`, squadUUID)
+func handleDeleteExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
+	result, err := db.Exec(r.Context(), `DELETE FROM external_squads WHERE uuid = $1`, squadUUID)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrDeleteExternalSquadFailed.WithCause(err), cfg)
 		return
 	}
-	rows, err := result.RowsAffected()
-	if err != nil || rows == 0 {
+	if result.RowsAffected() == 0 {
 		shared.SendAPIError(w, shared.ErrExternalSquadNotFound, cfg)
 		return
 	}
@@ -552,7 +553,7 @@ func handleDeleteExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.D
 // OnSquadUpdated is invoked whenever external squad overrides are modified.
 var OnSquadUpdated func(uuid string)
 
-func handleBulkAddUsersToExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleBulkAddUsersToExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	var req BulkUsersRequest
 	bodyBytes, err := io.ReadAll(r.Body)
 
@@ -567,8 +568,8 @@ func handleBulkAddUsersToExternalSquad(w http.ResponseWriter, r *http.Request, d
 
 	var affected int64
 	var exists int
-	if err := db.QueryRowContext(r.Context(), `SELECT 1 FROM external_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if err := db.QueryRow(r.Context(), `SELECT 1 FROM external_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrExternalSquadNotFound, cfg)
 			return
 		}
@@ -592,14 +593,14 @@ func handleBulkAddUsersToExternalSquad(w http.ResponseWriter, r *http.Request, d
 			WHERE uuid IN (%s)
 		`, strings.Join(placeholders, ", "))
 
-		result, err := db.ExecContext(r.Context(), query, args...)
+		result, err := db.Exec(r.Context(), query, args...)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrAddUsersToExternalSquadFailed.WithCause(err), cfg)
 			return
 		}
-		affected, _ = result.RowsAffected()
+		affected = result.RowsAffected()
 	} else {
-		result, err := db.ExecContext(r.Context(), `
+		result, err := db.Exec(r.Context(), `
 			UPDATE users
 			SET external_squad_uuid = $1::uuid, updated_at = CURRENT_TIMESTAMP
 			WHERE external_squad_uuid IS DISTINCT FROM $1::uuid
@@ -608,14 +609,14 @@ func handleBulkAddUsersToExternalSquad(w http.ResponseWriter, r *http.Request, d
 			shared.SendAPIError(w, shared.ErrAddUsersToExternalSquadFailed.WithCause(err), cfg)
 			return
 		}
-		affected, _ = result.RowsAffected()
+		affected = result.RowsAffected()
 	}
 
 	cfg.Logger.Info("Users added to external squad", "squad_uuid", squadUUID, "affected_rows", affected)
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func handleBulkRemoveUsersFromExternalSquad(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, squadUUID string) {
+func handleBulkRemoveUsersFromExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, squadUUID string) {
 	var req BulkUsersRequest
 	bodyBytes, err := io.ReadAll(r.Body)
 
@@ -630,8 +631,8 @@ func handleBulkRemoveUsersFromExternalSquad(w http.ResponseWriter, r *http.Reque
 
 	var affected int64
 	var exists int
-	if err := db.QueryRowContext(r.Context(), `SELECT 1 FROM external_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if err := db.QueryRow(r.Context(), `SELECT 1 FROM external_squads WHERE uuid = $1`, squadUUID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrExternalSquadNotFound, cfg)
 			return
 		}
@@ -655,14 +656,14 @@ func handleBulkRemoveUsersFromExternalSquad(w http.ResponseWriter, r *http.Reque
 			WHERE uuid IN (%s) AND external_squad_uuid = $%d
 		`, strings.Join(placeholders, ", "), len(req.UserUUIDs)+1)
 
-		result, err := db.ExecContext(r.Context(), query, args...)
+		result, err := db.Exec(r.Context(), query, args...)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrRemoveUsersFromExternalSquadFailed.WithCause(err), cfg)
 			return
 		}
-		affected, _ = result.RowsAffected()
+		affected = result.RowsAffected()
 	} else {
-		result, err := db.ExecContext(r.Context(), `
+		result, err := db.Exec(r.Context(), `
 			UPDATE users
 			SET external_squad_uuid = NULL, updated_at = CURRENT_TIMESTAMP
 			WHERE external_squad_uuid = $1
@@ -671,7 +672,7 @@ func handleBulkRemoveUsersFromExternalSquad(w http.ResponseWriter, r *http.Reque
 			shared.SendAPIError(w, shared.ErrRemoveUsersFromExternalSquadFailed.WithCause(err), cfg)
 			return
 		}
-		affected, _ = result.RowsAffected()
+		affected = result.RowsAffected()
 	}
 
 	cfg.Logger.Info("Users removed from external squad", "squad_uuid", squadUUID, "affected_rows", affected)
@@ -691,7 +692,7 @@ func handleBulkRemoveUsersFromExternalSquad(w http.ResponseWriter, r *http.Reque
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /external-squads/tags [get]
 // @Router       /external-squads/tags [patch]
-func ExternalSquadsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ExternalSquadsTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -704,7 +705,7 @@ func ExternalSquadsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.Handl
 	}
 }
 
-func handleGetExternalSquadTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetExternalSquadTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	tags, err := getAllTags(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetExternalSquadsFailed.WithCause(err), cfg)
@@ -717,7 +718,7 @@ func handleGetExternalSquadTags(w http.ResponseWriter, r *http.Request, db *sql.
 	})
 }
 
-func handleSetExternalSquadTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleSetExternalSquadTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req shared.SetEntityTagsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -729,7 +730,7 @@ func handleSetExternalSquadTags(w http.ResponseWriter, r *http.Request, db *sql.
 	}
 
 	if err := setTags(r.Context(), db, req.UUID, req.Tags); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrExternalSquadNotFound, cfg)
 			return
 		}

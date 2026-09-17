@@ -2,15 +2,16 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"exodus/internal/config"
+
+	"github.com/jackc/pgx/v5"
 )
 
-func ensureSingleAdmin(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) error {
+func ensureSingleAdmin(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) error {
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin`).Scan(&count); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM admin`).Scan(&count); err != nil {
 		return fmt.Errorf("count admin rows: %w", err)
 	}
 
@@ -18,7 +19,7 @@ func ensureSingleAdmin(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig)
 		return nil
 	}
 
-	res, err := tx.ExecContext(ctx, `
+	tag, err := tx.Exec(ctx, `
 		DELETE FROM admin
 		WHERE uuid NOT IN (
 			SELECT uuid FROM admin ORDER BY created_at ASC LIMIT 1
@@ -28,7 +29,7 @@ func ensureSingleAdmin(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig)
 		return fmt.Errorf("deduplicate admin records: %w", err)
 	}
 
-	deleted, _ := res.RowsAffected()
+	deleted := tag.RowsAffected()
 	fmt.Printf("⚠️ Multiple admin records found (%d), retained oldest admin\n", deleted)
 	return nil
 }

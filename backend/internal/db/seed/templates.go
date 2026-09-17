@@ -2,7 +2,6 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -10,9 +9,10 @@ import (
 	"exodus/internal/db"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
-func ensureDefaultTemplates(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) error {
+func ensureDefaultTemplates(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) error {
 	fmt.Println("◐ Seeding subscription templates...")
 
 	defaults := db.DefaultSubscriptionTemplates()
@@ -30,18 +30,18 @@ func ensureDefaultTemplates(ctx context.Context, tx *sql.Tx, _ *config.BackendCo
 			args[i] = t
 		}
 		query := fmt.Sprintf("DELETE FROM subscription_templates WHERE template_type NOT IN (%s)", strings.Join(placeholders, ", "))
-		res, err := tx.ExecContext(ctx, query, args...)
+		tag, err := tx.Exec(ctx, query, args...)
 		if err != nil {
 			return fmt.Errorf("delete obsolete subscription templates: %w", err)
 		}
-		deletedCount, _ = res.RowsAffected()
+		deletedCount = tag.RowsAffected()
 	}
 
 	fmt.Printf("✔ Deleted unknown templates: %d\n", deletedCount)
 
 	for _, tmpl := range defaults {
 		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM subscription_templates WHERE template_type = $1`, tmpl.TemplateType).Scan(&count); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM subscription_templates WHERE template_type = $1`, tmpl.TemplateType).Scan(&count); err != nil {
 			return fmt.Errorf("count template %s: %w", tmpl.TemplateType, err)
 		}
 		if count > 0 {
@@ -54,7 +54,7 @@ func ensureDefaultTemplates(ctx context.Context, tx *sql.Tx, _ *config.BackendCo
 				uuid, view_position, name, template_type, template_yaml, template_json
 			) VALUES ($1, $2, $3, $4, $5, $6)
 		`
-		if _, err := tx.ExecContext(ctx, query,
+		if _, err := tx.Exec(ctx, query,
 			uuid.NewString(),
 			tmpl.ViewPosition,
 			tmpl.Name,

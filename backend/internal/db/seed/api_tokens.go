@@ -2,16 +2,17 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 
 	"exodus/internal/config"
+
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
-func ensureValidAPITokens(ctx context.Context, tx *sql.Tx, cfg *config.BackendConfig) error {
-	rows, err := tx.QueryContext(ctx, `
+func ensureValidAPITokens(ctx context.Context, tx pgx.Tx, cfg *config.BackendConfig) error {
+	rows, err := tx.Query(ctx, `
 		SELECT uuid, name, array_to_json(COALESCE(scopes, ARRAY['*']::text[]))::text
 		FROM api_tokens
 	`)
@@ -47,7 +48,7 @@ func ensureValidAPITokens(ctx context.Context, tx *sql.Tx, cfg *config.BackendCo
 			if cfg != nil && cfg.Logger != nil {
 				cfg.Logger.Warn("Invalid UUID for API token; deleting token", "name", token.name, "uuid", token.uuid)
 			}
-			_, _ = tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE uuid = $1`, token.uuid)
+			_, _ = tx.Exec(ctx, `DELETE FROM api_tokens WHERE uuid = $1`, token.uuid)
 			continue
 		}
 
@@ -56,7 +57,7 @@ func ensureValidAPITokens(ctx context.Context, tx *sql.Tx, cfg *config.BackendCo
 			if cfg != nil && cfg.Logger != nil {
 				cfg.Logger.Warn("Invalid empty name for API token; deleting token", "uuid", token.uuid)
 			}
-			_, _ = tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE uuid = $1`, token.uuid)
+			_, _ = tx.Exec(ctx, `DELETE FROM api_tokens WHERE uuid = $1`, token.uuid)
 			continue
 		}
 
@@ -66,7 +67,7 @@ func ensureValidAPITokens(ctx context.Context, tx *sql.Tx, cfg *config.BackendCo
 			if cfg != nil && cfg.Logger != nil {
 				cfg.Logger.Warn("Invalid scopes format for API token; deleting token", "uuid", token.uuid)
 			}
-			_, _ = tx.ExecContext(ctx, `DELETE FROM api_tokens WHERE uuid = $1`, token.uuid)
+			_, _ = tx.Exec(ctx, `DELETE FROM api_tokens WHERE uuid = $1`, token.uuid)
 			continue
 		}
 	}

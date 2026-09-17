@@ -2,16 +2,17 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"exodus/internal/config"
+
+	"github.com/jackc/pgx/v5"
 )
 
-func checkupExternalSquads(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) (int64, error) {
+func checkupExternalSquads(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) (int64, error) {
 	fmt.Println("◐ Checking up external squads...")
 
-	res, err := tx.ExecContext(ctx, `
+	res, err := tx.Exec(ctx, `
 		UPDATE external_squads SET
 			subscription_settings = CASE 
 				WHEN subscription_settings::text IN ('{}', 'null', '[]') THEN NULL 
@@ -49,7 +50,7 @@ func checkupExternalSquads(ctx context.Context, tx *sql.Tx, _ *config.BackendCon
 		return 0, fmt.Errorf("checkup external squads: %w", err)
 	}
 
-	rows, _ := res.RowsAffected()
+	rows := res.RowsAffected()
 	if rows > 0 {
 		fmt.Printf("✔ Fixed external squads: %d\n", rows)
 	} else {

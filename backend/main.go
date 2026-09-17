@@ -107,13 +107,13 @@ func main() {
 		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceDatabase).Fatal("Failed to initialize database", "error", err)
 	}
 
-	if err := seed.SeedDefaults(ctx, dbConn, &cfg); err != nil {
-		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceDatabase).Fatal("Failed to seed database defaults", "error", err)
-	}
-
 	pools, err := db.NewPools(ctx, dbConn, &cfg)
 	if err != nil {
 		cfg.Logger.Fatal("Failed to create database pools", "error", err)
+	}
+
+	if err := seed.SeedDefaults(ctx, pools.PgxInteractive, &cfg); err != nil {
+		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceDatabase).Fatal("Failed to seed database defaults", "error", err)
 	}
 
 	// Create and start node monitor (dynamically manages nodes from DB)

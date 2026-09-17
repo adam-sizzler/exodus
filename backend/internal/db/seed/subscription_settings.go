@@ -2,27 +2,28 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"exodus/internal/config"
+
+	"github.com/jackc/pgx/v5"
 )
 
-func ensureDefaultSubscriptionSettings(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) error {
+func ensureDefaultSubscriptionSettings(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) error {
 	fmt.Println("◐ Seeding subscription settings...")
 
 	var (
 		subUUID          string
-		hwidRaw          sql.NullString
-		customRemarksRaw sql.NullString
-		responseRulesRaw sql.NullString
+		hwidRaw          *string
+		customRemarksRaw *string
+		responseRulesRaw *string
 	)
 
-	err := tx.QueryRowContext(ctx, `SELECT uuid, hwid_settings, custom_remarks, response_rules FROM subscription_settings LIMIT 1`).Scan(&subUUID, &hwidRaw, &customRemarksRaw, &responseRulesRaw)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	err := tx.QueryRow(ctx, `SELECT uuid, hwid_settings, custom_remarks, response_rules FROM subscription_settings LIMIT 1`).Scan(&subUUID, &hwidRaw, &customRemarksRaw, &responseRulesRaw)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("read subscription_settings: %w", err)
 	}
 
@@ -34,7 +35,7 @@ func ensureDefaultSubscriptionSettings(ctx context.Context, tx *sql.Tx, _ *confi
 			argIdx      = 1
 		)
 
-		needHwidUpdate := !hwidRaw.Valid || strings.TrimSpace(hwidRaw.String) == "" || hwidRaw.String == "null"
+		needHwidUpdate := hwidRaw == nil || strings.TrimSpace(*hwidRaw) == "" || *hwidRaw == "null"
 		if needHwidUpdate {
 			updates = append(updates, fmt.Sprintf("hwid_settings = $%d::jsonb", argIdx))
 			args = append(args, defaultHWIDSettings)
@@ -44,8 +45,8 @@ func ensureDefaultSubscriptionSettings(ctx context.Context, tx *sql.Tx, _ *confi
 
 		needRemarksUpdate := false
 		var currentRemarks map[string]any
-		if customRemarksRaw.Valid && strings.TrimSpace(customRemarksRaw.String) != "" && customRemarksRaw.String != "null" {
-			if err := json.Unmarshal([]byte(customRemarksRaw.String), &currentRemarks); err != nil {
+		if customRemarksRaw != nil && strings.TrimSpace(*customRemarksRaw) != "" && *customRemarksRaw != "null" {
+			if err := json.Unmarshal([]byte(*customRemarksRaw), &currentRemarks); err != nil {
 				needRemarksUpdate = true
 			} else {
 				if _, ok1 := currentRemarks["HWIDMaxDevicesExceeded"]; !ok1 {
@@ -79,8 +80,8 @@ func ensureDefaultSubscriptionSettings(ctx context.Context, tx *sql.Tx, _ *confi
 		}
 
 		var currentRules string
-		if responseRulesRaw.Valid && strings.TrimSpace(responseRulesRaw.String) != "" && responseRulesRaw.String != "null" {
-			currentRules = responseRulesRaw.String
+		if responseRulesRaw != nil && strings.TrimSpace(*responseRulesRaw) != "" && *responseRulesRaw != "null" {
+			currentRules = *responseRulesRaw
 		}
 
 		if currentRules == "" {
@@ -102,7 +103,7 @@ func ensureDefaultSubscriptionSettings(ctx context.Context, tx *sql.Tx, _ *confi
 		if len(updates) > 0 {
 			args = append(args, subUUID)
 			query := fmt.Sprintf("UPDATE subscription_settings SET %s WHERE uuid = $%d", strings.Join(updates, ", "), argIdx)
-			if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			if _, err := tx.Exec(ctx, query, args...); err != nil {
 				return fmt.Errorf("update subscription_settings backfill: %w", err)
 			}
 			fmt.Println("✔ SubscriptionSettings field backfill applied: " + strings.Join(resetFields, ", "))
@@ -119,7 +120,7 @@ func ensureDefaultSubscriptionSettings(ctx context.Context, tx *sql.Tx, _ *confi
 			custom_response_headers, randomize_hosts, response_rules, hwid_settings
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
-	_, err = tx.ExecContext(ctx, query,
+	_, err = tx.Exec(ctx, query,
 		"00000000-0000-0000-0000-000000000000",
 		"",
 		9263,
@@ -141,11 +142,15 @@ func ensureDefaultSubscriptionSettings(ctx context.Context, tx *sql.Tx, _ *confi
 	return nil
 }
 
-func logResponseRulesHashes(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) {
-	var currentRules sql.NullString
-	_ = tx.QueryRowContext(ctx, `SELECT response_rules FROM subscription_settings LIMIT 1`).Scan(&currentRules)
+func logResponseRulesHashes(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) {
+	var currentRules *string
+	_ = tx.QueryRow(ctx, `SELECT response_rules FROM subscription_settings LIMIT 1`).Scan(&currentRules)
 
-	existingHash, _ := canonicalHash(currentRules.String)
+	rulesStr := ""
+	if currentRules != nil {
+		rulesStr = *currentRules
+	}
+	existingHash, _ := canonicalHash(rulesStr)
 	defaultHash, _ := canonicalHash(defaultResponseRules)
 
 	fmt.Printf("ℹ Existing SRR hash: %s\n", existingHash)

@@ -2,11 +2,12 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"exodus/internal/config"
 	"exodus/internal/jobqueue"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const divider = "▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱"
@@ -26,9 +27,9 @@ func ClearRedis(ctx context.Context, cfg *config.BackendConfig) error {
 }
 
 // SeedDefaults inserts base settings and templates if they do not exist.
-func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig) error {
-	if dbConn == nil {
-		return fmt.Errorf("database connection is nil")
+func SeedDefaults(ctx context.Context, pool *pgxpool.Pool, cfg *config.BackendConfig) error {
+	if pool == nil {
+		return fmt.Errorf("database connection pool is nil")
 	}
 
 	fmt.Println("✔ Database connected")
@@ -38,10 +39,13 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 		cfg.Logger.Warn("Failed to clear Redis on startup", "error", err)
 	}
 
-	tx, err := dbConn.BeginTx(ctx, nil)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin defaults transaction: %w", err)
 	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
 
 	// Step 01: Fix Old Migrations
 	fmt.Println(divider)
@@ -53,7 +57,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [02/12] Checkup External Squads")
 	if _, err := checkupExternalSquads(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [02/12] Checkup External Squads")
@@ -62,7 +65,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [03/12] Exodus Settings")
 	if err := ensureExodusSettings(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [03/12] Exodus Settings")
@@ -71,7 +73,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [04/12] Subscription Templates")
 	if err := ensureDefaultTemplates(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [04/12] Subscription Templates")
@@ -80,7 +81,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [05/12] Default Config Profile")
 	if err := ensureDefaultConfigProfile(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [05/12] Default Config Profile")
@@ -89,7 +89,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [06/12] Sync Inbounds")
 	if _, err := resyncConfigProfileInbounds(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [06/12] Sync Inbounds")
@@ -98,7 +97,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [07/12] Default Internal Squad")
 	if err := ensureDefaultInternalSquad(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [07/12] Default Internal Squad")
@@ -107,7 +105,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [08/12] Subscription Settings")
 	if err := ensureDefaultSubscriptionSettings(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [08/12] Subscription Settings")
@@ -116,7 +113,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [09/12] Keygen")
 	if err := ensureKeygen(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [09/12] Keygen")
@@ -132,7 +128,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [11/12] Subscription Page Config")
 	if err := ensureDefaultSubscriptionPageConfig(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [11/12] Subscription Page Config")
@@ -141,7 +136,6 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [12/13] Verify Admin User")
 	if err := ensureSingleAdmin(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [12/13] Verify Admin User")
@@ -150,13 +144,12 @@ func SeedDefaults(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig
 	fmt.Println(divider)
 	fmt.Println("◐ [13/13] Verify and Clean API Tokens")
 	if err := ensureValidAPITokens(ctx, tx, cfg); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	fmt.Println("✔ [13/13] Verify and Clean API Tokens")
 	fmt.Println(divider)
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit defaults transaction: %w", err)
 	}
 

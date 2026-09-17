@@ -2,25 +2,25 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"exodus/internal/config"
 	"exodus/internal/security"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
-func ensureKeygen(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) error {
+func ensureKeygen(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) error {
 	fmt.Println("◐ Seeding keygen...")
 
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM keygen`).Scan(&count); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM keygen`).Scan(&count); err != nil {
 		return fmt.Errorf("count keygen rows: %w", err)
 	}
 
 	if count > 1 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM keygen`); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM keygen`); err != nil {
 			return fmt.Errorf("delete old keygen rows: %w", err)
 		}
 		count = 0
@@ -42,7 +42,7 @@ func ensureKeygen(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) erro
 			INSERT INTO keygen (uuid, priv_key, pub_key, ca_cert, ca_key, client_cert, client_key)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 		`
-		if _, err := tx.ExecContext(
+		if _, err := tx.Exec(
 			ctx,
 			query,
 			uuid.NewString(),
@@ -61,22 +61,22 @@ func ensureKeygen(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) erro
 
 	var (
 		id         string
-		pubKey     sql.NullString
-		privKey    sql.NullString
-		caCert     sql.NullString
-		caKey      sql.NullString
-		clientCert sql.NullString
-		clientKey  sql.NullString
+		pubKey     *string
+		privKey    *string
+		caCert     *string
+		caKey      *string
+		clientCert *string
+		clientKey  *string
 	)
-	if err := tx.QueryRowContext(
+	if err := tx.QueryRow(
 		ctx,
 		`SELECT uuid, pub_key, priv_key, ca_cert, ca_key, client_cert, client_key FROM keygen ORDER BY created_at ASC LIMIT 1`,
 	).Scan(&id, &pubKey, &privKey, &caCert, &caKey, &clientCert, &clientKey); err != nil {
 		return fmt.Errorf("read keygen row: %w", err)
 	}
 
-	needJWT := !pubKey.Valid || pubKey.String == "" || !privKey.Valid || privKey.String == ""
-	needMTLS := !caCert.Valid || caCert.String == "" || !caKey.Valid || caKey.String == "" || !clientCert.Valid || clientCert.String == "" || !clientKey.Valid || clientKey.String == ""
+	needJWT := pubKey == nil || *pubKey == "" || privKey == nil || *privKey == ""
+	needMTLS := caCert == nil || *caCert == "" || caKey == nil || *caKey == "" || clientCert == nil || *clientCert == "" || clientKey == nil || *clientKey == ""
 	if !needJWT && !needMTLS {
 		fmt.Println("✔ Keygen seeded")
 		return nil
@@ -106,7 +106,7 @@ func ensureKeygen(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) erro
 
 	query := fmt.Sprintf("UPDATE keygen SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", joinWithComma(updateParts), idx)
 	args = append(args, id)
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+	if _, err := tx.Exec(ctx, query, args...); err != nil {
 		return fmt.Errorf("update keygen row: %w", err)
 	}
 

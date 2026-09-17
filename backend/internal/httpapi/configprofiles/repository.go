@@ -196,7 +196,7 @@ func (r *ConfigProfileRepository) createConfigProfile(ctx context.Context, profi
 			return err
 		}
 
-		if _, err := exodusdb.SyncConfigProfileInboundsTx(ctx, tx, profileUUID, req.Config); err != nil {
+		if _, err := exodusdb.SyncConfigProfileInboundsSqlTx(ctx, tx, profileUUID, req.Config); err != nil {
 			return err
 		}
 		return nil
@@ -270,7 +270,7 @@ func (r *ConfigProfileRepository) updateConfigProfile(ctx context.Context, profi
 		}
 
 		if updateConfig != nil {
-			if _, err := exodusdb.SyncConfigProfileInboundsTx(ctx, tx, profileUUID, *updateConfig); err != nil {
+			if _, err := exodusdb.SyncConfigProfileInboundsSqlTx(ctx, tx, profileUUID, *updateConfig); err != nil {
 				return err
 			}
 		}
@@ -332,7 +332,7 @@ func (r *ConfigProfileRepository) reorderConfigProfiles(ctx context.Context, ite
 }
 
 func (r *ConfigProfileRepository) SyncConfigProfileInboundsTx(ctx context.Context, tx *sql.Tx, profileUUID string, configJSON json.RawMessage) (int, error) {
-	return exodusdb.SyncConfigProfileInboundsTx(ctx, tx, profileUUID, configJSON)
+	return exodusdb.SyncConfigProfileInboundsSqlTx(ctx, tx, profileUUID, configJSON)
 }
 
 func (r *ConfigProfileRepository) getSnippets(ctx context.Context) ([]ConfigProfileSnippet, error) {

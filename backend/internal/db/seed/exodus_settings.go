@@ -2,13 +2,14 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"exodus/internal/config"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type passkeySettingsStruct struct {
@@ -21,22 +22,22 @@ type passwordSettingsStruct struct {
 	Enabled bool `json:"enabled"`
 }
 
-func ensureExodusSettings(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) error {
+func ensureExodusSettings(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) error {
 	var (
-		passkeyRaw  sql.NullString
-		oauth2Raw   sql.NullString
-		passwordRaw sql.NullString
-		brandingRaw sql.NullString
+		passkeyRaw  *string
+		oauth2Raw   *string
+		passwordRaw *string
+		brandingRaw *string
 	)
 
-	err := tx.QueryRowContext(ctx, `SELECT passkey_settings::text, oauth2_settings::text, password_settings::text, branding_settings::text FROM exodus_settings WHERE id = 1`).Scan(&passkeyRaw, &oauth2Raw, &passwordRaw, &brandingRaw)
-	if errors.Is(err, sql.ErrNoRows) {
+	err := tx.QueryRow(ctx, `SELECT passkey_settings::text, oauth2_settings::text, password_settings::text, branding_settings::text FROM exodus_settings WHERE id = 1`).Scan(&passkeyRaw, &oauth2Raw, &passwordRaw, &brandingRaw)
+	if errors.Is(err, pgx.ErrNoRows) {
 		query := `
 			INSERT INTO exodus_settings (
 				id, passkey_settings, oauth2_settings, password_settings, branding_settings
 			) VALUES (1, $1, $2, $3, $4)
 		`
-		if _, err := tx.ExecContext(ctx, query, defaultPasskeySettings, defaultOAuth2Settings, defaultPasswordSettings, defaultBrandingSettings); err != nil {
+		if _, err := tx.Exec(ctx, query, defaultPasskeySettings, defaultOAuth2Settings, defaultPasswordSettings, defaultBrandingSettings); err != nil {
 			return fmt.Errorf("insert default exodus_settings row: %w", err)
 		}
 		fmt.Println("✔ Exodus settings seeded")
@@ -50,9 +51,9 @@ func ensureExodusSettings(ctx context.Context, tx *sql.Tx, _ *config.BackendConf
 
 	// 1. Validate passkey_settings
 	passkeyValid := false
-	if passkeyRaw.Valid && strings.TrimSpace(passkeyRaw.String) != "" && passkeyRaw.String != "null" {
+	if passkeyRaw != nil && strings.TrimSpace(*passkeyRaw) != "" && *passkeyRaw != "null" {
 		var pk passkeySettingsStruct
-		if err := json.Unmarshal([]byte(passkeyRaw.String), &pk); err == nil {
+		if err := json.Unmarshal([]byte(*passkeyRaw), &pk); err == nil {
 			passkeyValid = true
 		}
 	}
@@ -65,9 +66,9 @@ func ensureExodusSettings(ctx context.Context, tx *sql.Tx, _ *config.BackendConf
 
 	// 2. Validate oauth2_settings
 	oauth2Valid := false
-	if oauth2Raw.Valid && strings.TrimSpace(oauth2Raw.String) != "" && oauth2Raw.String != "null" {
+	if oauth2Raw != nil && strings.TrimSpace(*oauth2Raw) != "" && *oauth2Raw != "null" {
 		var m map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(oauth2Raw.String), &m); err == nil {
+		if err := json.Unmarshal([]byte(*oauth2Raw), &m); err == nil {
 			oauth2Valid = true
 		}
 	}
@@ -79,9 +80,9 @@ func ensureExodusSettings(ctx context.Context, tx *sql.Tx, _ *config.BackendConf
 	// 3. Validate password_settings
 	if _, alreadyReset := updates["password_settings"]; !alreadyReset {
 		passwordValid := false
-		if passwordRaw.Valid && strings.TrimSpace(passwordRaw.String) != "" && passwordRaw.String != "null" {
+		if passwordRaw != nil && strings.TrimSpace(*passwordRaw) != "" && *passwordRaw != "null" {
 			var pw passwordSettingsStruct
-			if err := json.Unmarshal([]byte(passwordRaw.String), &pw); err == nil {
+			if err := json.Unmarshal([]byte(*passwordRaw), &pw); err == nil {
 				passwordValid = true
 			}
 		}
@@ -93,9 +94,9 @@ func ensureExodusSettings(ctx context.Context, tx *sql.Tx, _ *config.BackendConf
 
 	// 4. Validate branding_settings
 	brandingValid := false
-	if brandingRaw.Valid && strings.TrimSpace(brandingRaw.String) != "" && brandingRaw.String != "null" {
+	if brandingRaw != nil && strings.TrimSpace(*brandingRaw) != "" && *brandingRaw != "null" {
 		var m map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(brandingRaw.String), &m); err == nil {
+		if err := json.Unmarshal([]byte(*brandingRaw), &m); err == nil {
 			brandingValid = true
 		}
 	}
@@ -114,7 +115,7 @@ func ensureExodusSettings(ctx context.Context, tx *sql.Tx, _ *config.BackendConf
 			idx++
 		}
 		query := fmt.Sprintf("UPDATE exodus_settings SET %s WHERE id = 1", strings.Join(setParts, ", "))
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		if _, err := tx.Exec(ctx, query, args...); err != nil {
 			return fmt.Errorf("reset invalid exodus_settings fields: %w", err)
 		}
 		fmt.Println("✔ ExodusSettings reset invalid fields: " + strings.Join(resetFields, ", "))

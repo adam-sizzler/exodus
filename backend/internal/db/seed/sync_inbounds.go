@@ -2,18 +2,19 @@ package seed
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 
 	"exodus/internal/config"
 	"exodus/internal/db"
+
+	"github.com/jackc/pgx/v5"
 )
 
-func resyncConfigProfileInbounds(ctx context.Context, tx *sql.Tx, _ *config.BackendConfig) (int, error) {
+func resyncConfigProfileInbounds(ctx context.Context, tx pgx.Tx, _ *config.BackendConfig) (int, error) {
 	fmt.Println("◐ Syncing inbounds...")
 
-	rows, err := tx.QueryContext(ctx, `SELECT uuid, name, config FROM config_profiles`)
+	rows, err := tx.Query(ctx, `SELECT uuid, name, config FROM config_profiles`)
 	if err != nil {
 		return 0, fmt.Errorf("list config profiles: %w", err)
 	}

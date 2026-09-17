@@ -105,7 +105,7 @@ func OpenAndInitDB(cfg *config.BackendConfig) (*sql.DB, error) {
 	defer cancelInit()
 
 	fmt.Println("Migrating database...")
-	if err := ApplyMigrations(initCtx, db, cfg); err != nil {
+	if err := ApplyMigrationsDSN(initCtx, dsn, cfg); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

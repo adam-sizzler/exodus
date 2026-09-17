@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"embed"
 	"encoding/hex"
 	"errors"
@@ -13,6 +12,8 @@ import (
 	"strings"
 
 	"exodus/internal/config"
+
+	"github.com/jackc/pgx/v5"
 )
 
 //go:embed prisma/migrations/*/migration.sql
@@ -59,27 +60,22 @@ var retiredMigrations = map[string]struct{}{
 	"20260518013000_drop_config_profile_snippets":                {},
 }
 
-func ApplyMigrations(ctx context.Context, dbConn *sql.DB, cfg *config.BackendConfig) error {
-	if dbConn == nil {
+// ApplyMigrations applies pending schema migrations using a native *pgx.Conn and advisory lock.
+func ApplyMigrations(ctx context.Context, conn *pgx.Conn, cfg *config.BackendConfig) error {
+	if conn == nil {
 		return fmt.Errorf("database connection is nil")
 	}
 
-	conn, err := dbConn.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire migration connection: %w", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationsAdvisoryLockKey); err != nil {
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationsAdvisoryLockKey); err != nil {
 		return fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
 	defer func() {
-		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationsAdvisoryLockKey); unlockErr != nil {
+		if _, unlockErr := conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationsAdvisoryLockKey); unlockErr != nil {
 			cfg.Logger.Warn("Failed to release migration advisory lock", "error", unlockErr)
 		}
 	}()
 
-	if _, err := conn.ExecContext(ctx, `
+	if _, err := conn.Exec(ctx, `
 		CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
 		CREATE TABLE IF NOT EXISTS public.schema_migrations (
@@ -95,26 +91,26 @@ func ApplyMigrations(ctx context.Context, dbConn *sql.DB, cfg *config.BackendCon
 		return fmt.Errorf("initialize schema_migrations table: %w", err)
 	}
 
-	// 1. Fix old migration checksums & delete legacy migration records (шаг 1 Exodus)
+	// 1. Fix old migration checksums & delete legacy migration records
 	for name, sums := range fixedMigrationChecksums {
-		res, err := conn.ExecContext(ctx,
+		res, err := conn.Exec(ctx,
 			`UPDATE public.schema_migrations SET checksum = $1 WHERE migration_name = $2 AND checksum = $3`,
 			sums.New, name, sums.Old)
 		if err != nil {
 			return fmt.Errorf("fix checksum for %s: %w", name, err)
 		}
-		if n, _ := res.RowsAffected(); n > 0 {
+		if res.RowsAffected() > 0 {
 			cfg.Logger.Info("Fixed migration checksum", "name", name)
 		}
 	}
 
 	for _, name := range fixedMigrationDeletions {
-		res, err := conn.ExecContext(ctx,
+		res, err := conn.Exec(ctx,
 			`DELETE FROM public.schema_migrations WHERE migration_name = $1`, name)
 		if err != nil {
 			return fmt.Errorf("delete old migration record for %s: %w", name, err)
 		}
-		if n, _ := res.RowsAffected(); n > 0 {
+		if res.RowsAffected() > 0 {
 			cfg.Logger.Info("Deleted old migration record", "name", name)
 		}
 	}
@@ -138,7 +134,7 @@ func ApplyMigrations(ctx context.Context, dbConn *sql.DB, cfg *config.BackendCon
 		knownMigrations[name] = struct{}{}
 	}
 
-	appliedRows, err := conn.QueryContext(ctx, `SELECT migration_name FROM public.schema_migrations ORDER BY migration_name`)
+	appliedRows, err := conn.Query(ctx, `SELECT migration_name FROM public.schema_migrations ORDER BY migration_name`)
 	if err != nil {
 		return fmt.Errorf("read applied migrations: %w", err)
 	}
@@ -148,7 +144,7 @@ func ApplyMigrations(ctx context.Context, dbConn *sql.DB, cfg *config.BackendCon
 	for appliedRows.Next() {
 		var appliedName string
 		if err := appliedRows.Scan(&appliedName); err != nil {
-			_ = appliedRows.Close()
+			appliedRows.Close()
 			return fmt.Errorf("scan applied migration: %w", err)
 		}
 		if _, ok := knownMigrations[appliedName]; ok {
@@ -161,12 +157,10 @@ func ApplyMigrations(ctx context.Context, dbConn *sql.DB, cfg *config.BackendCon
 		legacyMigrations = append(legacyMigrations, appliedName)
 	}
 	if err := appliedRows.Err(); err != nil {
-		_ = appliedRows.Close()
+		appliedRows.Close()
 		return fmt.Errorf("iterate applied migrations: %w", err)
 	}
-	if err := appliedRows.Close(); err != nil {
-		return fmt.Errorf("close applied migrations cursor: %w", err)
-	}
+	appliedRows.Close()
 
 	if len(legacyMigrations) > 0 {
 		return fmt.Errorf(
@@ -179,18 +173,18 @@ func ApplyMigrations(ctx context.Context, dbConn *sql.DB, cfg *config.BackendCon
 	// Auto-baseline for legacy databases: if legacy migration records exist or public.admin table already exists,
 	// ensure baseline initial_schema is marked as applied so it doesn't fail trying to re-create existing tables.
 	var adminTableExists bool
-	_ = conn.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='admin')`).Scan(&adminTableExists)
+	_ = conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='admin')`).Scan(&adminTableExists)
 
 	if legacyCount > 0 || adminTableExists {
 		baselineName := "20260506000000_initial_schema"
 		var existsCount int
-		_ = conn.QueryRowContext(ctx, `SELECT count(*) FROM public.schema_migrations WHERE migration_name = $1`, baselineName).Scan(&existsCount)
+		_ = conn.QueryRow(ctx, `SELECT count(*) FROM public.schema_migrations WHERE migration_name = $1`, baselineName).Scan(&existsCount)
 		if existsCount == 0 {
 			sqlPath := fmt.Sprintf("prisma/migrations/%s/migration.sql", baselineName)
 			if sqlBytes, err := migrationsFS.ReadFile(sqlPath); err == nil {
 				checksum := sha256.Sum256(sqlBytes)
 				checksumHex := hex.EncodeToString(checksum[:])
-				_, _ = conn.ExecContext(ctx, `
+				_, _ = conn.Exec(ctx, `
 					INSERT INTO public.schema_migrations (
 						migration_name, checksum, started_at, finished_at, applied_steps_count, applied_at
 					) VALUES ($1, $2, now(), now(), 1, now()) ON CONFLICT (migration_name) DO NOTHING
@@ -215,40 +209,51 @@ func ApplyMigrations(ctx context.Context, dbConn *sql.DB, cfg *config.BackendCon
 		checksumHex := hex.EncodeToString(checksum[:])
 
 		var existing string
-		err = conn.QueryRowContext(ctx, `SELECT checksum FROM public.schema_migrations WHERE migration_name = $1`, name).Scan(&existing)
+		err = conn.QueryRow(ctx, `SELECT checksum FROM public.schema_migrations WHERE migration_name = $1`, name).Scan(&existing)
 		switch {
 		case err == nil:
 			if existing != checksumHex {
 				return fmt.Errorf("migration %s checksum mismatch: stored=%s current=%s", name, existing, checksumHex)
 			}
 			continue
-		case errors.Is(err, sql.ErrNoRows):
+		case errors.Is(err, pgx.ErrNoRows):
 			// apply
 		default:
 			return fmt.Errorf("check migration %s: %w", name, err)
 		}
 
 		fmt.Printf("Applying migration: %s\n", name)
-		tx, err := conn.BeginTx(ctx, nil)
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin migration %s: %w", name, err)
 		}
-		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
-			_ = tx.Rollback()
+		if _, err := tx.Exec(ctx, sqlText); err != nil {
+			_ = tx.Rollback(ctx)
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
-		if _, err := tx.ExecContext(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO public.schema_migrations (
 				migration_name, checksum, started_at, finished_at, applied_steps_count, applied_at
 			) VALUES ($1, $2, now(), now(), 1, now())
 		`, name, checksumHex); err != nil {
-			_ = tx.Rollback()
+			_ = tx.Rollback(ctx)
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 	}
 
 	return nil
+}
+
+// ApplyMigrationsDSN connects directly to PostgreSQL using a dedicated *pgx.Conn, applies migrations, and closes the connection.
+func ApplyMigrationsDSN(ctx context.Context, dsn string, cfg *config.BackendConfig) error {
+	conn, err := pgx.Connect(ctx, strings.TrimSpace(dsn))
+	if err != nil {
+		return fmt.Errorf("connect for migrations: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	return ApplyMigrations(ctx, conn, cfg)
 }

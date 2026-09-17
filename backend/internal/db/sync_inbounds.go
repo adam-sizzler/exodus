@@ -119,7 +119,86 @@ func parseConfigInbounds(profileUUID string, configJSON json.RawMessage) ([]Conf
 	return result, nil
 }
 
-func SyncConfigProfileInboundsTx(ctx context.Context, tx *sql.Tx, profileUUID string, configJSON json.RawMessage) (int, error) {
+// SyncConfigProfileInboundsTx synchronizes inbounds for a config profile within a native pgx transaction (or any DBTX).
+func SyncConfigProfileInboundsTx(ctx context.Context, tx DBTX, profileUUID string, configJSON json.RawMessage) (int, error) {
+	inbounds, err := parseConfigInbounds(profileUUID, configJSON)
+	if err != nil {
+		return 0, err
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT uuid, tag FROM config_profile_inbounds WHERE profile_uuid = $1
+	`, profileUUID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	existingByTag := make(map[string]string)
+	for rows.Next() {
+		var existingUUID, existingTag string
+		if err := rows.Scan(&existingUUID, &existingTag); err != nil {
+			return 0, err
+		}
+		existingByTag[existingTag] = existingUUID
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	currentTags := make([]string, 0, len(inbounds))
+	for _, inbound := range inbounds {
+		currentTags = append(currentTags, inbound.Tag)
+		var networkVal, securityVal, portVal any
+		if inbound.Network != nil {
+			networkVal = *inbound.Network
+		}
+		if inbound.Security != nil {
+			securityVal = *inbound.Security
+		}
+		if inbound.Port != nil {
+			portVal = *inbound.Port
+		}
+
+		if existingUUID, exists := existingByTag[inbound.Tag]; exists {
+			if _, err := tx.Exec(ctx, `
+				UPDATE config_profile_inbounds SET
+					type        = $1,
+					network     = $2,
+					security    = $3,
+					port        = $4,
+					raw_inbound = $5
+				WHERE uuid = $6 AND profile_uuid = $7
+			`, inbound.Type, networkVal, securityVal, portVal, inbound.RawInbound, existingUUID, profileUUID); err != nil {
+				return 0, err
+			}
+		} else {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO config_profile_inbounds (
+					uuid, profile_uuid, tag, type, network, security, port, raw_inbound
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`, inbound.UUID, inbound.ProfileUUID, inbound.Tag, inbound.Type, networkVal, securityVal, portVal, inbound.RawInbound); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	if len(currentTags) > 0 {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM config_profile_inbounds
+			WHERE profile_uuid = $1 AND NOT (tag = ANY($2))
+		`, profileUUID, currentTags); err != nil {
+			return 0, err
+		}
+	} else if _, err := tx.Exec(ctx, `DELETE FROM config_profile_inbounds WHERE profile_uuid = $1`, profileUUID); err != nil {
+		return 0, err
+	}
+
+	return len(inbounds), nil
+}
+
+// SyncConfigProfileInboundsSqlTx is a backward-compatible adapter for *sql.Tx callers during the phased migration.
+func SyncConfigProfileInboundsSqlTx(ctx context.Context, tx *sql.Tx, profileUUID string, configJSON json.RawMessage) (int, error) {
 	inbounds, err := parseConfigInbounds(profileUUID, configJSON)
 	if err != nil {
 		return 0, err

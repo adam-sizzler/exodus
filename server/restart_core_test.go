@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeFakeS6Svstat drops an executable named "s6-svstat" into a temp dir
@@ -69,27 +70,30 @@ func TestCoreIdentityFailureSkipsPidCheckWhenStartedPidUnknown(t *testing.T) {
 func TestCoreHealthcheckIntervalForAttempt(t *testing.T) {
 	tests := []struct {
 		attempt  int
-		expected string
+		expected time.Duration
 	}{
-		{1, "50ms"},
-		{4, "50ms"},
-		{5, "100ms"},
-		{8, "100ms"},
-		{9, "250ms"},
-		{12, "250ms"},
-		{13, "500ms"},
-		{16, "500ms"},
-		{17, "1s"},
-		{20, "1s"},
-		{21, "2s"},
-		{25, "2s"},
+		{1, 100 * time.Millisecond},
+		{2, 150 * time.Millisecond},
+		{3, 225 * time.Millisecond},
+		{4, 337500 * time.Microsecond},
+		{5, 506250 * time.Microsecond},
+		{6, 759375 * time.Microsecond},
+		{7, 1139062500 * time.Nanosecond},
+		{8, 1708593750 * time.Nanosecond},
+		{9, 2 * time.Second},
+		{30, 2 * time.Second},
 	}
 
 	for _, tc := range tests {
-		got := coreHealthcheckIntervalForAttempt(tc.attempt).String()
-		if got != tc.expected {
-			t.Errorf("attempt %d: expected interval %s, got %s", tc.attempt, tc.expected, got)
+		got := coreHealthcheckIntervalForAttempt(tc.attempt)
+		diff := got - tc.expected
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > time.Millisecond {
+			t.Errorf("attempt %d: expected interval ~%v, got %v", tc.attempt, tc.expected, got)
 		}
 	}
 }
+
 

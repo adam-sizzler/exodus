@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"regexp"
@@ -16,28 +17,26 @@ import (
 
 const (
 	coreProcessName         = "singbox"
-	coreHealthcheckAttempts = 25
+	coreHealthcheckAttempts = 30
+	coreMinTimeout          = 100 * time.Millisecond
+	coreMaxTimeout          = 2 * time.Second
+	coreBackoffFactor       = 1.5
 )
 
-// coreHealthcheckIntervalForAttempt returns the interval to wait before the next attempt.
-// Fast polling during initial startup (50ms - 100ms) prevents artificial multi-second lag,
-// followed by progressive backoff if the core takes longer (e.g. huge config or slow disk).
+// coreHealthcheckIntervalForAttempt computes the retry delay matching upstream p-retry
+// (minTimeout: 100ms, factor: 1.5, maxTimeout: 2000ms, 30 retries).
 func coreHealthcheckIntervalForAttempt(attempt int) time.Duration {
-	switch {
-	case attempt <= 4:
-		return 50 * time.Millisecond
-	case attempt <= 8:
-		return 100 * time.Millisecond
-	case attempt <= 12:
-		return 250 * time.Millisecond
-	case attempt <= 16:
-		return 500 * time.Millisecond
-	case attempt <= 20:
-		return 1 * time.Second
-	default:
-		return 2 * time.Second
+	if attempt <= 1 {
+		return coreMinTimeout
 	}
+	delayFloat := float64(coreMinTimeout) * math.Pow(coreBackoffFactor, float64(attempt-1))
+	delay := time.Duration(delayFloat)
+	if delay > coreMaxTimeout {
+		return coreMaxTimeout
+	}
+	return delay
 }
+
 
 
 type s6ProcessInfo struct {
@@ -330,13 +329,6 @@ func waitForCoreAPIReady(ctx context.Context, cfg *config.NodeConfig, apiService
 
 	startTime := time.Now()
 
-	// Give a short initial 50ms window for the process to be spawned
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case <-time.After(50 * time.Millisecond):
-	}
-
 	var lastErr error
 	for attempt := 1; attempt <= coreHealthcheckAttempts; attempt++ {
 		// Quick check if core already died/stopped, or was respawned under a
@@ -372,13 +364,9 @@ func waitForCoreAPIReady(ctx context.Context, cfg *config.NodeConfig, apiService
 
 		interval := coreHealthcheckIntervalForAttempt(attempt)
 
-		// Log as debug for fast sub-second polling; only warn if core doesn't answer after ~1s
-		if elapsed > 1*time.Second {
-			log.Warn(fmt.Sprintf("▸ Sing-box Core status check, %d/%d · elapsed %s · retrying in %s",
-				attempt, coreHealthcheckAttempts, formatDuration(elapsed), formatDuration(interval)))
-		} else {
-			log.Debug("Sing-box Core status check pending", "attempt", attempt, "elapsed", elapsed, "retry_in", interval)
-		}
+		// Warn with formatted retry message matching upstream
+		log.Warn(fmt.Sprintf("▸ Sing-box Core status check, %d/%d · elapsed %s · retrying in %s",
+			attempt, coreHealthcheckAttempts, formatDuration(elapsed), formatDuration(interval)))
 
 		// After failed attempt, verify if process stopped or was respawned
 		// under a different pid before waiting

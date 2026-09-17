@@ -2,7 +2,6 @@ package system
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -11,6 +10,8 @@ import (
 
 	"exodus/internal/config"
 	"exodus/internal/nodehotcache"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type usageRange struct {
@@ -63,7 +64,7 @@ type onlineStats struct {
 	neverOnline int64
 }
 
-func readUsersStatusStats(ctx context.Context, db *sql.DB) (map[string]int64, int64, error) {
+func readUsersStatusStats(ctx context.Context, db *pgxpool.Pool) (map[string]int64, int64, error) {
 	statusCounts := map[string]int64{
 		"ACTIVE":   0,
 		"DISABLED": 0,
@@ -72,7 +73,7 @@ func readUsersStatusStats(ctx context.Context, db *sql.DB) (map[string]int64, in
 	}
 	var total int64
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT status, COUNT(*)
 		FROM users
 		WHERE status IN ('ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED')
@@ -95,14 +96,14 @@ func readUsersStatusStats(ctx context.Context, db *sql.DB) (map[string]int64, in
 	return statusCounts, total, rows.Err()
 }
 
-func readOnlineStats(ctx context.Context, db *sql.DB) (onlineStats, error) {
+func readOnlineStats(ctx context.Context, db *pgxpool.Pool) (onlineStats, error) {
 	nowUTC := time.Now().UTC()
 	thresholdOnline := nowUTC.Add(-30 * time.Second)
 	thresholdDay := nowUTC.Add(-24 * time.Hour)
 	thresholdWeek := nowUTC.Add(-7 * 24 * time.Hour)
 
 	stats := onlineStats{}
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT
 			COUNT(id) FILTER (WHERE online_at >= $1) AS online_now,
 			COUNT(id) FILTER (WHERE online_at >= $2) AS last_day,
@@ -119,9 +120,9 @@ func readOnlineStats(ctx context.Context, db *sql.DB) (onlineStats, error) {
 	return stats, err
 }
 
-func readTotalOnlineOnNodes(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) (int64, error) {
+func readTotalOnlineOnNodes(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) (int64, error) {
 	uuids := make([]string, 0)
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT uuid
 		FROM nodes
 		WHERE is_connected = TRUE
@@ -148,18 +149,18 @@ func readTotalOnlineOnNodes(ctx context.Context, db *sql.DB, cfg *config.Backend
 	return total, nil
 }
 
-func readLifetimeTrafficBytes(ctx context.Context, db *sql.DB) (string, error) {
+func readLifetimeTrafficBytes(ctx context.Context, db *pgxpool.Pool) (string, error) {
 	var total string
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT COALESCE(SUM(total_bytes), 0)::text
 		FROM nodes_usage_history
 	`).Scan(&total)
 	return total, err
 }
 
-func readUsersRecap(ctx context.Context, db *sql.DB, startOfMonth time.Time) (usersRecap, error) {
+func readUsersRecap(ctx context.Context, db *pgxpool.Pool, startOfMonth time.Time) (usersRecap, error) {
 	recap := usersRecap{}
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT
 			COUNT(*)::bigint AS total,
 			COUNT(*) FILTER (WHERE created_at >= $1)::bigint AS new_users_this_month
@@ -168,10 +169,10 @@ func readUsersRecap(ctx context.Context, db *sql.DB, startOfMonth time.Time) (us
 	return recap, err
 }
 
-func readNodesRecap(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) (nodesRecap, error) {
+func readNodesRecap(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) (nodesRecap, error) {
 	recap := nodesRecap{}
 	uuids := make([]string, 0)
-	if err := db.QueryRowContext(ctx, `
+	if err := db.QueryRow(ctx, `
 		SELECT
 			COUNT(*)::bigint AS total,
 			COUNT(DISTINCT CASE
@@ -184,7 +185,7 @@ func readNodesRecap(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) 
 		return recap, err
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT uuid FROM nodes`)
+	rows, err := db.Query(ctx, `SELECT uuid FROM nodes`)
 	if err != nil {
 		return recap, err
 	}
@@ -222,9 +223,9 @@ func readNodesRecap(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) 
 	return recap, nil
 }
 
-func readUsageBytesTextByRange(ctx context.Context, db *sql.DB, dtRange usageRange) (string, error) {
+func readUsageBytesTextByRange(ctx context.Context, db *pgxpool.Pool, dtRange usageRange) (string, error) {
 	var total string
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT COALESCE(SUM(total_bytes), 0)::text
 		FROM nodes_usage_history
 		WHERE created_at >= $1 AND created_at <= $2
@@ -232,9 +233,9 @@ func readUsageBytesTextByRange(ctx context.Context, db *sql.DB, dtRange usageRan
 	return total, err
 }
 
-func readInitDate(ctx context.Context, db *sql.DB) (time.Time, error) {
+func readInitDate(ctx context.Context, db *pgxpool.Pool) (time.Time, error) {
 	var initDate time.Time
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT COALESCE(
 			(SELECT started_at FROM schema_migrations ORDER BY started_at ASC LIMIT 1),
 			NOW()
@@ -249,7 +250,7 @@ func readInitDate(ctx context.Context, db *sql.DB) (time.Time, error) {
 	return initDate, nil
 }
 
-func readUsageComparison(ctx context.Context, db *sql.DB, ranges [2]usageRange) (bandwidthStat, error) {
+func readUsageComparison(ctx context.Context, db *pgxpool.Pool, ranges [2]usageRange) (bandwidthStat, error) {
 	previousBytes, err := readUsageBytesByRange(ctx, db, ranges[0])
 	if err != nil {
 		return bandwidthStat{}, err
@@ -268,9 +269,9 @@ func readUsageComparison(ctx context.Context, db *sql.DB, ranges [2]usageRange) 
 	}, nil
 }
 
-func readUsageBytesByRange(ctx context.Context, db *sql.DB, dtRange usageRange) (*big.Int, error) {
+func readUsageBytesByRange(ctx context.Context, db *pgxpool.Pool, dtRange usageRange) (*big.Int, error) {
 	var totalText string
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT COALESCE(SUM(total_bytes), 0)::text
 		FROM nodes_usage_history
 		WHERE created_at >= $1 AND created_at <= $2

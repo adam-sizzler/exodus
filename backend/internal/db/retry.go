@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -35,27 +34,6 @@ func WithRetryTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error)
 		}
 
 		_ = tx.Rollback(ctx)
-		if !isRetryablePgError(err) || attempt == maxRetries {
-			return err
-		}
-		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
-	}
-	return nil
-}
-
-// WithRetrySqlTx is a temporary bridge for legacy *sql.DB transactions during migration.
-func WithRetrySqlTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
-	const maxRetries = 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		err = fn(tx)
-		if err == nil {
-			return tx.Commit()
-		}
-		_ = tx.Rollback()
 		if !isRetryablePgError(err) || attempt == maxRetries {
 			return err
 		}

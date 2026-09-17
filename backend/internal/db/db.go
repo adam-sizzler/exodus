@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // DBTX is the unified database interaction interface satisfied by *pgxpool.Pool, *pgx.Conn, and pgx.Tx.
@@ -65,57 +63,44 @@ func EnsurePgCryptoExtension(ctx context.Context, db DBTX) error {
 	return nil
 }
 
-// OpenAndInitDB opens a PostgreSQL database, applies migrations, and seeds defaults.
-// Maintained for backward compatibility during the dual-pool transition phase.
-func OpenAndInitDB(cfg *config.BackendConfig) (*sql.DB, error) {
+// InitDatabase verifies database connectivity and applies pending migrations using native pgx.
+func InitDatabase(ctx context.Context, cfg *config.BackendConfig) error {
 	dsn := strings.TrimSpace(cfg.Database.URL)
 	if dsn == "" {
-		return nil, fmt.Errorf("DATABASE_URL is not set")
+		return fmt.Errorf("DATABASE_URL is not set")
 	}
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-
-	db.SetMaxOpenConns(50)
-	db.SetMaxIdleConns(25)
-	db.SetConnMaxLifetime(15 * time.Minute)
-	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	for {
-		pingCtx, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
-		err := db.PingContext(pingCtx)
-		cancelPing()
+		connCtx, cancelConn := context.WithTimeout(ctx, 5*time.Second)
+		conn, err := pgx.Connect(connCtx, dsn)
+		cancelConn()
 		if err == nil {
-			break
+			pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+			pingErr := conn.Ping(pingCtx)
+			cancelPing()
+			if pingErr == nil {
+				_ = EnsurePgCryptoExtension(ctx, conn)
+				_ = conn.Close(ctx)
+				break
+			}
+			_ = conn.Close(ctx)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		cfg.Logger.Warn("Database not ready, retrying in 5s", "error", err)
 		time.Sleep(5 * time.Second)
 	}
 
-	execCtx, cancelExec := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelExec()
-	if _, err := db.ExecContext(execCtx, `CREATE EXTENSION IF NOT EXISTS "pgcrypto"`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ensure pgcrypto extension: %w", err)
-	}
-
-	initCtx, cancelInit := context.WithTimeout(context.Background(), 5*time.Minute)
+	initCtx, cancelInit := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelInit()
 
 	fmt.Println("Migrating database...")
 	if err := ApplyMigrationsDSN(initCtx, dsn, cfg); err != nil {
-		_ = db.Close()
-		return nil, err
+		return err
 	}
 	fmt.Println("Migrations deployed successfully!")
 	fmt.Println("Seeding database...")
 
-	return db, nil
-}
-
-// InitDatabase initializes the database and returns a ready connection.
-func InitDatabase(cfg *config.BackendConfig) (*sql.DB, error) {
-	return OpenAndInitDB(cfg)
+	return nil
 }

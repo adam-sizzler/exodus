@@ -1,7 +1,6 @@
 package system
 
 import (
-	"database/sql"
 	"net/http"
 	"os"
 	"strconv"
@@ -9,6 +8,8 @@ import (
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type SystemConfigurationResponse struct {
@@ -46,7 +47,7 @@ type SystemConfigurationMisc struct {
 // @Success      200  {object}  map[string]SystemConfigurationResponse
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /system/configuration [get]
-func ConfigurationHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func ConfigurationHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -56,16 +57,16 @@ func ConfigurationHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFun
 		userUsageIgnore, _ := strconv.ParseInt(os.Getenv("USER_USAGE_IGNORE_BELOW_BYTES"), 10, 64)
 		subDomain := os.Getenv("SUB_PUBLIC_DOMAIN")
 		if subDomain == "" && db != nil {
-			var domain sql.NullString
-			_ = db.QueryRowContext(r.Context(), `
+			var domain *string
+			_ = db.QueryRow(r.Context(), `
 				SELECT COALESCE(NULLIF(BTRIM(public_domain), ''), NULLIF(BTRIM(address), ''))
 				FROM sub_nodes
 				WHERE is_disabled = false
 				ORDER BY view_position ASC, created_at ASC
 				LIMIT 1
 			`).Scan(&domain)
-			if domain.Valid {
-				subDomain = strings.TrimSpace(strings.Split(domain.String, ",")[0])
+			if domain != nil && *domain != "" {
+				subDomain = strings.TrimSpace(strings.Split(*domain, ",")[0])
 			}
 		}
 

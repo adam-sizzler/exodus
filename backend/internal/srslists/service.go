@@ -2,7 +2,6 @@ package srslists
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -132,65 +131,6 @@ func LoadAll(ctx context.Context, dbConn db.DBTX) ([]Item, error) {
 	return items, nil
 }
 
-func LoadAllSql(ctx context.Context, sqlDB *sql.DB) ([]Item, error) {
-	if sqlDB == nil {
-		return nil, fmt.Errorf("sql database connection is nil")
-	}
-	rows, err := sqlDB.QueryContext(ctx, `
-		SELECT uuid, tags, format, url, update_interval, path, file_name, view_position, is_enabled, is_available, last_checked_at, last_error, created_at, updated_at
-		FROM srs_lists
-		ORDER BY view_position ASC, created_at ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	items := make([]Item, 0)
-	for rows.Next() {
-		var item Item
-		var checkedAt sql.NullTime
-		var lastError sql.NullString
-		var pathValue sql.NullString
-		var tags db.StringArray
-		if err := rows.Scan(
-			&item.UUID,
-			&tags,
-			&item.Format,
-			&item.URL,
-			&item.UpdateInterval,
-			&pathValue,
-			&item.FileName,
-			&item.ViewPosition,
-			&item.IsEnabled,
-			&item.IsAvailable,
-			&checkedAt,
-			&lastError,
-			&item.CreatedAt,
-			&item.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		item.Tags = tags.Slice()
-		if item.Tags == nil {
-			item.Tags = []string{}
-		}
-		if checkedAt.Valid {
-			t := checkedAt.Time
-			item.LastCheckedAt = &t
-		}
-		if lastError.Valid {
-			e := lastError.String
-			item.LastError = &e
-		}
-		if pathValue.Valid {
-			p := pathValue.String
-			item.Path = &p
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
-}
 
 func LoadNodeSyncItems(ctx context.Context, dbConn db.DBTX) ([]NodeSyncItem, error) {
 	items, err := LoadAll(ctx, dbConn)
@@ -221,34 +161,7 @@ func LoadNodeSyncItems(ctx context.Context, dbConn db.DBTX) ([]NodeSyncItem, err
 	return result, nil
 }
 
-func LoadNodeSyncItemsSql(ctx context.Context, sqlDB *sql.DB) ([]NodeSyncItem, error) {
-	items, err := LoadAllSql(ctx, sqlDB)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]NodeSyncItem, 0, len(items))
-	for _, item := range items {
-		if !item.IsEnabled {
-			continue
-		}
-		tag := DeriveTagFromFileName(item.FileName)
-		pathValue := ""
-		if item.Path != nil {
-			pathValue = strings.TrimSpace(*item.Path)
-		}
-		if pathValue == "" {
-			pathValue = item.FileName
-		}
-		result = append(result, NodeSyncItem{
-			Tag:            tag,
-			Format:         item.Format,
-			URL:            item.URL,
-			UpdateInterval: item.UpdateInterval,
-			Path:           pathValue,
-		})
-	}
-	return result, nil
-}
+
 
 var srsHTTPClient = &http.Client{
 	Timeout: 25 * time.Second,
@@ -371,64 +284,5 @@ func CheckAndUpdateAvailability(ctx context.Context, dbConn db.DBTX, cfg *config
 	return updated, nil
 }
 
-func CheckAndUpdateAvailabilitySql(ctx context.Context, sqlDB *sql.DB, cfg *config.BackendConfig) (int, error) {
-	items, err := LoadAllSql(ctx, sqlDB)
-	if err != nil {
-		return 0, err
-	}
-	if len(items) == 0 {
-		return 0, nil
-	}
 
-	results := make([]srsCheckResult, len(items))
-	sem := make(chan struct{}, srsCheckConcurrency)
-	var wg sync.WaitGroup
-
-	for i, item := range items {
-		wg.Add(1)
-		go func(idx int, it Item) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				results[idx] = srsCheckResult{item: it, err: ctx.Err()}
-				return
-			}
-
-			results[idx] = srsCheckResult{item: it, err: CheckOneURL(ctx, it.URL)}
-		}(i, item)
-	}
-
-	wg.Wait()
-
-	updated := 0
-	for _, res := range results {
-		if ctx.Err() != nil {
-			break
-		}
-		isAvailable := res.err == nil
-		var errText any
-		if res.err != nil {
-			errText = res.err.Error()
-		}
-
-		_, writeErr := sqlDB.ExecContext(ctx, `
-			UPDATE srs_lists
-			SET is_available = $1,
-				last_checked_at = CURRENT_TIMESTAMP,
-				last_error = $2,
-				updated_at = CURRENT_TIMESTAMP
-			WHERE uuid = $3
-		`, isAvailable, errText, res.item.UUID)
-		if writeErr != nil {
-			if cfg != nil && cfg.Logger != nil {
-				cfg.Logger.Warn("Failed to update SRS availability", "uuid", res.item.UUID, "error", writeErr)
-			}
-			continue
-		}
-		updated++
-	}
-	return updated, nil
-}
 

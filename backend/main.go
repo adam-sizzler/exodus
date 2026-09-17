@@ -102,12 +102,11 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	dbConn, err := db.InitDatabase(&cfg)
-	if err != nil {
+	if err := db.InitDatabase(ctx, &cfg); err != nil {
 		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceDatabase).Fatal("Failed to initialize database", "error", err)
 	}
 
-	pools, err := db.NewPools(ctx, dbConn, &cfg)
+	pools, err := db.NewPools(ctx, &cfg)
 	if err != nil {
 		cfg.Logger.Fatal("Failed to create database pools", "error", err)
 	}

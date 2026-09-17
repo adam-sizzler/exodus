@@ -1,7 +1,6 @@
 package system
 
 import (
-	"database/sql"
 	"net/http"
 	"runtime"
 	"strings"
@@ -10,6 +9,8 @@ import (
 	"exodus/internal/config"
 	"exodus/internal/constant"
 	"exodus/internal/httpapi/shared"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // MetadataHandler godoc
@@ -82,7 +83,7 @@ func MetadataHandler(cfg *config.BackendConfig) http.HandlerFunc {
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /system/stats [get]
-func StatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func StatsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -163,7 +164,7 @@ func StatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /system/recap [get]
-func RecapHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func RecapHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -244,7 +245,7 @@ func RecapHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /system/stats/bandwidth [get]
-func BandwidthStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func BandwidthStatsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -371,7 +372,7 @@ func HealthHandler(cfg *config.BackendConfig) http.HandlerFunc {
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /system/stats/nodes [get]
-func NodesStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesStatsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -385,7 +386,7 @@ func NodesStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		}
 
 		stats := make([]nodeDayStat, 0)
-		rows, err := db.QueryContext(r.Context(), `
+		rows, err := db.Query(r.Context(), `
 			SELECT
 				n.name AS node_name,
 				DATE_TRUNC('day', nu.created_at)::date AS date,
@@ -408,19 +409,15 @@ func NodesStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 				date       time.Time
 				totalBytes string
 			)
-			if scanErr := rows.Scan(&name, &date, &totalBytes); scanErr != nil {
-				shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(scanErr), cfg)
+			if err := rows.Scan(&name, &date, &totalBytes); err != nil {
+				shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
 				return
 			}
 			stats = append(stats, nodeDayStat{
 				NodeName:   name,
-				Date:       date.UTC().Format(time.RFC3339),
+				Date:       date.Format("2006-01-02"),
 				TotalBytes: totalBytes,
 			})
-		}
-		if err := rows.Err(); err != nil {
-			shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
-			return
 		}
 
 		shared.WriteJSON(w, http.StatusOK, map[string]any{
@@ -432,8 +429,8 @@ func NodesStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 }
 
 // DigestHandler godoc
-// @Summary      System activity digest
-// @Description  Get user creations, expirations, HWID devices, and traffic within date range
+// @Summary      System digest
+// @Description  Get aggregated system digest between start and end timestamps
 // @Tags         System Controller
 // @Produce      json
 // @Security     BearerAuth
@@ -441,18 +438,18 @@ func NodesStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Param        end    query     string  false  "End timestamp (RFC3339)"
 // @Success      200    {object}  map[string]any
 // @Router       /system/stats/digest [get]
-func DigestHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func DigestHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
-		startStr := strings.TrimSpace(r.URL.Query().Get("start"))
-		endStr := strings.TrimSpace(r.URL.Query().Get("end"))
+		startStr := r.URL.Query().Get("start")
+		endStr := r.URL.Query().Get("end")
 
 		now := time.Now().UTC()
-		start := now.AddDate(0, 0, -1)
+		start := now.Add(-24 * time.Hour)
 		end := now
 
 		if startStr != "" {
@@ -469,16 +466,16 @@ func DigestHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		ctx := r.Context()
 
 		var createdUsersCount int64
-		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE created_at >= $1 AND created_at < $2`, start, end).Scan(&createdUsersCount)
+		_ = db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE created_at >= $1 AND created_at < $2`, start, end).Scan(&createdUsersCount)
 
 		var expiredUsersCount int64
-		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE expire_at >= $1 AND expire_at < $2 AND status = 'EXPIRED'`, start, end).Scan(&expiredUsersCount)
+		_ = db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE expire_at >= $1 AND expire_at < $2 AND status = 'EXPIRED'`, start, end).Scan(&expiredUsersCount)
 
 		var totalTrafficBytes int64
-		_ = db.QueryRowContext(ctx, `SELECT COALESCE(SUM(total_bytes), 0) FROM user_usage_history WHERE created_at >= $1 AND created_at < $2`, start, end).Scan(&totalTrafficBytes)
+		_ = db.QueryRow(ctx, `SELECT COALESCE(SUM(total_bytes), 0) FROM user_usage_history WHERE created_at >= $1 AND created_at < $2`, start, end).Scan(&totalTrafficBytes)
 
 		var createdUsersTrafficBytes int64
-		_ = db.QueryRowContext(ctx, `
+		_ = db.QueryRow(ctx, `
 			SELECT COALESCE(SUM(uuh.total_bytes), 0)
 			FROM user_usage_history uuh
 			JOIN users u ON uuh.user_id = u.id
@@ -487,7 +484,7 @@ func DigestHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		`, start, end).Scan(&createdUsersTrafficBytes)
 
 		var newHwidDevicesCount int64
-		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hwid_user_devices WHERE created_at >= $1 AND created_at < $2`, start, end).Scan(&newHwidDevicesCount)
+		_ = db.QueryRow(ctx, `SELECT COUNT(*) FROM hwid_user_devices WHERE created_at >= $1 AND created_at < $2`, start, end).Scan(&newHwidDevicesCount)
 
 		shared.WriteJSON(w, http.StatusOK, map[string]any{
 			"response": map[string]any{
@@ -509,7 +506,7 @@ func DigestHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Security     BearerAuth
 // @Success      200  {object}  map[string]any
 // @Router       /system/nodes/metrics [get]
-func NodesMetricsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesMetricsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")

@@ -28,7 +28,7 @@ func StartMetricsServer(ctx context.Context, pools *exodusdb.Pools, cfg *config.
 		metricsAddress = "127.0.0.1"
 	}
 	addr := fmt.Sprintf("%s:%d", metricsAddress, cfg.Metrics.Port)
-	metricsHandler := system.MetricsHandler(pools.Interactive, pools.Background, cfg)
+	metricsHandler := system.MetricsHandler(pools.PgxInteractive, pools.PgxBackground, cfg)
 	healthHandler := health.HealthHandler()
 
 	mux := http.NewServeMux()

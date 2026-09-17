@@ -3,7 +3,6 @@ package system
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"math"
@@ -18,6 +17,8 @@ import (
 	"exodus/internal/config"
 	"exodus/internal/nodehotcache"
 	monitor "exodus/internal/nodes"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -68,7 +69,7 @@ var prometheusMetricsCache = struct {
 	ready      chan struct{}
 }{}
 
-func MetricsHandler(db, backgroundDB *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func MetricsHandler(db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	runtimeRegistry := newRuntimeMetricsRegistry(db, backgroundDB)
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +102,7 @@ func MetricsHandler(db, backgroundDB *sql.DB, cfg *config.BackendConfig) http.Ha
 	}
 }
 
-func renderPrometheusMetricsCached(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) (string, error) {
+func renderPrometheusMetricsCached(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) (string, error) {
 	ttl := metricsCacheTTL(cfg)
 	if ttl <= 0 {
 		return renderPrometheusMetrics(ctx, db, cfg)
@@ -168,7 +169,7 @@ func metricsCacheTTL(cfg *config.BackendConfig) time.Duration {
 	return time.Duration(cfg.Metrics.CacheTTLSeconds) * time.Second
 }
 
-func loadNodesMetricsViaPrometheus(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) ([]nodeMetricsItem, error) {
+func loadNodesMetricsViaPrometheus(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) ([]nodeMetricsItem, error) {
 	nodesMeta, err := loadNodesMetricsMeta(ctx, db, cfg)
 	if err != nil {
 		return nil, err
@@ -312,9 +313,9 @@ func loadNodesMetricsViaPrometheus(ctx context.Context, db *sql.DB, cfg *config.
 	return result, nil
 }
 
-func loadNodesMetricsMeta(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) ([]nodeMetricsMeta, error) {
+func loadNodesMetricsMeta(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) ([]nodeMetricsMeta, error) {
 	result := make([]nodeMetricsMeta, 0)
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT
 			n.uuid,
 			n.name,
@@ -361,7 +362,7 @@ func loadNodesMetricsMeta(ctx context.Context, db *sql.DB, cfg *config.BackendCo
 	return result, nil
 }
 
-func renderPrometheusMetrics(ctx context.Context, db *sql.DB, cfg *config.BackendConfig) (string, error) {
+func renderPrometheusMetrics(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) (string, error) {
 	nodesMeta, err := loadNodesMetricsMeta(ctx, db, cfg)
 	if err != nil {
 		return "", err

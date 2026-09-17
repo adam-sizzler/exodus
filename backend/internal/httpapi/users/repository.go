@@ -282,7 +282,7 @@ func (r *UserRepository) getAllUserTags(ctx context.Context) ([]string, error) {
 	}
 	defer rows.Close()
 
-	tags := make([]string, 0)
+	tags := make([]string, 0, 8)
 	for rows.Next() {
 		var tag string
 		if err := rows.Scan(&tag); err != nil {
@@ -505,8 +505,8 @@ func (r *UserRepository) updateUserRecord(ctx context.Context, targetUUID string
 	var internalSquadsChanged bool
 
 	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
-		clauses := make([]string, 0)
-		args := make([]any, 0)
+		clauses := make([]string, 0, 8)
+		args := make([]any, 0, 8)
 		idx := 1
 		add := func(column string, value any) {
 			clauses = append(clauses, fmt.Sprintf("%s = $%d", column, idx))
@@ -912,7 +912,7 @@ func (r *UserRepository) getUserSubscriptionRequestHistory(ctx context.Context, 
 	}
 	defer rows.Close()
 
-	records := make([]userSubscriptionRequestHistoryRecord, 0)
+	records := make([]userSubscriptionRequestHistoryRecord, 0, 32)
 	for rows.Next() {
 		var item userSubscriptionRequestHistoryRecord
 		var requestAt time.Time
@@ -961,7 +961,7 @@ func (r *UserRepository) getUserAccessibleNodes(ctx context.Context, userID int6
 	}
 	defer rows.Close()
 
-	activeNodes := make([]userAccessibleNode, 0)
+	activeNodes := make([]userAccessibleNode, 0, 16)
 	nodeIndexes := make(map[string]int)
 	squadIndexesByNode := make(map[string]map[string]int)
 	for rows.Next() {
@@ -1073,7 +1073,7 @@ func (r *UserRepository) getUsersStream(ctx context.Context, cursor int64, size 
 	}
 	defer rows.Close()
 
-	records := make([]userRecord, 0)
+	records := make([]userRecord, 0, 32)
 	for rows.Next() {
 		rec, scanErr := scanUserRecord(rows)
 		if scanErr != nil {

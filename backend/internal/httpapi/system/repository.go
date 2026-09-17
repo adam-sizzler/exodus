@@ -121,7 +121,7 @@ func readOnlineStats(ctx context.Context, db *pgxpool.Pool) (onlineStats, error)
 }
 
 func readTotalOnlineOnNodes(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) (int64, error) {
-	uuids := make([]string, 0)
+	uuids := make([]string, 0, 16)
 	rows, err := db.Query(ctx, `
 		SELECT uuid
 		FROM nodes
@@ -171,7 +171,6 @@ func readUsersRecap(ctx context.Context, db *pgxpool.Pool, startOfMonth time.Tim
 
 func readNodesRecap(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) (nodesRecap, error) {
 	recap := nodesRecap{}
-	uuids := make([]string, 0)
 	if err := db.QueryRow(ctx, `
 		SELECT
 			COUNT(*)::bigint AS total,
@@ -184,6 +183,8 @@ func readNodesRecap(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendCo
 	`).Scan(&recap.total, &recap.distinctCountries); err != nil {
 		return recap, err
 	}
+
+	uuids := make([]string, 0, recap.total)
 
 	rows, err := db.Query(ctx, `SELECT uuid FROM nodes`)
 	if err != nil {

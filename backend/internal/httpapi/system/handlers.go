@@ -385,7 +385,7 @@ func NodesStatsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Handler
 			TotalBytes string `json:"totalBytes"`
 		}
 
-		stats := make([]nodeDayStat, 0)
+		stats := make([]nodeDayStat, 0, 14)
 		rows, err := db.Query(r.Context(), `
 			SELECT
 				n.name AS node_name,

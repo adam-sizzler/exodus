@@ -120,7 +120,7 @@ func ApplyMigrations(ctx context.Context, conn *pgx.Conn, cfg *config.BackendCon
 		return fmt.Errorf("read migrations directory: %w", err)
 	}
 
-	var names []string
+	names := make([]string, 0, len(dirs))
 	for _, dir := range dirs {
 		if !dir.IsDir() {
 			continue
@@ -140,7 +140,7 @@ func ApplyMigrations(ctx context.Context, conn *pgx.Conn, cfg *config.BackendCon
 	}
 
 	var legacyCount int
-	var legacyMigrations []string
+	legacyMigrations := make([]string, 0, 8)
 	for appliedRows.Next() {
 		var appliedName string
 		if err := appliedRows.Scan(&appliedName); err != nil {

@@ -30,10 +30,22 @@ type DBNode struct {
 }
 
 const activeNodesQuery = `
-	SELECT uuid, name, address, port, proxy_url, api_schema, api_path, grpc_auth_token,
-	       is_disabled, consumption_multiplier, node_consumption_multiplier, is_traffic_tracking_active,
-	       traffic_reset_day, traffic_limit_bytes, notify_percent,
-	       view_position, country_code, tags
+	SELECT uuid, name, address,
+	       COALESCE(port, 9253),
+	       COALESCE(proxy_url, ''),
+	       COALESCE(api_schema, 'grpc'),
+	       COALESCE(api_path, ''),
+	       COALESCE(grpc_auth_token, ''),
+	       is_disabled,
+	       COALESCE(consumption_multiplier, 1000000000),
+	       COALESCE(node_consumption_multiplier, 1000000000),
+	       COALESCE(is_traffic_tracking_active, true),
+	       COALESCE(traffic_reset_day, 1),
+	       COALESCE(traffic_limit_bytes, 0),
+	       COALESCE(notify_percent, 80),
+	       COALESCE(view_position, 0),
+	       COALESCE(country_code, ''),
+	       COALESCE(tags, '{}')
 	FROM nodes
 	WHERE is_disabled = false
 	ORDER BY view_position ASC, name ASC`
@@ -49,82 +61,18 @@ func LoadNodesFromDB(ctx context.Context, db DBTX, cfg *config.BackendConfig) ([
 	nodes := make([]DBNode, 0, 32)
 	for rows.Next() {
 		var n DBNode
-		var port *int
-		var proxyURL, apiSchema, apiPath, grpcAuthToken, countryCode *string
-		var tags []string
-		var consumptionMultiplier, nodeConsumptionMultiplier, trafficLimitBytes, trafficResetDay, notifyPercent, viewPosition *int64
-		var isTrafficTrackingActive *bool
-
 		err := rows.Scan(
-			&n.UUID, &n.Name, &n.Address, &port, &proxyURL, &apiSchema, &apiPath, &grpcAuthToken,
-			&n.IsDisabled, &consumptionMultiplier, &nodeConsumptionMultiplier, &isTrafficTrackingActive,
-			&trafficResetDay, &trafficLimitBytes, &notifyPercent, &viewPosition,
-			&countryCode, &tags,
+			&n.UUID, &n.Name, &n.Address, &n.Port, &n.ProxyURL, &n.APISchema, &n.APIPath, &n.GRPCAuthToken,
+			&n.IsDisabled, &n.ConsumptionMultiplier, &n.NodeConsumptionMultiplier, &n.IsTrafficTrackingActive,
+			&n.TrafficResetDay, &n.TrafficLimitBytes, &n.NotifyPercent, &n.ViewPosition,
+			&n.CountryCode, &n.Tags,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
-
-		if port != nil {
-			n.Port = *port
-		} else {
-			n.Port = 9253
-		}
-		if proxyURL != nil {
-			n.ProxyURL = *proxyURL
-		}
-		if apiSchema != nil {
-			n.APISchema = *apiSchema
-		} else {
-			n.APISchema = "grpc"
-		}
-		if apiPath != nil {
-			n.APIPath = *apiPath
-		}
-		if grpcAuthToken != nil {
-			n.GRPCAuthToken = *grpcAuthToken
-		}
-		if consumptionMultiplier != nil {
-			n.ConsumptionMultiplier = *consumptionMultiplier
-		} else {
-			n.ConsumptionMultiplier = 1_000_000_000
-		}
-		if nodeConsumptionMultiplier != nil {
-			n.NodeConsumptionMultiplier = *nodeConsumptionMultiplier
-		} else {
-			n.NodeConsumptionMultiplier = 1_000_000_000
-		}
-		if isTrafficTrackingActive != nil {
-			n.IsTrafficTrackingActive = *isTrafficTrackingActive
-		} else {
-			n.IsTrafficTrackingActive = true
-		}
-		if trafficResetDay != nil {
-			n.TrafficResetDay = int(*trafficResetDay)
-		} else {
-			n.TrafficResetDay = 1
-		}
-		if trafficLimitBytes != nil {
-			n.TrafficLimitBytes = *trafficLimitBytes
-		}
-		if notifyPercent != nil {
-			n.NotifyPercent = int(*notifyPercent)
-		} else {
-			n.NotifyPercent = 80
-		}
-		if viewPosition != nil {
-			n.ViewPosition = int(*viewPosition)
-		}
-		if countryCode != nil {
-			n.CountryCode = *countryCode
-		}
-
-		if tags != nil {
-			n.Tags = tags
-		} else {
+		if n.Tags == nil {
 			n.Tags = []string{}
 		}
-
 		nodes = append(nodes, n)
 	}
 

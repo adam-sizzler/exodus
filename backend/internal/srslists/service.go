@@ -97,7 +97,7 @@ func LoadAll(ctx context.Context, dbConn db.DBTX) ([]Item, error) {
 	}
 	defer rows.Close()
 
-	items := make([]Item, 0)
+	items := make([]Item, 0, 16)
 	for rows.Next() {
 		var item Item
 		var tags []string

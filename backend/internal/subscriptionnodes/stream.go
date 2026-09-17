@@ -3,8 +3,8 @@ package subscriptionnodes
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +20,7 @@ import (
 	"exodus/internal/proto"
 	srscore "exodus/internal/srslists"
 
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -146,7 +147,7 @@ func (sm *SubNodeMonitor) handleSubscriptionBridgeRequest(state *subNodeState, r
 		}
 		configPayload, err := sm.fetchSubpageConfigRaw(ctx, uuidValue)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return &proto.SubscriptionBridgeResponse{RequestId: requestID, StatusCode: http.StatusNotFound, Error: "subpage config not found"}
 			}
 			return &proto.SubscriptionBridgeResponse{RequestId: requestID, StatusCode: http.StatusInternalServerError, Error: err.Error()}
@@ -249,9 +250,9 @@ func (sm *SubNodeMonitor) resolveInternalHandler(path string) http.HandlerFunc {
 	case path == "/api/system/metadata":
 		return systemapi.MetadataHandler(sm.cfg)
 	case strings.HasPrefix(path, "/api/subscriptions/subpage-config/") || path == "/api/subscriptions/subpage-config":
-		return subscriptionapi.SubpageConfigPublicHandler(sm.db, sm.db, sm.cfg)
+		return subscriptionapi.SubpageConfigPublicHandler(sm.sqlDB, sm.sqlDB, sm.cfg)
 	case strings.HasPrefix(path, "/api/sub/") || path == "/api/sub" || strings.HasPrefix(path, "/api/subscriptions/") || path == "/api/subscriptions":
-		return subscriptionapi.SubscriptionPublicHandler(sm.db, sm.db, sm.cfg)
+		return subscriptionapi.SubscriptionPublicHandler(sm.sqlDB, sm.sqlDB, sm.cfg)
 	default:
 		return nil
 	}
@@ -259,7 +260,7 @@ func (sm *SubNodeMonitor) resolveInternalHandler(path string) http.HandlerFunc {
 
 func (sm *SubNodeMonitor) fetchSubpageConfigRaw(ctx context.Context, uuidValue string) ([]byte, error) {
 	var payload string
-	err := sm.db.QueryRowContext(ctx, `
+	err := sm.db.QueryRow(ctx, `
 		SELECT config
 		FROM subscription_page_config
 		WHERE uuid = $1
@@ -435,7 +436,7 @@ func (sm *SubNodeMonitor) syncSRSListsToConnectedNodes(requestedNodeUUIDs []stri
 		return
 	}
 
-	srsLists, err := srscore.LoadNodeSyncItemsSql(context.Background(), sm.db)
+	srsLists, err := srscore.LoadNodeSyncItems(context.Background(), sm.db)
 	if err != nil {
 		sm.cfg.Logger.Warn("Failed to load SRS lists for subscription node sync", "error", err)
 		return

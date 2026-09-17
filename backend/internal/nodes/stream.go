@@ -184,10 +184,15 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(nodeName string, stats []*prot
 	}
 	persistedNodeUUID = nodeUUID
 
+	streamDBContext := context.Background()
+	if nm.globalCtx != nil {
+		streamDBContext = nm.globalCtx
+	}
+
 	if trafficDelta.TotalUploadBytes > 0 || trafficDelta.TotalDownloadBytes > 0 {
 		totalBytes := trafficDelta.TotalUploadBytes + trafficDelta.TotalDownloadBytes
 		nodeUsageBytes := applyConsumptionMultiplier(totalBytes, nodeConsumptionMultiplier)
-		if _, execErr := nm.db.Exec(`
+		if _, execErr := nm.db.Exec(streamDBContext, `
 			INSERT INTO nodes_usage_history (node_uuid, download_bytes, upload_bytes, total_bytes)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (node_uuid, created_at)
@@ -201,7 +206,7 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(nodeName string, stats []*prot
 			return
 		}
 
-		if _, execErr := nm.db.Exec(`
+		if _, execErr := nm.db.Exec(streamDBContext, `
 			UPDATE nodes
 			SET traffic_used_bytes = COALESCE(traffic_used_bytes, 0) + $1, updated_at = CURRENT_TIMESTAMP
 			WHERE uuid = $2
@@ -210,7 +215,7 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(nodeName string, stats []*prot
 			return
 		}
 	} else {
-		if _, execErr := nm.db.Exec(`
+		if _, execErr := nm.db.Exec(streamDBContext, `
 			UPDATE nodes
 			SET updated_at = CURRENT_TIMESTAMP
 			WHERE name = $1`, nodeName); execErr != nil {
@@ -278,7 +283,7 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(nodeName string, stats []*prot
 						expireAt          time.Time
 					}, len(unqueuedIDs))
 
-					rows, queryErr := nm.db.QueryContext(bulkCtx, `
+					rows, queryErr := nm.db.Query(bulkCtx, `
 						SELECT u.id, u.username, u.uuid::text, u.short_uuid, u.status,
 						       u.traffic_limit_bytes, COALESCE(ut.used_traffic_bytes, 0), u.expire_at
 						FROM users u

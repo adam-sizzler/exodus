@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"exodus/internal/config"
+	"exodus/internal/db"
 	"exodus/internal/httpapi/middleware"
 	"exodus/internal/httpapi/shared"
 	"exodus/internal/logger"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -162,7 +164,7 @@ func (h *sessionHub) writeStdin(data []byte) {
 // ─── WebSocket handler ───────────────────────────────────────────────────────
 
 // NodeSSHWSHandler handles the WebSocket stream bridging xterm.js to Node SSH pty.
-func NodeSSHWSHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodeSSHWSHandler(dbConn any, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var log *logger.Logger
 		if cfg != nil && cfg.Logger != nil {
@@ -333,7 +335,7 @@ func NodeSSHWSHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 		}()
 
 		// Run SSH session in separate goroutine
-		go runSshSession(hub, db, ticketInfo)
+		go runSshSession(hub, dbConn, ticketInfo)
 
 		// Main reader loop
 		for {
@@ -403,7 +405,7 @@ func NodeSSHWSHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 
 // ─── SSH session runner ──────────────────────────────────────────────────────
 
-func runSshSession(hub *sessionHub, db *sql.DB, ticketInfo TicketInfo) {
+func runSshSession(hub *sessionHub, dbConn any, ticketInfo TicketInfo) {
 	var openMsg SshClientMsg
 	select {
 	case openMsg = <-hub.openCh:
@@ -478,8 +480,20 @@ func runSshSession(hub *sessionHub, db *sql.DB, ticketInfo TicketInfo) {
 	// the terminal's own connection-setup screen offers via autocomplete.
 	var nodeName, nodeAddress string
 	var nodeIPsRaw []byte
-	err := db.QueryRowContext(hub.ctx, `SELECT name, address, ips FROM nodes WHERE uuid = $1`, ticketInfo.NodeUUID).
-		Scan(&nodeName, &nodeAddress, &nodeIPsRaw)
+	var err error
+	switch d := dbConn.(type) {
+	case *pgxpool.Pool:
+		err = d.QueryRow(hub.ctx, `SELECT name, address, ips FROM nodes WHERE uuid = $1`, ticketInfo.NodeUUID).
+			Scan(&nodeName, &nodeAddress, &nodeIPsRaw)
+	case db.DBTX:
+		err = d.QueryRow(hub.ctx, `SELECT name, address, ips FROM nodes WHERE uuid = $1`, ticketInfo.NodeUUID).
+			Scan(&nodeName, &nodeAddress, &nodeIPsRaw)
+	case *sql.DB:
+		err = d.QueryRowContext(hub.ctx, `SELECT name, address, ips FROM nodes WHERE uuid = $1`, ticketInfo.NodeUUID).
+			Scan(&nodeName, &nodeAddress, &nodeIPsRaw)
+	default:
+		err = fmt.Errorf("unsupported db connection type: %T", dbConn)
+	}
 	if err != nil {
 		if hub.log != nil {
 			hub.log.Error("Node not found in database", "error", err, "nodeUuid", ticketInfo.NodeUUID)

@@ -2,7 +2,6 @@ package users
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"sync"
 	"time"
@@ -11,11 +10,13 @@ import (
 	"exodus/internal/db"
 	"exodus/internal/nodehotcache"
 	"exodus/internal/scheduler"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // NodeMonitor dynamically manages node monitoring with status tracking.
 type NodeMonitor struct {
-	db  *sql.DB
+	db  *pgxpool.Pool
 	cfg *config.BackendConfig
 
 	// Active node contexts
@@ -54,7 +55,11 @@ func (nm *NodeMonitor) getNodeMetadata(nodeName string) (string, int64, int64, i
 	}
 
 	var meta nodeMetadata
-	if err := nm.db.QueryRow(`SELECT uuid, id, consumption_multiplier, node_consumption_multiplier FROM nodes WHERE name = $1`, nodeName).Scan(
+	ctx := context.Background()
+	if nm.globalCtx != nil {
+		ctx = nm.globalCtx
+	}
+	if err := nm.db.QueryRow(ctx, `SELECT uuid, id, consumption_multiplier, node_consumption_multiplier FROM nodes WHERE name = $1`, nodeName).Scan(
 		&meta.UUID, &meta.ID, &meta.ConsumptionMultiplier, &meta.NodeConsumptionMultiplier,
 	); err != nil {
 		return "", 0, 0, 0, err
@@ -65,7 +70,7 @@ func (nm *NodeMonitor) getNodeMetadata(nodeName string) (string, int64, int64, i
 }
 
 // NewNodeMonitor creates a new NodeMonitor.
-func NewNodeMonitor(db *sql.DB, cfg *config.BackendConfig) *NodeMonitor {
+func NewNodeMonitor(db *pgxpool.Pool, cfg *config.BackendConfig) *NodeMonitor {
 	return &NodeMonitor{
 		db:                db,
 		cfg:               cfg,
@@ -146,7 +151,7 @@ func (nm *NodeMonitor) retryFailedNodes() {
 		ctx = context.Background()
 	}
 
-	rows, err := nm.db.QueryContext(ctx, `SELECT uuid::text, name FROM nodes WHERE is_disabled = false AND is_connected = false`)
+	rows, err := nm.db.Query(ctx, `SELECT uuid::text, name FROM nodes WHERE is_disabled = false AND is_connected = false`)
 	if err != nil {
 		nm.cfg.Logger.Debug("Failed to query disconnected nodes for watchdog retry", "error", err)
 		return
@@ -275,7 +280,7 @@ func (nm *NodeMonitor) loadActiveNodes() ([]db.DBNode, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	nodes, err := db.LoadNodesFromSqlDB(ctx, nm.db, nm.cfg)
+	nodes, err := db.LoadNodesFromDB(ctx, nm.db, nm.cfg)
 	if err != nil {
 		return nil, err
 	}

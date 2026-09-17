@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"database/sql"
 	"fmt"
 	"net"
 	neturl "net/url"
 	"strings"
 	"time"
+
+	"exodus/internal/db"
 
 	"golang.org/x/net/proxy"
 	"google.golang.org/grpc"
@@ -19,14 +20,14 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-func LoadKeygenMTLSConfig(ctx context.Context, db *sql.DB) (*tls.Config, error) {
+func LoadKeygenMTLSConfig(ctx context.Context, dbConn db.DBTX) (*tls.Config, error) {
 	var (
 		caCertPEM     string
 		clientCertPEM string
 		clientKeyPEM  string
 	)
 
-	err := db.QueryRowContext(ctx, `
+	err := dbConn.QueryRow(ctx, `
 		SELECT ca_cert, client_cert, client_key
 		FROM keygen
 		ORDER BY created_at ASC
@@ -118,11 +119,11 @@ func BuildNodeProxyDialer(rawProxyURL string) (func(context.Context, string) (ne
 	}, nil
 }
 
-func GetDialOptions(ctx context.Context, db *sql.DB, useMTLS bool, useTLS bool, skipVerify bool, cleanPath string, grpcAuthToken string, rawProxyURL string) ([]grpc.DialOption, error) {
+func GetDialOptions(ctx context.Context, dbConn db.DBTX, useMTLS bool, useTLS bool, skipVerify bool, cleanPath string, grpcAuthToken string, rawProxyURL string) ([]grpc.DialOption, error) {
 	opts := make([]grpc.DialOption, 0)
 
 	if useMTLS {
-		tlsCfg, err := LoadKeygenMTLSConfig(ctx, db)
+		tlsCfg, err := LoadKeygenMTLSConfig(ctx, dbConn)
 		if err != nil {
 			return nil, fmt.Errorf("mTLS config failed: %w", err)
 		}

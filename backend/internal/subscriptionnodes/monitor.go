@@ -9,11 +9,14 @@ import (
 
 	"exodus/internal/config"
 	"exodus/internal/scheduler"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type SubNodeMonitor struct {
-	db  *sql.DB
-	cfg *config.BackendConfig
+	db    *pgxpool.Pool
+	sqlDB *sql.DB // temporary bridge for SubpageConfigPublicHandler and SubscriptionPublicHandler until Stage 8
+	cfg   *config.BackendConfig
 
 	nodes     map[string]*subNodeState
 	nodesLock sync.RWMutex
@@ -30,9 +33,10 @@ type SubNodeMonitor struct {
 	srsSyncNow     chan []string
 }
 
-func NewSubNodeMonitor(db *sql.DB, cfg *config.BackendConfig) *SubNodeMonitor {
+func NewSubNodeMonitor(db *pgxpool.Pool, sqlDB *sql.DB, cfg *config.BackendConfig) *SubNodeMonitor {
 	return &SubNodeMonitor{
 		db:                db,
+		sqlDB:             sqlDB,
 		cfg:               cfg,
 		nodes:             make(map[string]*subNodeState),
 		runtimeByNodeName: make(map[string]SubNodeRuntimeSnapshot),

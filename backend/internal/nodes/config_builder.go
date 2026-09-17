@@ -3,7 +3,6 @@ package users
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +15,7 @@ import (
 	"exodus/internal/logger"
 
 	"github.com/iancoleman/orderedmap"
+	"github.com/jackc/pgx/v5"
 )
 
 func (nm *NodeMonitor) loadNodePluginRuntimeConfig(ctx context.Context, nodeUUID string) (activeNodePluginRuntimeConfig, error) {
@@ -30,8 +30,8 @@ func (nm *NodeMonitor) loadNodePluginRuntimeConfig(ctx context.Context, nodeUUID
 	}
 
 	var pluginConfig activeNodePluginRuntimeConfig
-	var rawConfig sql.NullString
-	row := nm.db.QueryRowContext(ctx, `
+	var rawConfig *string
+	row := nm.db.QueryRow(ctx, `
 		SELECT np.plugin_config::text
 		FROM nodes n
 		JOIN node_plugin np ON np.uuid = n.active_plugin_uuid
@@ -39,15 +39,15 @@ func (nm *NodeMonitor) loadNodePluginRuntimeConfig(ctx context.Context, nodeUUID
 		LIMIT 1
 	`, nodeUUID)
 	if err := row.Scan(&rawConfig); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return pluginConfig, nil
 		}
 		return pluginConfig, err
 	}
-	if !rawConfig.Valid || strings.TrimSpace(rawConfig.String) == "" {
+	if rawConfig == nil || strings.TrimSpace(*rawConfig) == "" {
 		return pluginConfig, nil
 	}
-	if err := json.Unmarshal([]byte(rawConfig.String), &pluginConfig); err != nil {
+	if err := json.Unmarshal([]byte(*rawConfig), &pluginConfig); err != nil {
 		return pluginConfig, err
 	}
 	return pluginConfig, nil
@@ -70,7 +70,7 @@ func (nm *NodeMonitor) loadSharedLists(ctx context.Context) resolvedSharedLists 
 		ctx = context.Background()
 	}
 
-	rows, err := nm.db.QueryContext(ctx, `SELECT name, config::text FROM shared_lists`)
+	rows, err := nm.db.Query(ctx, `SELECT name, config::text FROM shared_lists`)
 	if err != nil {
 		return res
 	}
@@ -78,11 +78,11 @@ func (nm *NodeMonitor) loadSharedLists(ctx context.Context) resolvedSharedLists 
 
 	for rows.Next() {
 		var name string
-		var rawConfig sql.NullString
+		var rawConfig *string
 		if err := rows.Scan(&name, &rawConfig); err != nil {
 			continue
 		}
-		if !rawConfig.Valid || strings.TrimSpace(rawConfig.String) == "" {
+		if rawConfig == nil || strings.TrimSpace(*rawConfig) == "" {
 			continue
 		}
 		cleanName := strings.TrimSpace(name)
@@ -96,7 +96,7 @@ func (nm *NodeMonitor) loadSharedLists(ctx context.Context) resolvedSharedLists 
 			Type  string          `json:"type"`
 			Items json.RawMessage `json:"items"`
 		}
-		if err := json.Unmarshal([]byte(rawConfig.String), &genericParsed); err != nil {
+		if err := json.Unmarshal([]byte(*rawConfig), &genericParsed); err != nil {
 			continue
 		}
 
@@ -256,7 +256,7 @@ func (nm *NodeMonitor) loadNodeHaproxyUsers(ctx context.Context, nodeUUID string
 			WHERE cpitn.node_uuid::text = $1
 				AND lower(cpi.type) IN ('vless', 'trojan', 'naive', 'anytls')%s
 		)`, tagFilterSQL)
-	if err := nm.db.QueryRowContext(ctx, matchQuery, matchArgs...).Scan(&matched); err != nil {
+	if err := nm.db.QueryRow(ctx, matchQuery, matchArgs...).Scan(&matched); err != nil {
 		return nil, false, err
 	}
 	if !matched {
@@ -293,7 +293,7 @@ func (nm *NodeMonitor) loadNodeHaproxyUsers(ctx context.Context, nodeUUID string
 		GROUP BY u.id, u.vless_uuid, u.trojan_password, u.naive_password, u.anytls_password
 		ORDER BY u.id ASC
 	`, tagFilterSQL)
-	rows, err := nm.db.QueryContext(ctx, usersQuery, usersArgs...)
+	rows, err := nm.db.Query(ctx, usersQuery, usersArgs...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -382,19 +382,19 @@ func (nm *NodeMonitor) buildPreparedProfileData(
 	}
 
 	var profileConfig json.RawMessage
-	row := nm.db.QueryRowContext(ctx, `
+	row := nm.db.QueryRow(ctx, `
 		SELECT config
 		FROM config_profiles
 		WHERE uuid = $1
 	`, profileUUID)
 	if err := row.Scan(&profileConfig); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("config profile %s not found", profileUUID)
 		}
 		return nil, err
 	}
 
-	rows, err := nm.db.QueryContext(ctx, `
+	rows, err := nm.db.Query(ctx, `
 		SELECT cpi.uuid, cpi.tag
 		FROM config_profile_inbounds cpi
 		WHERE cpi.profile_uuid = $1
@@ -431,7 +431,7 @@ func (nm *NodeMonitor) buildPreparedProfileData(
 	dedup := make(map[string]map[int64]struct{})
 
 	startUsers := time.Now()
-	userRows, err := nm.db.QueryContext(ctx, `
+	userRows, err := nm.db.Query(ctx, `
 		SELECT
 			isi.inbound_uuid,
 			u.id,
@@ -586,14 +586,14 @@ func (c *deployProfileCache) buildNodeConfigForDeploy(
 	}
 
 	var profileUUID string
-	row := c.nm.db.QueryRowContext(ctx, `
+	row := c.nm.db.QueryRow(ctx, `
 		SELECT cp.uuid
 		FROM nodes n
 		JOIN config_profiles cp ON cp.uuid = n.active_config_profile_uuid
 		WHERE n.uuid = $1 AND n.is_disabled = false
 	`, nodeUUID)
 	if err := row.Scan(&profileUUID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, "", 0, fmt.Errorf("node %s has no active config profile", nodeUUID)
 		}
 		return nil, nil, "", 0, err
@@ -604,7 +604,7 @@ func (c *deployProfileCache) buildNodeConfigForDeploy(
 		return nil, nil, "", 0, err
 	}
 
-	rows, err := c.nm.db.QueryContext(ctx, `
+	rows, err := c.nm.db.Query(ctx, `
 		SELECT cpi.tag
 		FROM config_profile_inbounds_to_nodes cpitn
 		JOIN config_profile_inbounds cpi ON cpi.uuid = cpitn.config_profile_inbound_uuid
@@ -993,7 +993,7 @@ func (nm *NodeMonitor) loadConfigSnippets(ctx context.Context) *resolvedConfigSn
 		ctx = context.Background()
 	}
 
-	rows, err := nm.db.QueryContext(ctx, `SELECT name, snippet FROM config_profile_snippets`)
+	rows, err := nm.db.Query(ctx, `SELECT name, snippet FROM config_profile_snippets`)
 	if err != nil {
 		if nm.cfg != nil && nm.cfg.Logger != nil {
 			nm.cfg.Logger.Warn("Failed to load config snippets", "err", err)

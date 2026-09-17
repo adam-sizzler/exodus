@@ -49,7 +49,7 @@ func (nm *NodeMonitor) ExecuteGeocheck(ctx context.Context, nodeUUID string, ip 
 	nm.nodesLock.RUnlock()
 
 	if targetNodeName == "" {
-		err := nm.db.QueryRowContext(ctx, `SELECT name FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&targetNodeName)
+		err := nm.db.QueryRow(ctx, `SELECT name FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&targetNodeName)
 		if err != nil {
 			return "", fmt.Errorf("node not found: %s", nodeUUID)
 		}

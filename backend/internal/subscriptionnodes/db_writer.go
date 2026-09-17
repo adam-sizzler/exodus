@@ -1,13 +1,20 @@
 package subscriptionnodes
 
 import (
-	"database/sql"
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (sm *SubNodeMonitor) loadActiveNodes() ([]dbSubNode, error) {
-	rows, err := sm.db.Query(`
+	ctx := sm.globalCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := sm.db.Query(ctx, `
 		SELECT n.uuid, n.name, n.address, n.port, n.api_schema, n.api_path, n.grpc_auth_token,
 		       sns.subpage_config_uuid
 		FROM sub_nodes n
@@ -24,22 +31,24 @@ func (sm *SubNodeMonitor) loadActiveNodes() ([]dbSubNode, error) {
 	for rows.Next() {
 		var (
 			n             dbSubNode
-			port          sql.NullInt64
-			grpcAuthToken sql.NullString
-			subpageConfig sql.NullString
+			port          *int64
+			grpcAuthToken *string
+			subpageConfig *string
 		)
 		if err := rows.Scan(&n.UUID, &n.Name, &n.Address, &port, &n.APISchema, &n.APIPath, &grpcAuthToken, &subpageConfig); err != nil {
 			return nil, fmt.Errorf("scan sub_node: %w", err)
 		}
-		if port.Valid {
-			n.Port = int(port.Int64)
+		if port != nil {
+			n.Port = int(*port)
 		} else {
 			n.Port = 2222
 		}
 		n.APISchema = normalizeSubSchema(n.APISchema)
-		n.GRPCAuthToken = strings.TrimSpace(grpcAuthToken.String)
-		if subpageConfig.Valid {
-			n.SubpageConfigUUID = normalizeAssignedSubpageConfigUUID(subpageConfig.String)
+		if grpcAuthToken != nil {
+			n.GRPCAuthToken = strings.TrimSpace(*grpcAuthToken)
+		}
+		if subpageConfig != nil {
+			n.SubpageConfigUUID = normalizeAssignedSubpageConfigUUID(*subpageConfig)
 		}
 		nodes = append(nodes, n)
 	}
@@ -53,26 +62,30 @@ func (sm *SubNodeMonitor) updateConnectionStatus(nodeName string, isConnected, i
 	var (
 		currentConnected  bool
 		currentConnecting bool
-		currentMessage    sql.NullString
+		currentMessage    *string
 	)
-	err := sm.db.QueryRow(`SELECT is_connected, is_connecting, last_status_message FROM sub_nodes WHERE name = $1`, nodeName).
+	ctx := context.Background()
+	if sm.globalCtx != nil {
+		ctx = sm.globalCtx
+	}
+	err := sm.db.QueryRow(ctx, `SELECT is_connected, is_connecting, last_status_message FROM sub_nodes WHERE name = $1`, nodeName).
 		Scan(&currentConnected, &currentConnecting, &currentMessage)
 	if err != nil {
-		if err != sql.ErrNoRows && sm.cfg != nil && sm.cfg.Logger != nil {
+		if !errors.Is(err, pgx.ErrNoRows) && sm.cfg != nil && sm.cfg.Logger != nil {
 			sm.cfg.Logger.Warn("Failed to query subscription node status", "node", nodeName, "error", err)
 		}
 		return
 	}
 
 	msgStr := ""
-	if currentMessage.Valid {
-		msgStr = currentMessage.String
+	if currentMessage != nil {
+		msgStr = *currentMessage
 	}
 	if currentConnected == isConnected && currentConnecting == isConnecting && msgStr == message {
 		return
 	}
 
-	_, err = sm.db.Exec(`
+	_, err = sm.db.Exec(ctx, `
 		UPDATE sub_nodes
 		SET is_connected = $1,
 		    is_connecting = $2,

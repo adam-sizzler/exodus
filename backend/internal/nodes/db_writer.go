@@ -2,12 +2,15 @@ package users
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"exodus/internal/db"
 	"exodus/internal/notifications"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // updateConnectionStatus updates node connection status in database (only on change).
@@ -20,16 +23,17 @@ func (nm *NodeMonitor) updateConnectionStatus(nodeName string, isConnected, isCo
 	var (
 		nodeUUID          string
 		nodeAddress       string
-		nodePort          sql.NullInt64
+		nodePort          *int64
 		currentConnected  bool
 		currentConnecting bool
-		currentMessage    sql.NullString
+		currentMessage    *string
 	)
 
-	err := nm.db.QueryRow(`SELECT uuid, address, port, is_connected, is_connecting, last_status_message FROM nodes WHERE name = $1`, nodeName).
+	ctx := context.Background()
+	err := nm.db.QueryRow(ctx, `SELECT uuid, address, port, is_connected, is_connecting, last_status_message FROM nodes WHERE name = $1`, nodeName).
 		Scan(&nodeUUID, &nodeAddress, &nodePort, &currentConnected, &currentConnecting, &currentMessage)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			nm.cfg.Logger.Debug("Node not found in DB", "node", nodeName)
 			return
 		}
@@ -38,8 +42,8 @@ func (nm *NodeMonitor) updateConnectionStatus(nodeName string, isConnected, isCo
 	}
 
 	msgStr := ""
-	if currentMessage.Valid {
-		msgStr = currentMessage.String
+	if currentMessage != nil {
+		msgStr = *currentMessage
 	}
 
 	if currentConnected == isConnected && currentConnecting == isConnecting && msgStr == message {
@@ -57,7 +61,7 @@ func (nm *NodeMonitor) updateConnectionStatus(nodeName string, isConnected, isCo
 		    last_status_change = CURRENT_TIMESTAMP
 		WHERE name = $4`
 
-	if _, execErr := nm.db.Exec(query, isConnected, isConnecting, messageDBValue, nodeName); execErr != nil {
+	if _, execErr := nm.db.Exec(ctx, query, isConnected, isConnecting, messageDBValue, nodeName); execErr != nil {
 		nm.cfg.Logger.Warn("Failed to update node status in DB", "node", nodeName, "error", execErr)
 		return
 	}
@@ -73,6 +77,10 @@ func (nm *NodeMonitor) updateConnectionStatus(nodeName string, isConnected, isCo
 		if !isConnected {
 			eventName = notifications.EventNodeConnectionLost
 		}
+		var portVal int64
+		if nodePort != nil {
+			portVal = *nodePort
+		}
 		notificationEvent := notifications.Event{
 			Scope: notifications.ScopeNode,
 			Event: eventName,
@@ -80,7 +88,7 @@ func (nm *NodeMonitor) updateConnectionStatus(nodeName string, isConnected, isCo
 				"uuid":        nodeUUID,
 				"name":        nodeName,
 				"address":     nodeAddress,
-				"port":        nodePort.Int64,
+				"port":        portVal,
 				"isConnected": isConnected,
 				"message":     message,
 			},
@@ -89,7 +97,7 @@ func (nm *NodeMonitor) updateConnectionStatus(nodeName string, isConnected, isCo
 	}
 }
 
-func (nm *NodeMonitor) recordNodeUserUsageHistory(ctx context.Context, db *sql.DB, nodeID int64, usageDeltas []userUsageDelta) error {
+func (nm *NodeMonitor) recordNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, usageDeltas []userUsageDelta) error {
 	if len(usageDeltas) == 0 {
 		return nil
 	}
@@ -110,10 +118,10 @@ func (nm *NodeMonitor) recordNodeUserUsageHistory(ctx context.Context, db *sql.D
 			nm.cfg.Logger.Warn("Failed to enqueue node user usage history in Redis, falling back to direct database write", "error", err)
 		}
 	}
-	return bulkUpsertNodeUserUsageHistory(ctx, db, nodeID, usageDeltas)
+	return bulkUpsertNodeUserUsageHistory(ctx, dbConn, nodeID, usageDeltas)
 }
 
-func bulkUpsertUserTraffic(ctx context.Context, db *sql.DB, usageDeltas []userUsageDelta, nodeUUID string) ([]int64, error) {
+func bulkUpsertUserTraffic(ctx context.Context, dbConn db.DBTX, usageDeltas []userUsageDelta, nodeUUID string) ([]int64, error) {
 	const chunkSize = 1000
 	var firstConnectedIDs []int64
 
@@ -160,7 +168,7 @@ func bulkUpsertUserTraffic(ctx context.Context, db *sql.DB, usageDeltas []userUs
 			RETURNING id, (user_traffic.first_connected_at IS NULL OR user_traffic.first_connected_at = user_traffic.online_at) AS is_first_connection
 		`)
 
-		rows, err := db.QueryContext(ctx, query.String(), args...)
+		rows, err := dbConn.Query(ctx, query.String(), args...)
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +188,7 @@ func bulkUpsertUserTraffic(ctx context.Context, db *sql.DB, usageDeltas []userUs
 	return firstConnectedIDs, nil
 }
 
-func bulkUpsertNodeUserUsageHistory(ctx context.Context, db *sql.DB, nodeID int64, usageDeltas []userUsageDelta) error {
+func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, usageDeltas []userUsageDelta) error {
 	const chunkSize = 1000
 
 	for start := 0; start < len(usageDeltas); start += chunkSize {
@@ -212,7 +220,7 @@ func bulkUpsertNodeUserUsageHistory(ctx context.Context, db *sql.DB, nodeID int6
 				updated_at = now()
 		`)
 
-		if _, err := db.ExecContext(ctx, query.String(), args...); err != nil {
+		if _, err := dbConn.Exec(ctx, query.String(), args...); err != nil {
 			return err
 		}
 	}

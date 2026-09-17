@@ -121,7 +121,7 @@ func readOnlineStats(ctx context.Context, db *pgxpool.Pool) (onlineStats, error)
 }
 
 func readTotalOnlineOnNodes(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) (int64, error) {
-	uuids := make([]string, 0, 16)
+	uuids := make([]string, 0)
 	rows, err := db.Query(ctx, `
 		SELECT uuid
 		FROM nodes

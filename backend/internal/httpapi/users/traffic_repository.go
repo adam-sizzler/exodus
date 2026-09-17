@@ -81,7 +81,7 @@ func (r *UserRepository) queryAllReactivatedExpiredUserNodeUUIDsTx(ctx context.C
 }
 
 func scanNodeUUIDRows(rows pgx.Rows) ([]string, error) {
-	nodeUUIDs := make([]string, 0, 16)
+	nodeUUIDs := make([]string, 0)
 	for rows.Next() {
 		var nodeUUID string
 		if err := rows.Scan(&nodeUUID); err != nil {

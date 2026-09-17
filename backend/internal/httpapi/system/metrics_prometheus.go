@@ -314,7 +314,7 @@ func loadNodesMetricsViaPrometheus(ctx context.Context, db *pgxpool.Pool, cfg *c
 }
 
 func loadNodesMetricsMeta(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendConfig) ([]nodeMetricsMeta, error) {
-	result := make([]nodeMetricsMeta, 0, 32)
+	result := make([]nodeMetricsMeta, 0)
 	rows, err := db.Query(ctx, `
 		SELECT
 			n.uuid,

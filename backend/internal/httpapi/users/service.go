@@ -3,7 +3,6 @@ package users
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -80,58 +79,8 @@ func (s *UserService) RevokeUserSubscription(ctx context.Context, userUUID strin
 		return err
 	}
 
-	tx, err := s.repo.db.BeginTx(ctx, nil)
+	nodeUUIDs, err := s.repo.revokeUserSubscription(ctx, userUUID, shortUUID, credentials, req.RevokeOnlyPasswords)
 	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	nodeUUIDs, nodeTargetsErr := s.repo.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{userUUID})
-	if nodeTargetsErr != nil {
-		return nodeTargetsErr
-	}
-
-	query := `
-		UPDATE users
-		SET trojan_password = $1,
-		    vless_uuid = $2,
-		    ss_password = $3,
-		    naive_password = $4,
-		    shadowtls_password = $5,
-		    hysteria2_password = $6,
-		    anytls_password = $7,
-		    sub_revoked_at = CURRENT_TIMESTAMP,
-		    updated_at = CURRENT_TIMESTAMP`
-	args := []any{
-		credentials.TrojanPassword,
-		credentials.VlessUUID,
-		credentials.SSPassword,
-		credentials.NaivePassword,
-		credentials.ShadowtlsPassword,
-		credentials.Hysteria2Password,
-		credentials.AnytlsPassword,
-	}
-	if !req.RevokeOnlyPasswords {
-		query += `, short_uuid = $8`
-		args = append(args, shortUUID)
-	}
-	query += fmt.Sprintf(` WHERE uuid = $%d`, len(args)+1)
-	args = append(args, userUUID)
-
-	result, err := tx.ExecContext(ctx, query, args...)
-	if err != nil {
-		return mapUserWriteError(err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return errUserNotFound
-	}
-	if err := tx.Commit(); err != nil {
 		return err
 	}
 

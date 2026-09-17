@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"exodus/internal/httpapi/shared"
+	"exodus/internal/util"
 )
 
 func resolveBulkTargetUUIDs(ctx context.Context, repo *UserRepository, userIDs []int64) ([]string, error) {
@@ -289,7 +290,7 @@ func handleBulkUpdateUsersSquads(w http.ResponseWriter, r *http.Request, service
 		shared.SendError(w, http.StatusBadRequest, err.Error(), nil, service.cfg)
 		return
 	}
-	if err := validateUUIDListAllowEmpty(req.ActiveInternalSquads); err != nil {
+	if err := util.ValidateUUIDsAllowEmpty(req.ActiveInternalSquads); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid activeInternalSquads", err, service.cfg)
 		return
 	}

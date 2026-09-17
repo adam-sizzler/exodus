@@ -212,10 +212,10 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB
 	mux.HandleFunc("/api/hosts/bulk/", hosts.HostsBulkHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/hosts/tags", hosts.HostsTagsHandler(pgxDB, cfg))
 
-	mux.HandleFunc("/api/users", users.UsersHandler(db, cfg))
-	mux.HandleFunc("/api/users/", users.UserByUUIDHandler(db, cfg))
-	mux.HandleFunc("/api/users/bulk/", users.UsersBulkHandler(db, cfg))
-	mux.HandleFunc("/api/users/tags", users.UsersTagsHandler(db, cfg))
+	mux.HandleFunc("/api/users", users.UsersHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/users/", users.UserByUUIDHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/users/bulk/", users.UsersBulkHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/users/tags", users.UsersTagsHandler(pgxDB, cfg))
 
 	mux.HandleFunc("/api/keygen", keygen.KeygenHandler(pgxDB, cfg))
 	mux.HandleFunc("/api/keygen/", keygen.KeygenHandler(pgxDB, cfg))

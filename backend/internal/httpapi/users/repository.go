@@ -2,21 +2,25 @@ package users
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	exodusdb "exodus/internal/db"
 	"exodus/internal/httpapi/shared"
+	"exodus/internal/util"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type UserRepository struct {
-	db *sql.DB
+	db *pgxpool.Pool
 }
 
-func NewUserRepository(db *sql.DB) *UserRepository {
+func NewUserRepository(db *pgxpool.Pool) *UserRepository {
 	return &UserRepository{db: db}
 }
 
@@ -27,7 +31,7 @@ func (r *UserRepository) getUsersTableRecords(ctx context.Context, whereSQL, ord
 	baseFrom := `FROM users u LEFT JOIN user_traffic ut ON ut.id = u.id ` + whereSQL
 
 	var total int64
-	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) "+baseFrom, whereArgs...).Scan(&total); err != nil {
+	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseFrom, whereArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -50,7 +54,7 @@ func (r *UserRepository) getUsersTableRecords(ctx context.Context, whereSQL, ord
 		LIMIT $%d OFFSET $%d
 	`, baseFrom, orderSQL, limitIdx, offsetIdx)
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -86,9 +90,9 @@ func (r *UserRepository) getUserRecordByID(ctx context.Context, id int64) (userR
 		LEFT JOIN user_traffic ut ON ut.id = u.id
 		WHERE u.id = $1
 	`
-	row := r.db.QueryRowContext(ctx, query, id)
+	row := r.db.QueryRow(ctx, query, id)
 	record, scanErr := scanUserRecord(row)
-	if errors.Is(scanErr, sql.ErrNoRows) {
+	if errors.Is(scanErr, pgx.ErrNoRows) {
 		return record, errUserNotFound
 	}
 	return record, scanErr
@@ -114,15 +118,15 @@ func (r *UserRepository) getUserRecordByUUID(ctx context.Context, identifier str
 		LEFT JOIN user_traffic ut ON ut.id = u.id
 	`
 
-	var row *sql.Row
+	var row pgx.Row
 	if idNum, err := strconv.ParseInt(identifier, 10, 64); err == nil {
-		row = r.db.QueryRowContext(ctx, query+` WHERE u.id = $1 OR u.uuid::text = $2 OR u.short_uuid = $2 OR u.username = $2`, idNum, identifier)
+		row = r.db.QueryRow(ctx, query+` WHERE u.id = $1 OR u.uuid::text = $2 OR u.short_uuid = $2 OR u.username = $2`, idNum, identifier)
 	} else {
-		row = r.db.QueryRowContext(ctx, query+` WHERE u.uuid::text = $1 OR u.short_uuid = $1 OR u.username = $1`, identifier)
+		row = r.db.QueryRow(ctx, query+` WHERE u.uuid::text = $1 OR u.short_uuid = $1 OR u.username = $1`, identifier)
 	}
 
 	record, scanErr := scanUserRecord(row)
-	if errors.Is(scanErr, sql.ErrNoRows) {
+	if errors.Is(scanErr, pgx.ErrNoRows) {
 		return record, errUserNotFound
 	}
 	return record, scanErr
@@ -135,7 +139,7 @@ func (r *UserRepository) getUserRecordsByUUIDs(ctx context.Context, userUUIDs []
 		return records, nil
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT
 			u.id, u.uuid, u.short_uuid, u.username, u.status, u.traffic_limit_bytes,
 			u.traffic_limit_strategy, u.expire_at, u.last_traffic_reset_at,
@@ -171,7 +175,7 @@ func (r *UserRepository) resolveUUIDsByUserIDs(ctx context.Context, userIDs []in
 	if len(userIDs) == 0 {
 		return []string{}, nil
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT uuid::text FROM users WHERE id = ANY($1)`, userIDs)
+	rows, err := r.db.Query(ctx, `SELECT uuid::text FROM users WHERE id = ANY($1)`, userIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -190,23 +194,6 @@ func (r *UserRepository) resolveUUIDsByUserIDs(ctx context.Context, userIDs []in
 
 func scanUserRecord(scanner shared.RowScanner) (userRecord, error) {
 	var record userRecord
-	var (
-		lastTrafficReset sql.NullTime
-		subRevokedAt     sql.NullTime
-		naivePassword    sql.NullString
-		shadowtlsPass    sql.NullString
-		hysteria2Pass    sql.NullString
-		anytlsPass       sql.NullString
-		description      sql.NullString
-		tag              sql.NullString
-		telegramID       sql.NullInt64
-		email            sql.NullString
-		hwidDeviceLimit  sql.NullInt64
-		externalSquad    sql.NullString
-		onlineAt         sql.NullTime
-		lastNodeUUID     sql.NullString
-		firstConnectedAt sql.NullTime
-	)
 
 	err := scanner.Scan(
 		&record.ID,
@@ -217,83 +204,31 @@ func scanUserRecord(scanner shared.RowScanner) (userRecord, error) {
 		&record.TrafficLimitBytes,
 		&record.TrafficLimitStrategy,
 		&record.ExpireAt,
-		&lastTrafficReset,
-		&subRevokedAt,
+		&record.LastTrafficResetAt,
+		&record.SubRevokedAt,
 		&record.TrojanPassword,
 		&record.VlessUUID,
 		&record.SSPassword,
-		&naivePassword,
-		&shadowtlsPass,
-		&hysteria2Pass,
-		&anytlsPass,
-		&description,
-		&tag,
-		&telegramID,
-		&email,
-		&hwidDeviceLimit,
-		&externalSquad,
+		&record.NaivePassword,
+		&record.ShadowtlsPassword,
+		&record.Hysteria2Password,
+		&record.AnytlsPassword,
+		&record.Description,
+		&record.Tag,
+		&record.TelegramID,
+		&record.Email,
+		&record.HwidDeviceLimit,
+		&record.ExternalSquadUUID,
 		&record.LastTriggeredThreshold,
 		&record.CreatedAt,
 		&record.UpdatedAt,
 		&record.UsedTrafficBytes,
 		&record.LifetimeUsedTrafficBytes,
-		&onlineAt,
-		&lastNodeUUID,
-		&firstConnectedAt,
+		&record.OnlineAt,
+		&record.LastConnectedNodeUUID,
+		&record.FirstConnectedAt,
 	)
-	if err != nil {
-		return record, err
-	}
-
-	if lastTrafficReset.Valid {
-		record.LastTrafficResetAt = &lastTrafficReset.Time
-	}
-	if subRevokedAt.Valid {
-		record.SubRevokedAt = &subRevokedAt.Time
-	}
-	if naivePassword.Valid {
-		record.NaivePassword = &naivePassword.String
-	}
-	if shadowtlsPass.Valid {
-		record.ShadowtlsPassword = &shadowtlsPass.String
-	}
-	if hysteria2Pass.Valid {
-		record.Hysteria2Password = &hysteria2Pass.String
-	}
-	if anytlsPass.Valid {
-		record.AnytlsPassword = &anytlsPass.String
-	}
-	if description.Valid {
-		record.Description = &description.String
-	}
-	if tag.Valid {
-		record.Tag = &tag.String
-	}
-	if telegramID.Valid {
-		value := telegramID.Int64
-		record.TelegramID = &value
-	}
-	if email.Valid {
-		record.Email = &email.String
-	}
-	if hwidDeviceLimit.Valid {
-		value := int(hwidDeviceLimit.Int64)
-		record.HwidDeviceLimit = &value
-	}
-	if externalSquad.Valid {
-		record.ExternalSquadUUID = &externalSquad.String
-	}
-	if onlineAt.Valid {
-		record.OnlineAt = &onlineAt.Time
-	}
-	if lastNodeUUID.Valid {
-		record.LastConnectedNodeUUID = &lastNodeUUID.String
-	}
-	if firstConnectedAt.Valid {
-		record.FirstConnectedAt = &firstConnectedAt.Time
-	}
-
-	return record, nil
+	return record, err
 }
 
 func (r *UserRepository) getUsersActiveInternalSquads(ctx context.Context, userUUIDs []string) (map[string][]internalSquadResponse, error) {
@@ -305,7 +240,7 @@ func (r *UserRepository) getUsersActiveInternalSquads(ctx context.Context, userU
 		result[userUUID] = emptyInternalSquads
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT u.uuid, s.uuid, s.name
 		FROM users u
 		INNER JOIN internal_squad_members ism ON ism.user_id = u.id
@@ -336,7 +271,7 @@ func (r *UserRepository) getUsersActiveInternalSquads(ctx context.Context, userU
 }
 
 func (r *UserRepository) getAllUserTags(ctx context.Context) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT tag
 		FROM users
 		WHERE tag IS NOT NULL AND tag <> ''
@@ -361,8 +296,8 @@ func (r *UserRepository) getAllUserTags(ctx context.Context) ([]string, error) {
 	return tags, nil
 }
 
-func (r *UserRepository) replaceUserInternalSquadsTx(ctx context.Context, tx *sql.Tx, userID int64, squadUUIDs []string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM internal_squad_members WHERE user_id = $1`, userID); err != nil {
+func (r *UserRepository) replaceUserInternalSquadsTx(ctx context.Context, tx pgx.Tx, userID int64, squadUUIDs []string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM internal_squad_members WHERE user_id = $1`, userID); err != nil {
 		return err
 	}
 	for _, squadUUID := range dedupeStrings(squadUUIDs) {
@@ -370,7 +305,7 @@ func (r *UserRepository) replaceUserInternalSquadsTx(ctx context.Context, tx *sq
 		if clean == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
 			VALUES ($1::uuid, $2)
 			ON CONFLICT (internal_squad_uuid, user_id) DO NOTHING
@@ -397,8 +332,8 @@ func (r *UserRepository) resolveUserUUIDForUpdate(ctx context.Context, id *int64
 	}
 
 	var resolved string
-	err := r.db.QueryRowContext(ctx, `SELECT uuid FROM users WHERE username = $1`, strings.TrimSpace(*username)).Scan(&resolved)
-	if errors.Is(err, sql.ErrNoRows) {
+	err := r.db.QueryRow(ctx, `SELECT uuid FROM users WHERE username = $1`, strings.TrimSpace(*username)).Scan(&resolved)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errUserNotFound
 	}
 	return resolved, err
@@ -423,232 +358,282 @@ func (r *UserRepository) resolveUser(ctx context.Context, req resolveUserRequest
 	}
 
 	var dummyUUID string
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
 		SELECT uuid, id, short_uuid, username
 		FROM users
 		WHERE %s
 	`, clause), arg).Scan(&dummyUUID, &response.ID, &response.ShortUUID, &response.Username)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return response, errUserNotFound
 	}
 	return response, err
 }
 
 func (r *UserRepository) createUser(ctx context.Context, userUUID, shortUUID string, req createUserRequest, credentials userProtocolCredentials, expireAt, createdAt time.Time, lastTrafficResetAt any) (int64, []string, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
 	var userID int64
-	insertErr := tx.QueryRowContext(ctx, `
-		INSERT INTO users (
-			uuid, short_uuid, username, status, traffic_limit_bytes, traffic_limit_strategy,
-			expire_at, last_traffic_reset_at, sub_revoked_at,
-			trojan_password, vless_uuid, ss_password, naive_password, shadowtls_password, hysteria2_password, anytls_password,
-			description, tag, telegram_id, email,
-			hwid_device_limit, external_squad_uuid, last_triggered_threshold, created_at, updated_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 0, $22, $23
-		)
-		RETURNING id
-	`,
-		userUUID,
-		shortUUID,
-		strings.TrimSpace(req.Username),
-		normalizeUserStatus(req.Status),
-		coalesceInt64(req.TrafficLimitBytes, 0),
-		normalizeTrafficStrategy(req.TrafficLimitStrategy),
-		expireAt.UTC(),
-		lastTrafficResetAt,
-		credentials.TrojanPassword,
-		credentials.VlessUUID,
-		credentials.SSPassword,
-		credentials.NaivePassword,
-		credentials.ShadowtlsPassword,
-		credentials.Hysteria2Password,
-		credentials.AnytlsPassword,
-		normalizeNullableString(req.Description),
-		normalizeUserTag(req.Tag),
-		req.TelegramID,
-		normalizeNullableString(req.Email),
-		req.HwidDeviceLimit,
-		normalizeNullableString(req.ExternalSquadUUID),
-		createdAt.UTC(),
-		createdAt.UTC(),
-	).Scan(&userID)
-	if insertErr != nil {
-		return 0, nil, mapUserWriteError(insertErr)
-	}
+	var internalSquadNodeUUIDs []string
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO user_traffic (
-			id, used_traffic_bytes, lifetime_used_traffic_bytes, online_at,
-			last_connected_node_uuid, first_connected_at
-		) VALUES ($1, 0, 0, NULL, NULL, NULL)
-	`, userID); err != nil {
-		return 0, nil, err
-	}
-
-	if err := r.replaceUserInternalSquadsTx(ctx, tx, userID, req.ActiveInternalSquads); err != nil {
-		return 0, nil, err
-	}
-
-	internalSquadNodeUUIDs := make([]string, 0)
-	requestedSquads := dedupeStrings(req.ActiveInternalSquads)
-	if len(requestedSquads) > 0 {
-		nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, requestedSquads)
-		if nodeTargetsErr != nil {
-			return 0, nil, nodeTargetsErr
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		insertErr := tx.QueryRow(ctx, `
+			INSERT INTO users (
+				uuid, short_uuid, username, status, traffic_limit_bytes, traffic_limit_strategy,
+				expire_at, last_traffic_reset_at, sub_revoked_at,
+				trojan_password, vless_uuid, ss_password, naive_password, shadowtls_password, hysteria2_password, anytls_password,
+				description, tag, telegram_id, email,
+				hwid_device_limit, external_squad_uuid, last_triggered_threshold, created_at, updated_at
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 0, $22, $23
+			)
+			RETURNING id
+		`,
+			userUUID,
+			shortUUID,
+			strings.TrimSpace(req.Username),
+			normalizeUserStatus(req.Status),
+			util.Coalesce(req.TrafficLimitBytes, 0),
+			normalizeTrafficStrategy(req.TrafficLimitStrategy),
+			expireAt.UTC(),
+			lastTrafficResetAt,
+			credentials.TrojanPassword,
+			credentials.VlessUUID,
+			credentials.SSPassword,
+			credentials.NaivePassword,
+			credentials.ShadowtlsPassword,
+			credentials.Hysteria2Password,
+			credentials.AnytlsPassword,
+			normalizeNullableString(req.Description),
+			normalizeUserTag(req.Tag),
+			req.TelegramID,
+			normalizeNullableString(req.Email),
+			req.HwidDeviceLimit,
+			normalizeNullableString(req.ExternalSquadUUID),
+			createdAt.UTC(),
+			createdAt.UTC(),
+		).Scan(&userID)
+		if insertErr != nil {
+			return mapUserWriteError(insertErr)
 		}
-		internalSquadNodeUUIDs = nodeUUIDs
-	}
 
-	if err := tx.Commit(); err != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO user_traffic (
+				id, used_traffic_bytes, lifetime_used_traffic_bytes, online_at,
+				last_connected_node_uuid, first_connected_at
+			) VALUES ($1, 0, 0, NULL, NULL, NULL)
+		`, userID); err != nil {
+			return err
+		}
+
+		if err := r.replaceUserInternalSquadsTx(ctx, tx, userID, req.ActiveInternalSquads); err != nil {
+			return err
+		}
+
+		requestedSquads := dedupeStrings(req.ActiveInternalSquads)
+		if len(requestedSquads) > 0 {
+			nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, requestedSquads)
+			if nodeTargetsErr != nil {
+				return nodeTargetsErr
+			}
+			internalSquadNodeUUIDs = nodeUUIDs
+		} else {
+			internalSquadNodeUUIDs = make([]string, 0)
+		}
+
+		return nil
+	})
+	if err != nil {
 		return 0, nil, err
 	}
 
 	return userID, internalSquadNodeUUIDs, nil
 }
 
-func (r *UserRepository) updateUserRecord(ctx context.Context, targetUUID string, record userRecord, req updateUserRequest, statusToSet string, shouldSetStatus, statusDeployRequired bool) (userRecord, []string, []string, bool, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return userRecord{}, nil, nil, false, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+func (r *UserRepository) revokeUserSubscription(ctx context.Context, userUUID string, shortUUID string, credentials userProtocolCredentials, revokeOnlyPasswords bool) ([]string, error) {
+	var nodeUUIDs []string
 
-	clauses := make([]string, 0)
-	args := make([]any, 0)
-	idx := 1
-	add := func(column string, value any) {
-		clauses = append(clauses, fmt.Sprintf("%s = $%d", column, idx))
-		args = append(args, value)
-		idx++
-	}
-
-	statusNodeUUIDs := make([]string, 0)
-	if statusDeployRequired {
-		nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{targetUUID})
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		resolvedNodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{userUUID})
 		if nodeTargetsErr != nil {
-			return userRecord{}, nil, nil, false, nodeTargetsErr
+			return nodeTargetsErr
 		}
-		statusNodeUUIDs = nodeUUIDs
-	}
+		nodeUUIDs = resolvedNodeUUIDs
 
-	if shouldSetStatus {
-		add("status", statusToSet)
-	}
-	if req.TrafficLimitBytes != nil {
-		add("traffic_limit_bytes", *req.TrafficLimitBytes)
-	}
-	if req.TrafficLimitStrategy != nil {
-		add("traffic_limit_strategy", strings.ToUpper(strings.TrimSpace(*req.TrafficLimitStrategy)))
-	}
-	if req.ExpireAt != nil {
-		parsed, _ := time.Parse(time.RFC3339, strings.TrimSpace(*req.ExpireAt))
-		add("expire_at", parsed.UTC())
-	}
-	if req.Description.Set {
-		if req.Description.Value == nil || strings.TrimSpace(*req.Description.Value) == "" {
-			clauses = append(clauses, "description = NULL")
-		} else {
-			add("description", strings.TrimSpace(*req.Description.Value))
+		query := `
+			UPDATE users
+			SET trojan_password = $1,
+			    vless_uuid = $2,
+			    ss_password = $3,
+			    naive_password = $4,
+			    shadowtls_password = $5,
+			    hysteria2_password = $6,
+			    anytls_password = $7,
+			    sub_revoked_at = CURRENT_TIMESTAMP,
+			    updated_at = CURRENT_TIMESTAMP`
+		args := []any{
+			credentials.TrojanPassword,
+			credentials.VlessUUID,
+			credentials.SSPassword,
+			credentials.NaivePassword,
+			credentials.ShadowtlsPassword,
+			credentials.Hysteria2Password,
+			credentials.AnytlsPassword,
 		}
-	}
-	if req.Tag.Set {
-		if req.Tag.Value == nil || strings.TrimSpace(*req.Tag.Value) == "" {
-			clauses = append(clauses, "tag = NULL")
-		} else {
-			add("tag", strings.ToUpper(strings.TrimSpace(*req.Tag.Value)))
+		if !revokeOnlyPasswords {
+			query += `, short_uuid = $8`
+			args = append(args, shortUUID)
 		}
-	}
-	if req.TelegramID.Set {
-		if req.TelegramID.Value == nil {
-			clauses = append(clauses, "telegram_id = NULL")
-		} else {
-			add("telegram_id", *req.TelegramID.Value)
-		}
-	}
-	if req.Email.Set {
-		if req.Email.Value == nil || strings.TrimSpace(*req.Email.Value) == "" {
-			clauses = append(clauses, "email = NULL")
-		} else {
-			add("email", strings.TrimSpace(*req.Email.Value))
-		}
-	}
-	if req.HwidDeviceLimit.Set {
-		if req.HwidDeviceLimit.Value == nil {
-			clauses = append(clauses, "hwid_device_limit = NULL")
-		} else {
-			add("hwid_device_limit", *req.HwidDeviceLimit.Value)
-		}
-	}
+		query += fmt.Sprintf(` WHERE uuid = $%d`, len(args)+1)
+		args = append(args, userUUID)
 
-	addOptionalCredential := func(field OptionalString, column string, nullable bool) {
-		if !field.Set {
-			return
+		tag, err := tx.Exec(ctx, query, args...)
+		if err != nil {
+			return mapUserWriteError(err)
 		}
-		if field.Value == nil {
-			if nullable {
-				clauses = append(clauses, fmt.Sprintf("%s = NULL", column))
-			}
-			return
+		if tag.RowsAffected() == 0 {
+			return errUserNotFound
 		}
-		add(column, strings.TrimSpace(*field.Value))
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	addOptionalCredential(req.TrojanPassword, "trojan_password", false)
-	addOptionalCredential(req.VlessUUID, "vless_uuid", false)
-	addOptionalCredential(req.SSPassword, "ss_password", false)
-	addOptionalCredential(req.NaivePassword, "naive_password", false)
-	addOptionalCredential(req.ShadowtlsPassword, "shadowtls_password", false)
-	addOptionalCredential(req.Hysteria2Password, "hysteria2_password", false)
-	addOptionalCredential(req.AnytlsPassword, "anytls_password", false)
+	return nodeUUIDs, nil
+}
 
-	if req.ExternalSquadUUID.Set {
-		if req.ExternalSquadUUID.Value == nil || strings.TrimSpace(*req.ExternalSquadUUID.Value) == "" {
-			clauses = append(clauses, "external_squad_uuid = NULL")
-		} else {
-			add("external_squad_uuid", strings.TrimSpace(*req.ExternalSquadUUID.Value))
-		}
-	}
+func (r *UserRepository) updateUserRecord(ctx context.Context, targetUUID string, record userRecord, req updateUserRequest, statusToSet string, shouldSetStatus, statusDeployRequired bool) (userRecord, []string, []string, bool, error) {
+	var statusNodeUUIDs []string
+	var internalSquadNodeUUIDs []string
+	var internalSquadsChanged bool
 
-	if len(clauses) > 0 {
-		args = append(args, targetUUID)
-		query := fmt.Sprintf("UPDATE users SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", strings.Join(clauses, ", "), idx)
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return userRecord{}, nil, nil, false, mapUserWriteError(err)
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		clauses := make([]string, 0)
+		args := make([]any, 0)
+		idx := 1
+		add := func(column string, value any) {
+			clauses = append(clauses, fmt.Sprintf("%s = $%d", column, idx))
+			args = append(args, value)
+			idx++
 		}
-	}
 
-	internalSquadsChanged := false
-	internalSquadNodeUUIDs := make([]string, 0)
-	if req.ActiveInternalSquads != nil {
-		currentSquads, loadErr := r.getUserInternalSquadsTx(ctx, tx, record.ID)
-		if loadErr != nil {
-			return userRecord{}, nil, nil, false, loadErr
-		}
-		requestedSquads := dedupeStrings(*req.ActiveInternalSquads)
-		if internalSquadSetsDiffer(currentSquads, requestedSquads) {
-			affectedSquads := dedupeStrings(append(append([]string{}, currentSquads...), requestedSquads...))
-			nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, affectedSquads)
+		if statusDeployRequired {
+			nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{targetUUID})
 			if nodeTargetsErr != nil {
-				return userRecord{}, nil, nil, false, nodeTargetsErr
+				return nodeTargetsErr
 			}
-			if err := r.replaceUserInternalSquadsTx(ctx, tx, record.ID, requestedSquads); err != nil {
-				return userRecord{}, nil, nil, false, err
-			}
-			internalSquadNodeUUIDs = nodeUUIDs
-			internalSquadsChanged = true
+			statusNodeUUIDs = nodeUUIDs
+		} else {
+			statusNodeUUIDs = make([]string, 0)
 		}
-	}
 
-	if err := tx.Commit(); err != nil {
+		if shouldSetStatus {
+			add("status", statusToSet)
+		}
+		if req.TrafficLimitBytes != nil {
+			add("traffic_limit_bytes", *req.TrafficLimitBytes)
+		}
+		if req.TrafficLimitStrategy != nil {
+			add("traffic_limit_strategy", strings.ToUpper(strings.TrimSpace(*req.TrafficLimitStrategy)))
+		}
+		if req.ExpireAt != nil {
+			parsed, _ := time.Parse(time.RFC3339, strings.TrimSpace(*req.ExpireAt))
+			add("expire_at", parsed.UTC())
+		}
+		if req.Description.Set {
+			if req.Description.Value == nil || strings.TrimSpace(*req.Description.Value) == "" {
+				clauses = append(clauses, "description = NULL")
+			} else {
+				add("description", strings.TrimSpace(*req.Description.Value))
+			}
+		}
+		if req.Tag.Set {
+			if req.Tag.Value == nil || strings.TrimSpace(*req.Tag.Value) == "" {
+				clauses = append(clauses, "tag = NULL")
+			} else {
+				add("tag", strings.ToUpper(strings.TrimSpace(*req.Tag.Value)))
+			}
+		}
+		if req.TelegramID.Set {
+			if req.TelegramID.Value == nil {
+				clauses = append(clauses, "telegram_id = NULL")
+			} else {
+				add("telegram_id", *req.TelegramID.Value)
+			}
+		}
+		if req.Email.Set {
+			if req.Email.Value == nil || strings.TrimSpace(*req.Email.Value) == "" {
+				clauses = append(clauses, "email = NULL")
+			} else {
+				add("email", strings.TrimSpace(*req.Email.Value))
+			}
+		}
+		if req.HwidDeviceLimit.Set {
+			if req.HwidDeviceLimit.Value == nil {
+				clauses = append(clauses, "hwid_device_limit = NULL")
+			} else {
+				add("hwid_device_limit", *req.HwidDeviceLimit.Value)
+			}
+		}
+
+		addOptionalCredential := func(field OptionalString, column string, nullable bool) {
+			if !field.Set {
+				return
+			}
+			if field.Value == nil {
+				if nullable {
+					clauses = append(clauses, fmt.Sprintf("%s = NULL", column))
+				}
+				return
+			}
+			add(column, strings.TrimSpace(*field.Value))
+		}
+		addOptionalCredential(req.TrojanPassword, "trojan_password", false)
+		addOptionalCredential(req.VlessUUID, "vless_uuid", false)
+		addOptionalCredential(req.SSPassword, "ss_password", false)
+		addOptionalCredential(req.NaivePassword, "naive_password", false)
+		addOptionalCredential(req.ShadowtlsPassword, "shadowtls_password", false)
+		addOptionalCredential(req.Hysteria2Password, "hysteria2_password", false)
+		addOptionalCredential(req.AnytlsPassword, "anytls_password", false)
+
+		if req.ExternalSquadUUID.Set {
+			if req.ExternalSquadUUID.Value == nil || strings.TrimSpace(*req.ExternalSquadUUID.Value) == "" {
+				clauses = append(clauses, "external_squad_uuid = NULL")
+			} else {
+				add("external_squad_uuid", strings.TrimSpace(*req.ExternalSquadUUID.Value))
+			}
+		}
+
+		if len(clauses) > 0 {
+			args = append(args, targetUUID)
+			query := fmt.Sprintf("UPDATE users SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", strings.Join(clauses, ", "), idx)
+			if _, err := tx.Exec(ctx, query, args...); err != nil {
+				return mapUserWriteError(err)
+			}
+		}
+
+		internalSquadsChanged = false
+		internalSquadNodeUUIDs = make([]string, 0)
+		if req.ActiveInternalSquads != nil {
+			currentSquads, loadErr := r.getUserInternalSquadsTx(ctx, tx, record.ID)
+			if loadErr != nil {
+				return loadErr
+			}
+			requestedSquads := dedupeStrings(*req.ActiveInternalSquads)
+			if internalSquadSetsDiffer(currentSquads, requestedSquads) {
+				affectedSquads := dedupeStrings(append(append([]string{}, currentSquads...), requestedSquads...))
+				nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, affectedSquads)
+				if nodeTargetsErr != nil {
+					return nodeTargetsErr
+				}
+				if err := r.replaceUserInternalSquadsTx(ctx, tx, record.ID, requestedSquads); err != nil {
+					return err
+				}
+				internalSquadNodeUUIDs = nodeUUIDs
+				internalSquadsChanged = true
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
 		return userRecord{}, nil, nil, false, err
 	}
 
@@ -657,45 +642,39 @@ func (r *UserRepository) updateUserRecord(ctx context.Context, targetUUID string
 }
 
 func (r *UserRepository) deleteUserRecord(ctx context.Context, userUUID string) ([]string, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	var nodeUUIDs []string
 
-	var userID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE uuid = $1`, userUUID).Scan(&userID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errUserNotFound
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		var userID int64
+		if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE uuid = $1`, userUUID).Scan(&userID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errUserNotFound
+			}
+			return err
 		}
-		return nil, err
-	}
 
-	currentSquads, loadErr := r.getUserInternalSquadsTx(ctx, tx, userID)
-	if loadErr != nil {
-		return nil, loadErr
-	}
+		currentSquads, loadErr := r.getUserInternalSquadsTx(ctx, tx, userID)
+		if loadErr != nil {
+			return loadErr
+		}
 
-	nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, currentSquads)
-	if nodeTargetsErr != nil {
-		return nil, nodeTargetsErr
-	}
+		resolvedNodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, currentSquads)
+		if nodeTargetsErr != nil {
+			return nodeTargetsErr
+		}
+		nodeUUIDs = resolvedNodeUUIDs
 
-	result, err := tx.ExecContext(ctx, `DELETE FROM users WHERE uuid = $1`, userUUID)
+		tag, err := tx.Exec(ctx, `DELETE FROM users WHERE uuid = $1`, userUUID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errUserNotFound
+		}
+
+		return nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if rows == 0 {
-		return nil, errUserNotFound
-	}
-
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
@@ -703,36 +682,30 @@ func (r *UserRepository) deleteUserRecord(ctx context.Context, userUUID string) 
 }
 
 func (r *UserRepository) updateUserStatus(ctx context.Context, userUUID string, status string) ([]string, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	var nodeUUIDs []string
 
-	nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{userUUID})
-	if nodeTargetsErr != nil {
-		return nil, nodeTargetsErr
-	}
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		resolvedNodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{userUUID})
+		if nodeTargetsErr != nil {
+			return nodeTargetsErr
+		}
+		nodeUUIDs = resolvedNodeUUIDs
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE users
-		SET status = $1, updated_at = CURRENT_TIMESTAMP
-		WHERE uuid = $2
-	`, status, userUUID)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if rows == 0 {
-		return nil, errUserNotFound
-	}
+		tag, err := tx.Exec(ctx, `
+			UPDATE users
+			SET status = $1, updated_at = CURRENT_TIMESTAMP
+			WHERE uuid = $2
+		`, status, userUUID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errUserNotFound
+		}
 
-	if err := tx.Commit(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -740,24 +713,22 @@ func (r *UserRepository) updateUserStatus(ctx context.Context, userUUID string, 
 }
 
 func (r *UserRepository) deleteUsersRecord(ctx context.Context, uuids []string) ([]string, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
+	var nodeUUIDs []string
+
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		resolvedNodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, uuids)
+		if nodeTargetsErr != nil {
+			return nodeTargetsErr
+		}
+		nodeUUIDs = resolvedNodeUUIDs
+
+		if _, err := tx.Exec(ctx, `DELETE FROM users WHERE uuid = ANY($1)`, uuids); err != nil {
+			return err
+		}
+
+		return nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, uuids)
-	if nodeTargetsErr != nil {
-		return nil, nodeTargetsErr
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE uuid = ANY($1)`, uuids); err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
@@ -765,60 +736,58 @@ func (r *UserRepository) deleteUsersRecord(ctx context.Context, uuids []string) 
 }
 
 func (r *UserRepository) deleteUsersByStatus(ctx context.Context, status string) (int64, []string, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	rows, queryErr := tx.QueryContext(ctx,
-		`SELECT DISTINCT cpitn.node_uuid
-		   FROM users u
-		   JOIN internal_squad_members ism ON ism.user_id = u.id
-		   JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
-		   JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
-		  WHERE u.status = $1`, status)
-	if queryErr != nil {
-		return 0, nil, queryErr
-	}
-	nodeUUIDs := make([]string, 0)
-	for rows.Next() {
-		var nodeUUID string
-		if scanErr := rows.Scan(&nodeUUID); scanErr != nil {
-			_ = rows.Close()
-			return 0, nil, scanErr
-		}
-		nodeUUIDs = append(nodeUUIDs, nodeUUID)
-	}
-	_ = rows.Close()
-	if rowsErr := rows.Err(); rowsErr != nil {
-		return 0, nil, rowsErr
-	}
-
-	const deleteBatchSize = 30000
 	var affectedRows int64
-	for {
-		result, execErr := tx.ExecContext(ctx, `
-			DELETE FROM users
-			WHERE id IN (
-				SELECT id FROM users
-				WHERE status = $1
-				LIMIT $2
-			)
-		`, status, deleteBatchSize)
-		if execErr != nil {
-			return 0, nil, execErr
-		}
-		deleted, _ := result.RowsAffected()
-		affectedRows += deleted
-		if deleted < deleteBatchSize {
-			break
-		}
-	}
+	var nodeUUIDs []string
 
-	if err := tx.Commit(); err != nil {
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx,
+			`SELECT DISTINCT cpitn.node_uuid
+			   FROM users u
+			   JOIN internal_squad_members ism ON ism.user_id = u.id
+			   JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
+			   JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
+			  WHERE u.status = $1`, status)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+
+		nodeUUIDs = make([]string, 0)
+		for rows.Next() {
+			var nodeUUID string
+			if scanErr := rows.Scan(&nodeUUID); scanErr != nil {
+				return scanErr
+			}
+			nodeUUIDs = append(nodeUUIDs, nodeUUID)
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			return rowsErr
+		}
+
+		const deleteBatchSize = 30000
+		affectedRows = 0
+		for {
+			tag, execErr := tx.Exec(ctx, `
+				DELETE FROM users
+				WHERE id IN (
+					SELECT id FROM users
+					WHERE status = $1
+					LIMIT $2
+				)
+			`, status, deleteBatchSize)
+			if execErr != nil {
+				return execErr
+			}
+			deleted := tag.RowsAffected()
+			affectedRows += deleted
+			if deleted < deleteBatchSize {
+				break
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
 		return 0, nil, err
 	}
 
@@ -826,31 +795,27 @@ func (r *UserRepository) deleteUsersByStatus(ctx context.Context, status string)
 }
 
 func (r *UserRepository) bulkUpdateUsers(ctx context.Context, cleanUUIDs []string, clauses []string, args []any) (int64, []string, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
+	var affectedRows int64
+	var nodeUUIDs []string
+
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		resolvedNodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, cleanUUIDs)
+		if nodeTargetsErr != nil {
+			return nodeTargetsErr
+		}
+		nodeUUIDs = resolvedNodeUUIDs
+
+		queryArgs := append(args, cleanUUIDs)
+		query := fmt.Sprintf("UPDATE users SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = ANY($%d)", strings.Join(clauses, ", "), len(queryArgs))
+		tag, execErr := tx.Exec(ctx, query, queryArgs...)
+		if execErr != nil {
+			return mapUserWriteError(execErr)
+		}
+		affectedRows = tag.RowsAffected()
+
+		return nil
+	})
 	if err != nil {
-		return 0, nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	nodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, cleanUUIDs)
-	if nodeTargetsErr != nil {
-		return 0, nil, nodeTargetsErr
-	}
-
-	queryArgs := append(args, cleanUUIDs)
-	query := fmt.Sprintf("UPDATE users SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = ANY($%d)", strings.Join(clauses, ", "), len(queryArgs))
-	result, execErr := tx.ExecContext(ctx, query, queryArgs...)
-	if execErr != nil {
-		return 0, nil, mapUserWriteError(execErr)
-	}
-	affectedRows, rowsErr := result.RowsAffected()
-	if rowsErr != nil {
-		return 0, nil, rowsErr
-	}
-
-	if err := tx.Commit(); err != nil {
 		return 0, nil, err
 	}
 
@@ -858,55 +823,52 @@ func (r *UserRepository) bulkUpdateUsers(ctx context.Context, cleanUUIDs []strin
 }
 
 func (r *UserRepository) bulkUpdateUsersSquads(ctx context.Context, cleanUserUUIDs []string, requestedSquads []string) (int64, []string, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
+	var userIDs []int64
+	var nodeUUIDs []string
+
+	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		targets, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, cleanUserUUIDs)
+		if nodeTargetsErr != nil {
+			return nodeTargetsErr
+		}
+		squadTargets, squadTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, requestedSquads)
+		if squadTargetsErr != nil {
+			return squadTargetsErr
+		}
+		nodeUUIDs = dedupeStrings(append(targets, squadTargets...))
+
+		rows, err := tx.Query(ctx, `SELECT id FROM users WHERE uuid = ANY($1)`, cleanUserUUIDs)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		userIDs = make([]int64, 0, len(cleanUserUUIDs))
+		for rows.Next() {
+			var userID int64
+			if err := rows.Scan(&userID); err != nil {
+				return err
+			}
+			userIDs = append(userIDs, userID)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		for _, userID := range userIDs {
+			if err := r.replaceUserInternalSquadsTx(ctx, tx, userID, requestedSquads); err != nil {
+				return err
+			}
+		}
+		if len(cleanUserUUIDs) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE uuid = ANY($1)`, cleanUserUUIDs); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 	if err != nil {
-		return 0, nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	targets, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, cleanUserUUIDs)
-	if nodeTargetsErr != nil {
-		return 0, nil, nodeTargetsErr
-	}
-	squadTargets, squadTargetsErr := r.resolveNodeUUIDsForInternalSquadsTx(ctx, tx, requestedSquads)
-	if squadTargetsErr != nil {
-		return 0, nil, squadTargetsErr
-	}
-	nodeUUIDs := dedupeStrings(append(targets, squadTargets...))
-
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM users WHERE uuid = ANY($1)`, cleanUserUUIDs)
-	if err != nil {
-		return 0, nil, err
-	}
-	userIDs := make([]int64, 0, len(cleanUserUUIDs))
-	for rows.Next() {
-		var userID int64
-		if err := rows.Scan(&userID); err != nil {
-			_ = rows.Close()
-			return 0, nil, err
-		}
-		userIDs = append(userIDs, userID)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return 0, nil, err
-	}
-	_ = rows.Close()
-
-	for _, userID := range userIDs {
-		if err := r.replaceUserInternalSquadsTx(ctx, tx, userID, requestedSquads); err != nil {
-			return 0, nil, err
-		}
-	}
-	if len(cleanUserUUIDs) > 0 {
-		if _, err := tx.ExecContext(ctx, `UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE uuid = ANY($1)`, cleanUserUUIDs); err != nil {
-			return 0, nil, err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
 		return 0, nil, err
 	}
 
@@ -915,20 +877,16 @@ func (r *UserRepository) bulkUpdateUsersSquads(ctx context.Context, cleanUserUUI
 
 func (r *UserRepository) bulkAllUpdateUsers(ctx context.Context, clauses []string, args []any) (int64, error) {
 	query := fmt.Sprintf("UPDATE users SET %s, updated_at = CURRENT_TIMESTAMP", strings.Join(clauses, ", "))
-	result, execErr := r.db.ExecContext(ctx, query, args...)
+	tag, execErr := r.db.Exec(ctx, query, args...)
 	if execErr != nil {
 		return 0, mapUserWriteError(execErr)
 	}
-	affectedRows, rowsErr := result.RowsAffected()
-	if rowsErr != nil {
-		return 0, rowsErr
-	}
-	return affectedRows, nil
+	return tag.RowsAffected(), nil
 }
 
 func (r *UserRepository) confirmUserExistsByID(ctx context.Context, userID int64) error {
 	var exists bool
-	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists); err != nil {
+	if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {
@@ -942,7 +900,7 @@ func (r *UserRepository) getUserSubscriptionRequestHistory(ctx context.Context, 
 		return nil, err
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, COALESCE(srr_response_type, 'UNKNOWN'), srr_rule_name, request_ip, user_agent, request_at
 		FROM user_subscription_request_history
 		WHERE user_id = $1
@@ -975,7 +933,7 @@ func (r *UserRepository) getUserAccessibleNodes(ctx context.Context, userID int6
 		return nil, err
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT
 			n.uuid,
 			n.name,
@@ -1109,7 +1067,7 @@ func (r *UserRepository) getUsersStream(ctx context.Context, cursor int64, size 
 		LIMIT $%d
 	`, whereStmt, limitIdx)
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, false, err
 	}

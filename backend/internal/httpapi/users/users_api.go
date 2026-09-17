@@ -1,15 +1,16 @@
 package users
 
 import (
-	"database/sql"
 	"net/http"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
 )
 
-func UsersHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func UsersHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewUserRepository(db)
 	service := NewUserService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +27,7 @@ func UsersHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	}
 }
 
-func UserByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func UserByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewUserRepository(db)
 	service := NewUserService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +137,7 @@ func UserByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 	}
 }
 
-func UsersBulkHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func UsersBulkHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewUserRepository(db)
 	service := NewUserService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +182,7 @@ func UsersBulkHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Success      200  {object}  UserTagsResponseEnvelope
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /users/tags [get]
-func UsersTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func UsersTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewUserRepository(db)
 	service := NewUserService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {

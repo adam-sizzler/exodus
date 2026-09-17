@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"exodus/internal/util"
+
 	"github.com/google/uuid"
 )
 
@@ -56,7 +58,7 @@ func validateCreateUserRequest(req createUserRequest) error {
 	if req.TelegramID != nil && *req.TelegramID < 0 {
 		return fmt.Errorf("telegramId must be non-negative")
 	}
-	if err := validateUUIDListAllowEmpty(req.ActiveInternalSquads); err != nil {
+	if err := util.ValidateUUIDsAllowEmpty(req.ActiveInternalSquads); err != nil {
 		return err
 	}
 	if req.VlessUUID != nil && strings.TrimSpace(*req.VlessUUID) != "" {
@@ -123,7 +125,7 @@ func validateUpdateUserRequest(req updateUserRequest) error {
 		return fmt.Errorf("telegramId must be non-negative")
 	}
 	if req.ActiveInternalSquads != nil {
-		if err := validateUUIDListAllowEmpty(*req.ActiveInternalSquads); err != nil {
+		if err := util.ValidateUUIDsAllowEmpty(*req.ActiveInternalSquads); err != nil {
 			return err
 		}
 	}

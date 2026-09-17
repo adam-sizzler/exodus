@@ -2,12 +2,13 @@ package users
 
 import (
 	"context"
-	"database/sql"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
-func (r *UserRepository) getUserInternalSquadsTx(ctx context.Context, tx *sql.Tx, userID int64) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT internal_squad_uuid FROM internal_squad_members WHERE user_id = $1`, userID)
+func (r *UserRepository) getUserInternalSquadsTx(ctx context.Context, tx pgx.Tx, userID int64) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT internal_squad_uuid FROM internal_squad_members WHERE user_id = $1`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -43,13 +44,13 @@ func internalSquadSetsDiffer(current []string, requested []string) bool {
 	return false
 }
 
-func (r *UserRepository) resolveNodeUUIDsForInternalSquadsTx(ctx context.Context, tx *sql.Tx, squadUUIDs []string) ([]string, error) {
+func (r *UserRepository) resolveNodeUUIDsForInternalSquadsTx(ctx context.Context, tx pgx.Tx, squadUUIDs []string) ([]string, error) {
 	cleanSquadUUIDs := dedupeStrings(squadUUIDs)
 	if len(cleanSquadUUIDs) == 0 {
 		return []string{}, nil
 	}
 
-	rows, err := tx.QueryContext(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT DISTINCT cpitn.node_uuid
 		FROM internal_squad_inbounds isi
 		JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
@@ -75,13 +76,13 @@ func (r *UserRepository) resolveNodeUUIDsForInternalSquadsTx(ctx context.Context
 	return dedupeStrings(nodeUUIDs), nil
 }
 
-func (r *UserRepository) resolveNodeUUIDsForUserUUIDsTx(ctx context.Context, tx *sql.Tx, userUUIDs []string) ([]string, error) {
+func (r *UserRepository) resolveNodeUUIDsForUserUUIDsTx(ctx context.Context, tx pgx.Tx, userUUIDs []string) ([]string, error) {
 	cleanUserUUIDs := dedupeStrings(userUUIDs)
 	if len(cleanUserUUIDs) == 0 {
 		return []string{}, nil
 	}
 
-	rows, err := tx.QueryContext(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT DISTINCT cpitn.node_uuid
 		FROM users u
 		JOIN internal_squad_members ism ON ism.user_id = u.id

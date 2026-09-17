@@ -2,13 +2,15 @@ package users
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 )
@@ -21,7 +23,7 @@ var (
 
 const usersSubNodeBaseTTL = 30 * time.Second
 
-func resolveUsersSubscriptionBase(ctx context.Context, db *sql.DB, r *http.Request, cfg *config.BackendConfig) string {
+func resolveUsersSubscriptionBase(ctx context.Context, db *pgxpool.Pool, r *http.Request, cfg *config.BackendConfig) string {
 	if base := resolveUsersSubscriptionBaseFromNode(ctx, db); base != "" {
 		return base
 	}
@@ -29,7 +31,7 @@ func resolveUsersSubscriptionBase(ctx context.Context, db *sql.DB, r *http.Reque
 	return resolveUsersSubscriptionBaseFallback(r, cfg)
 }
 
-func resolveUsersSubscriptionBaseFromNode(ctx context.Context, db *sql.DB) string {
+func resolveUsersSubscriptionBaseFromNode(ctx context.Context, db *pgxpool.Pool) string {
 	if db == nil {
 		return ""
 	}
@@ -42,9 +44,9 @@ func resolveUsersSubscriptionBaseFromNode(ctx context.Context, db *sql.DB) strin
 	}
 	usersSubNodeBaseLock.RUnlock()
 
-	var domain sql.NullString
-	var apiPath sql.NullString
-	row := db.QueryRowContext(ctx, `
+	var domain *string
+	var apiPath *string
+	row := db.QueryRow(ctx, `
 		SELECT
 			COALESCE(NULLIF(BTRIM(public_domain), ''), NULLIF(BTRIM(address), '')) AS domain,
 			COALESCE(NULLIF(BTRIM(api_path), ''), '/') AS api_path
@@ -54,7 +56,7 @@ func resolveUsersSubscriptionBaseFromNode(ctx context.Context, db *sql.DB) strin
 	`)
 
 	scanErr := row.Scan(&domain, &apiPath)
-	if errors.Is(scanErr, sql.ErrNoRows) || scanErr != nil || !domain.Valid {
+	if errors.Is(scanErr, pgx.ErrNoRows) || scanErr != nil || domain == nil || *domain == "" {
 		usersSubNodeBaseLock.Lock()
 		usersSubNodeBaseVal = ""
 		usersSubNodeBaseExp = time.Now().Add(usersSubNodeBaseTTL)
@@ -62,7 +64,7 @@ func resolveUsersSubscriptionBaseFromNode(ctx context.Context, db *sql.DB) strin
 		return ""
 	}
 
-	nodeDomain := strings.TrimSpace(strings.Split(domain.String, ",")[0])
+	nodeDomain := strings.TrimSpace(strings.Split(*domain, ",")[0])
 	if nodeDomain == "" {
 		usersSubNodeBaseLock.Lock()
 		usersSubNodeBaseVal = ""
@@ -90,7 +92,11 @@ func resolveUsersSubscriptionBaseFromNode(ctx context.Context, db *sql.DB) strin
 	parsedDomain.User = nil
 
 	base := strings.TrimRight(parsedDomain.String(), "/")
-	path := normalizeUsersSubscriptionAPIPath(apiPath.String)
+	var pathStr string
+	if apiPath != nil {
+		pathStr = *apiPath
+	}
+	path := normalizeUsersSubscriptionAPIPath(pathStr)
 	res := base + path
 
 	usersSubNodeBaseLock.Lock()

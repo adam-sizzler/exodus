@@ -2,7 +2,6 @@ package subscriptionnodes
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"sync"
 	"time"
@@ -14,9 +13,8 @@ import (
 )
 
 type SubNodeMonitor struct {
-	db    *pgxpool.Pool
-	sqlDB *sql.DB // temporary bridge for SubpageConfigPublicHandler and SubscriptionPublicHandler until Stage 8
-	cfg   *config.BackendConfig
+	db  *pgxpool.Pool
+	cfg *config.BackendConfig
 
 	nodes     map[string]*subNodeState
 	nodesLock sync.RWMutex
@@ -33,10 +31,9 @@ type SubNodeMonitor struct {
 	srsSyncNow     chan []string
 }
 
-func NewSubNodeMonitor(db *pgxpool.Pool, sqlDB *sql.DB, cfg *config.BackendConfig) *SubNodeMonitor {
+func NewSubNodeMonitor(db *pgxpool.Pool, cfg *config.BackendConfig) *SubNodeMonitor {
 	return &SubNodeMonitor{
 		db:                db,
-		sqlDB:             sqlDB,
 		cfg:               cfg,
 		nodes:             make(map[string]*subNodeState),
 		runtimeByNodeName: make(map[string]SubNodeRuntimeSnapshot),

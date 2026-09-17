@@ -2,12 +2,15 @@ package subscription
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/middleware"
@@ -30,7 +33,7 @@ import (
 // @Router       /sub/{shortUuid} [get]
 // @Router       /sub/{shortUuid}/{client} [get]
 // @Router       /sub/{shortUuid}/info [get]
-func SubscriptionPublicHandler(db, backgroundDB *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionPublicHandler(db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -74,13 +77,13 @@ func SubscriptionPublicHandler(db, backgroundDB *sql.DB, cfg *config.BackendConf
 	}
 }
 
-func handlePublicSubscriptionInfo(w http.ResponseWriter, r *http.Request, db, backgroundDB *sql.DB, cfg *config.BackendConfig, shortUUID string) {
+func handlePublicSubscriptionInfo(w http.ResponseWriter, r *http.Request, db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig, shortUUID string) {
 	ctx := r.Context()
 	renderService := NewRenderService(db, backgroundDB, cfg)
 
 	user, err := getSubscriptionUserByShortUUID(ctx, db, shortUUID)
 	if err != nil {
-		if errorsIsNoRows(err) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 			return
 		}
@@ -108,7 +111,7 @@ func handlePublicSubscriptionInfo(w http.ResponseWriter, r *http.Request, db, ba
 	})
 }
 
-func handlePublicOutlineSubscription(w http.ResponseWriter, r *http.Request, db, backgroundDB *sql.DB, cfg *config.BackendConfig, parts []string) {
+func handlePublicOutlineSubscription(w http.ResponseWriter, r *http.Request, db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig, parts []string) {
 	ctx := r.Context()
 	log := cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceHTTP)
 
@@ -128,7 +131,7 @@ func handlePublicOutlineSubscription(w http.ResponseWriter, r *http.Request, db,
 
 	user, err := getSubscriptionUserByShortUUID(ctx, db, shortUUID)
 	if err != nil {
-		if errorsIsNoRows(err) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 			return
 		}
@@ -203,13 +206,13 @@ func handlePublicOutlineSubscription(w http.ResponseWriter, r *http.Request, db,
 	_, _ = w.Write(content)
 }
 
-func handlePublicSubscription(w http.ResponseWriter, r *http.Request, db, backgroundDB *sql.DB, cfg *config.BackendConfig, shortUUID string, clientType string) {
+func handlePublicSubscription(w http.ResponseWriter, r *http.Request, db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig, shortUUID string, clientType string) {
 	ctx := r.Context()
 	log := cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceHTTP)
 
 	user, err := getSubscriptionUserByShortUUID(ctx, db, shortUUID)
 	if err != nil {
-		if errorsIsNoRows(err) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 			return
 		}
@@ -372,7 +375,7 @@ func (s *RenderService) CopyMap(src map[string]string) map[string]string {
 // @Failure      404        {object}  shared.ErrorResponse
 // @Failure      500        {object}  shared.ErrorResponse
 // @Router       /subscriptions/subpage-config/{shortUuid} [post]
-func SubpageConfigPublicHandler(db, backgroundDB *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubpageConfigPublicHandler(db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -401,7 +404,7 @@ func SubpageConfigPublicHandler(db, backgroundDB *sql.DB, cfg *config.BackendCon
 
 		subpageConfigUUID, webpageAllowed, err := getSubpageConfigForUser(r.Context(), db, cfg, shortUUID, req.RequestHeaders)
 		if err != nil {
-			if errorsIsNoRows(err) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 				return
 			}

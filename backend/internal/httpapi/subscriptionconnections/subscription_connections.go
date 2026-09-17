@@ -1,9 +1,10 @@
 package subscriptionconnections
 
 import (
-	"database/sql"
 	"net/http"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -25,7 +26,7 @@ import (
 // @Router       /subscription-connections [get]
 // @Router       /subscription-connections [post]
 // @Router       /subscription-connections [patch]
-func NodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSubscriptionConnectionRepository(db)
 	service := NewSubscriptionConnectionService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +60,7 @@ func NodesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Router       /subscription-connections/{uuid}/actions/disable [post]
 // @Router       /subscription-connections/{uuid}/actions/restart [post]
 // @Router       /subscription-connections/{uuid}/actions/reset-traffic [post]
-func NodeByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodeByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSubscriptionConnectionRepository(db)
 	service := NewSubscriptionConnectionService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +135,7 @@ func NodeByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /subscription-connections/actions/restart-all [post]
 // @Router       /subscription-connections/actions/reorder [post]
-func NodesActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSubscriptionConnectionRepository(db)
 	service := NewSubscriptionConnectionService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +169,7 @@ func NodesActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /subscription-connections/bulk-actions [post]
 // @Router       /subscription-connections/bulk-actions/profile-modification [post]
-func NodesBulkActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesBulkActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSubscriptionConnectionRepository(db)
 	service := NewSubscriptionConnectionService(repo, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -198,7 +199,7 @@ func NodesBulkActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.Handler
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /subscription-connections/tags [get]
-func NodesTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func NodesTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	repo := NewSubscriptionConnectionRepository(db)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

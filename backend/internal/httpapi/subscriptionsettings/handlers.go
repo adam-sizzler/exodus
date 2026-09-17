@@ -1,12 +1,14 @@
 package subscriptionsettings
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -27,7 +29,7 @@ import (
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /subscription-settings [get]
 // @Router       /subscription-settings [patch]
-func SubscriptionSettingsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionSettingsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -40,8 +42,8 @@ func SubscriptionSettingsHandler(db *sql.DB, cfg *config.BackendConfig) http.Han
 	}
 }
 
-func handleGetSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
-	row := db.QueryRowContext(r.Context(), `
+func handleGetSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
+	row := db.QueryRow(r.Context(), `
 		SELECT
 			uuid, address, port, api_schema, api_path,
 			serve_json_at_base_subscription, is_show_custom_remarks, custom_remarks,
@@ -52,8 +54,8 @@ func handleGetSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Request,
 		LIMIT 1`)
 	settings, err := ScanSubscriptionSettings(row)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			_, _ = db.ExecContext(r.Context(), `
+		if errors.Is(err, pgx.ErrNoRows) {
+			_, _ = db.Exec(r.Context(), `
 				INSERT INTO subscription_settings (
 					uuid, address, port, api_schema, api_path,
 					serve_json_at_base_subscription, is_show_custom_remarks, custom_remarks,
@@ -65,7 +67,7 @@ func handleGetSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Request,
 					false, '[]'::jsonb, '{}'::jsonb
 				) ON CONFLICT DO NOTHING
 			`)
-			rowRetry := db.QueryRowContext(r.Context(), `
+			rowRetry := db.QueryRow(r.Context(), `
 				SELECT
 					uuid, address, port, api_schema, api_path,
 					serve_json_at_base_subscription, is_show_custom_remarks, custom_remarks,
@@ -94,7 +96,7 @@ func handleGetSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Request,
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": apiSettings})
 }
 
-func handlePatchSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handlePatchSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req SubscriptionSettingsUpdateRequestAPI
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -111,11 +113,11 @@ func handlePatchSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Fetch current headers so we can update header keys inside custom_response_headers
-	var currentHeadersRaw sql.NullString
-	_ = db.QueryRowContext(r.Context(), `SELECT custom_response_headers::text FROM subscription_settings WHERE uuid = $1`, req.UUID).Scan(&currentHeadersRaw)
+	var currentHeadersRaw *string
+	_ = db.QueryRow(r.Context(), `SELECT custom_response_headers::text FROM subscription_settings WHERE uuid = $1`, req.UUID).Scan(&currentHeadersRaw)
 	headersMap := make(map[string]string)
-	if currentHeadersRaw.Valid && currentHeadersRaw.String != "" {
-		_ = json.Unmarshal([]byte(currentHeadersRaw.String), &headersMap)
+	if currentHeadersRaw != nil && *currentHeadersRaw != "" {
+		_ = json.Unmarshal([]byte(*currentHeadersRaw), &headersMap)
 	}
 
 	headersModified := false
@@ -201,7 +203,7 @@ func handlePatchSubscriptionSettingsEXODUS(w http.ResponseWriter, r *http.Reques
 			custom_response_headers, randomize_hosts, response_rules, hwid_settings,
 			created_at, updated_at
 	`, strings.Join(updates, ", "), idx)
-	row := db.QueryRowContext(r.Context(), query, args...)
+	row := db.QueryRow(r.Context(), query, args...)
 	settings, err := ScanSubscriptionSettings(row)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrUpdateSubscriptionSettingsFailed.WithCause(err), cfg)

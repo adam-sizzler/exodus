@@ -1,15 +1,12 @@
 package subscriptiontemplate
 
 import (
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
 
-	"exodus/internal/db"
 	"exodus/internal/httpapi/shared"
-	"exodus/internal/util"
 )
 
 const (
@@ -68,22 +65,19 @@ type subscriptionTemplateRecord struct {
 }
 
 func scanSubscriptionTemplateRecord(scanner shared.RowScanner, dest *subscriptionTemplateRecord) error {
-	var templateYAML sql.NullString
+	var templateYAML *string
 	var templateJSONBytes []byte
-	var tags db.StringArray
+	var tags []string
 	if err := scanner.Scan(&dest.UUID, &dest.ViewPosition, &dest.Name, &tags, &dest.TemplateType, &templateYAML, &templateJSONBytes); err != nil {
 		return err
 	}
 
-	dest.Tags = tags.Slice()
+	dest.Tags = tags
 	if dest.Tags == nil {
 		dest.Tags = []string{}
 	}
 
-	if templateYAML.Valid {
-		val := templateYAML.String
-		dest.TemplateYAML = &val
-	}
+	dest.TemplateYAML = templateYAML
 
 	if len(templateJSONBytes) > 0 {
 		dest.TemplateJSON = json.RawMessage(templateJSONBytes)
@@ -152,10 +146,6 @@ func ensureJSONObject(raw json.RawMessage) error {
 		return fmt.Errorf("templateJson must be a JSON object")
 	}
 	return nil
-}
-
-func isUniqueViolation(err error) bool {
-	return util.IsUniqueViolation(err)
 }
 
 func isAllowedTemplateType(v string) bool {

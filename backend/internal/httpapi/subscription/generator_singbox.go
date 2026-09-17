@@ -10,7 +10,6 @@ CROSS-CUTTING RULES / НЕЯВНЫЕ ЗАВИСИМОСТИ:
 */
 
 import (
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"math/rand"
@@ -456,12 +455,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func nullableSQLString(value sql.NullString) string {
-	if !value.Valid {
-		return ""
-	}
-	return value.String
-}
+
 
 func deriveRealityPublicKey(privateKey string) string {
 	privateKey = strings.TrimSpace(privateKey)

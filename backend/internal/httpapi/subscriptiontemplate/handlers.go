@@ -2,7 +2,6 @@ package subscriptiontemplate
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,9 +9,14 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"exodus/internal/config"
 	"exodus/internal/db"
+	exodusdb "exodus/internal/db"
 	"exodus/internal/httpapi/shared"
+	"exodus/internal/util"
 
 	"github.com/google/uuid"
 )
@@ -32,7 +36,7 @@ import (
 // @Router       /subscription-templates [get]
 // @Router       /subscription-templates [post]
 // @Router       /subscription-templates [patch]
-func SubscriptionTemplatesHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionTemplatesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -59,7 +63,7 @@ func SubscriptionTemplatesHandler(db *sql.DB, cfg *config.BackendConfig) http.Ha
 // @Failure      400   {object}  shared.ErrorResponse
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /subscription-templates/actions/reorder [post]
-func SubscriptionTemplatesActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionTemplatesActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -91,7 +95,7 @@ func SubscriptionTemplatesActionsHandler(db *sql.DB, cfg *config.BackendConfig) 
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /subscription-templates/{uuid} [get]
 // @Router       /subscription-templates/{uuid} [delete]
-func SubscriptionTemplateByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionTemplateByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uuidStr := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, subscriptionTemplatesBasePath+"/"))
 		if uuidStr == "" {
@@ -123,8 +127,8 @@ func SubscriptionTemplateByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) ht
 	}
 }
 
-func handleGetSubscriptionTemplates(w http.ResponseWriter, r *http.Request, dbConn *sql.DB, cfg *config.BackendConfig) {
-	rows, err := dbConn.QueryContext(r.Context(), `
+func handleGetSubscriptionTemplates(w http.ResponseWriter, r *http.Request, dbConn *pgxpool.Pool, cfg *config.BackendConfig) {
+	rows, err := dbConn.Query(r.Context(), `
 		SELECT uuid, view_position, name, tags, template_type
 		FROM subscription_templates
 		ORDER BY view_position ASC, template_type ASC`)
@@ -137,20 +141,19 @@ func handleGetSubscriptionTemplates(w http.ResponseWriter, r *http.Request, dbCo
 	templates := make([]SubscriptionTemplate, 0)
 	for rows.Next() {
 		var rec subscriptionTemplateRecord
-		var tags db.StringArray
+		var tags []string
 		if scanErr := rows.Scan(&rec.UUID, &rec.ViewPosition, &rec.Name, &tags, &rec.TemplateType); scanErr != nil {
 			shared.SendAPIError(w, shared.ErrGetAllSubTemplatesFailed.WithCause(scanErr), cfg)
 			return
 		}
-		tagSlice := tags.Slice()
-		if tagSlice == nil {
-			tagSlice = []string{}
+		if tags == nil {
+			tags = []string{}
 		}
 		templates = append(templates, SubscriptionTemplate{
 			UUID:               rec.UUID,
 			ViewPosition:       rec.ViewPosition,
 			Name:               rec.Name,
-			Tags:               tagSlice,
+			Tags:               tags,
 			TemplateType:       rec.TemplateType,
 			TemplateJSON:       nil,
 			EncodedTemplateYML: nil,
@@ -169,14 +172,14 @@ func handleGetSubscriptionTemplates(w http.ResponseWriter, r *http.Request, dbCo
 	})
 }
 
-func handleGetSubscriptionTemplateByUUID(w http.ResponseWriter, r *http.Request, dbConn *sql.DB, cfg *config.BackendConfig, templateUUID string) {
+func handleGetSubscriptionTemplateByUUID(w http.ResponseWriter, r *http.Request, dbConn *pgxpool.Pool, cfg *config.BackendConfig, templateUUID string) {
 	var rec subscriptionTemplateRecord
-	row := dbConn.QueryRowContext(r.Context(), `
+	row := dbConn.QueryRow(r.Context(), `
 		SELECT uuid, view_position, name, tags, template_type, template_yaml, template_json
 		FROM subscription_templates
 		WHERE uuid = $1`, templateUUID)
 	if err := scanSubscriptionTemplateRecord(row, &rec); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubTemplateNotFound, cfg)
 			return
 		}
@@ -188,7 +191,7 @@ func handleGetSubscriptionTemplateByUUID(w http.ResponseWriter, r *http.Request,
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": resp})
 }
 
-func handleCreateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, dbConn *sql.DB, cfg *config.BackendConfig) {
+func handleCreateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, dbConn *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req subscriptionTemplateCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -224,7 +227,7 @@ func handleCreateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 	newUUID := uuid.NewString()
 
 	viewPosition := 0
-	row := dbConn.QueryRowContext(r.Context(), `SELECT COALESCE(MAX(view_position), 0) + 1 FROM subscription_templates`)
+	row := dbConn.QueryRow(r.Context(), `SELECT COALESCE(MAX(view_position), 0) + 1 FROM subscription_templates`)
 	if scanErr := row.Scan(&viewPosition); scanErr != nil {
 		shared.SendAPIError(w, shared.ErrCreateSubTemplateFailed.WithCause(scanErr), cfg)
 		return
@@ -232,7 +235,7 @@ func handleCreateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 
 	tags := shared.SanitizeTags(req.Tags)
 
-	_, execErr := dbConn.ExecContext(r.Context(), `
+	_, execErr := dbConn.Exec(r.Context(), `
 		INSERT INTO subscription_templates (
 			uuid, view_position, name, tags, template_type, template_yaml, template_json
 		) VALUES ($1, $2, $3, $4::text[], $5, $6, $7)`,
@@ -245,7 +248,7 @@ func handleCreateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 		defaultTmpl.TemplateJSON,
 	)
 	if execErr != nil {
-		if isUniqueViolation(execErr) {
+		if util.IsUniqueViolation(execErr) {
 			shared.SendAPIError(w, shared.ErrSubTemplateNameAlreadyExistsForThisType, cfg)
 			return
 		}
@@ -266,7 +269,7 @@ func handleCreateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 	shared.WriteJSON(w, http.StatusCreated, map[string]any{"response": mapSubscriptionTemplateRecord(created, true)})
 }
 
-func handleUpdateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, dbConn *sql.DB, cfg *config.BackendConfig) {
+func handleUpdateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, dbConn *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req subscriptionTemplateUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -303,12 +306,12 @@ func handleUpdateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 	}
 
 	var template subscriptionTemplateRecord
-	row := dbConn.QueryRowContext(r.Context(), `
+	row := dbConn.QueryRow(r.Context(), `
 		SELECT uuid, view_position, name, tags, template_type, template_yaml, template_json
 		FROM subscription_templates
 		WHERE uuid = $1`, req.UUID)
 	if scanErr := scanSubscriptionTemplateRecord(row, &template); scanErr != nil {
-		if errors.Is(scanErr, sql.ErrNoRows) {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubTemplateNotFound, cfg)
 			return
 		}
@@ -370,20 +373,16 @@ func handleUpdateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 	args = append(args, req.UUID)
 	query := fmt.Sprintf("UPDATE subscription_templates SET %s, updated_at = CURRENT_TIMESTAMP WHERE uuid = $%d", strings.Join(clauses, ", "), idx)
 
-	result, execErr := dbConn.ExecContext(r.Context(), query, args...)
+	result, execErr := dbConn.Exec(r.Context(), query, args...)
 	if execErr != nil {
-		if isUniqueViolation(execErr) {
+		if util.IsUniqueViolation(execErr) {
 			shared.SendAPIError(w, shared.ErrSubTemplateNameAlreadyExistsForThisType, cfg)
 			return
 		}
 		shared.SendAPIError(w, shared.ErrUpdateSubTemplateFailed.WithCause(execErr), cfg)
 		return
 	}
-	rowsAffected, raErr := result.RowsAffected()
-	if raErr != nil {
-		shared.SendAPIError(w, shared.ErrUpdateSubTemplateFailed.WithCause(raErr), cfg)
-		return
-	}
+	rowsAffected := result.RowsAffected()
 	if rowsAffected == 0 {
 		shared.SendAPIError(w, shared.ErrSubTemplateNotFound, cfg)
 		return
@@ -405,11 +404,11 @@ func handleUpdateSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 	shared.WriteJSON(w, http.StatusOK, map[string]any{"response": mapSubscriptionTemplateRecord(template, true)})
 }
 
-func handleDeleteSubscriptionTemplate(w http.ResponseWriter, r *http.Request, dbConn *sql.DB, cfg *config.BackendConfig, templateUUID string) {
+func handleDeleteSubscriptionTemplate(w http.ResponseWriter, r *http.Request, dbConn *pgxpool.Pool, cfg *config.BackendConfig, templateUUID string) {
 	var templateName string
-	row := dbConn.QueryRowContext(r.Context(), `SELECT name FROM subscription_templates WHERE uuid = $1`, templateUUID)
+	row := dbConn.QueryRow(r.Context(), `SELECT name FROM subscription_templates WHERE uuid = $1`, templateUUID)
 	if err := row.Scan(&templateName); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubTemplateNotFound, cfg)
 			return
 		}
@@ -422,7 +421,7 @@ func handleDeleteSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 		return
 	}
 
-	if _, execErr := dbConn.ExecContext(r.Context(), `DELETE FROM subscription_templates WHERE uuid = $1`, templateUUID); execErr != nil {
+	if _, execErr := dbConn.Exec(r.Context(), `DELETE FROM subscription_templates WHERE uuid = $1`, templateUUID); execErr != nil {
 		shared.SendAPIError(w, shared.ErrDeleteSubTemplateFailed.WithCause(execErr), cfg)
 		return
 	}
@@ -430,7 +429,7 @@ func handleDeleteSubscriptionTemplate(w http.ResponseWriter, r *http.Request, db
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleReorderSubscriptionTemplates(w http.ResponseWriter, r *http.Request, dbConn *sql.DB, cfg *config.BackendConfig) {
+func handleReorderSubscriptionTemplates(w http.ResponseWriter, r *http.Request, dbConn *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req subscriptionTemplateReorderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -447,15 +446,6 @@ func handleReorderSubscriptionTemplates(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	tx, err := dbConn.BeginTx(r.Context(), nil)
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrReorderSubscriptionTemplatesFailed.WithCause(err), cfg)
-		return
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
 	uuids := make([]string, len(req.Items))
 	positions := make([]int32, len(req.Items))
 	for i, item := range req.Items {
@@ -463,19 +453,20 @@ func handleReorderSubscriptionTemplates(w http.ResponseWriter, r *http.Request, 
 		positions[i] = int32(item.ViewPosition)
 	}
 
-	if _, err := tx.ExecContext(r.Context(), `
-		UPDATE subscription_templates AS t
-		SET view_position = v.view_position
-		FROM (
-			SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
-		) AS v
-		WHERE t.uuid = v.uuid
-	`, uuids, positions); err != nil {
-		shared.SendAPIError(w, shared.ErrReorderSubscriptionTemplatesFailed.WithCause(err), cfg)
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
+	err := exodusdb.WithRetryTx(r.Context(), dbConn, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(), `
+			UPDATE subscription_templates AS t
+			SET view_position = v.view_position
+			FROM (
+				SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
+			) AS v
+			WHERE t.uuid = v.uuid
+		`, uuids, positions); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		shared.SendAPIError(w, shared.ErrReorderSubscriptionTemplatesFailed.WithCause(err), cfg)
 		return
 	}
@@ -495,7 +486,7 @@ func handleReorderSubscriptionTemplates(w http.ResponseWriter, r *http.Request, 
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /subscription-templates/tags [get]
 // @Router       /subscription-templates/tags [patch]
-func SubscriptionTemplateTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionTemplateTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -508,7 +499,7 @@ func SubscriptionTemplateTagsHandler(db *sql.DB, cfg *config.BackendConfig) http
 	}
 }
 
-func handleGetSubscriptionTemplateTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetSubscriptionTemplateTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	tags, err := getAllTags(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetAllSubTemplatesFailed.WithCause(err), cfg)
@@ -521,7 +512,7 @@ func handleGetSubscriptionTemplateTags(w http.ResponseWriter, r *http.Request, d
 	})
 }
 
-func handleSetSubscriptionTemplateTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleSetSubscriptionTemplateTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req shared.SetEntityTagsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -533,7 +524,7 @@ func handleSetSubscriptionTemplateTags(w http.ResponseWriter, r *http.Request, d
 	}
 
 	if err := setTags(r.Context(), db, req.UUID, req.Tags); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubTemplateNotFound, cfg)
 			return
 		}
@@ -550,8 +541,8 @@ func handleSetSubscriptionTemplateTags(w http.ResponseWriter, r *http.Request, d
 	})
 }
 
-func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func getAllTags(ctx context.Context, db *pgxpool.Pool) ([]string, error) {
+	rows, err := db.Query(ctx, `
 		SELECT DISTINCT unnest(tags) AS tag
 		FROM subscription_templates
 		WHERE tags IS NOT NULL AND cardinality(tags) > 0
@@ -575,9 +566,9 @@ func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
 	return tags, rows.Err()
 }
 
-func setTags(ctx context.Context, db *sql.DB, templateUUID string, tags []string) error {
+func setTags(ctx context.Context, db *pgxpool.Pool, templateUUID string, tags []string) error {
 	sanitized := shared.SanitizeTags(tags)
-	result, err := db.ExecContext(ctx, `
+	result, err := db.Exec(ctx, `
 		UPDATE subscription_templates
 		SET tags = $1::text[], updated_at = CURRENT_TIMESTAMP
 		WHERE uuid = $2
@@ -585,12 +576,8 @@ func setTags(ctx context.Context, db *sql.DB, templateUUID string, tags []string
 	if err != nil {
 		return err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return sql.ErrNoRows
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }

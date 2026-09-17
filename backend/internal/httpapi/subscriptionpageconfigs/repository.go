@@ -3,18 +3,18 @@ package subscriptionpageconfigs
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"exodus/internal/config"
-	"exodus/internal/db"
 	"exodus/internal/httpapi/shared"
 	"exodus/internal/notifications"
-	"exodus/internal/util"
 )
 
 const (
@@ -65,7 +65,7 @@ type subpageConfigCloneRequest struct {
 	CloneFromUUID string `json:"cloneFromUuid"`
 }
 
-func fetchSubscriptionPageConfig(ctx context.Context, dbConn *sql.DB, uuidStr string, withConfig bool) (SubscriptionPageConfig, error) {
+func fetchSubscriptionPageConfig(ctx context.Context, dbConn *pgxpool.Pool, uuidStr string, withConfig bool) (SubscriptionPageConfig, error) {
 	var cfgItem SubscriptionPageConfig
 	query := `
 		SELECT uuid, view_position, name, tags, created_at, updated_at
@@ -82,16 +82,16 @@ func fetchSubscriptionPageConfig(ctx context.Context, dbConn *sql.DB, uuidStr st
 		`
 	}
 
-	row := dbConn.QueryRowContext(ctx, query, uuidStr)
-	var viewPosition sql.NullInt64
-	var configStr sql.NullString
-	var tags db.StringArray
+	row := dbConn.QueryRow(ctx, query, uuidStr)
+	var viewPosition *int
+	var configStr *string
+	var tags []string
 	if withConfig {
 		if err := row.Scan(&cfgItem.UUID, &viewPosition, &cfgItem.Name, &tags, &configStr, &cfgItem.CreatedAt, &cfgItem.UpdatedAt); err != nil {
 			return cfgItem, err
 		}
-		if configStr.Valid {
-			cfgItem.Config = json.RawMessage(configStr.String)
+		if configStr != nil {
+			cfgItem.Config = json.RawMessage(*configStr)
 		}
 	} else {
 		if err := row.Scan(&cfgItem.UUID, &viewPosition, &cfgItem.Name, &tags, &cfgItem.CreatedAt, &cfgItem.UpdatedAt); err != nil {
@@ -99,10 +99,10 @@ func fetchSubscriptionPageConfig(ctx context.Context, dbConn *sql.DB, uuidStr st
 		}
 	}
 
-	if viewPosition.Valid {
-		cfgItem.ViewPosition = int(viewPosition.Int64)
+	if viewPosition != nil {
+		cfgItem.ViewPosition = *viewPosition
 	}
-	cfgItem.Tags = tags.Slice()
+	cfgItem.Tags = tags
 	if cfgItem.Tags == nil {
 		cfgItem.Tags = []string{}
 	}
@@ -132,18 +132,18 @@ func emitSubpageConfigChanged(ctx context.Context, cfg *config.BackendConfig, ac
 	})
 }
 
-func fetchDefaultSubpageConfig(ctx context.Context, db *sql.DB) (json.RawMessage, error) {
-	row := db.QueryRowContext(ctx, `SELECT config FROM subscription_page_config WHERE uuid = $1`, defaultSubpageConfigUUID)
-	var cfgStr sql.NullString
-	if err := row.Scan(&cfgStr); err == nil && cfgStr.Valid {
-		return json.RawMessage(cfgStr.String), nil
+func fetchDefaultSubpageConfig(ctx context.Context, db *pgxpool.Pool) (json.RawMessage, error) {
+	row := db.QueryRow(ctx, `SELECT config FROM subscription_page_config WHERE uuid = $1`, defaultSubpageConfigUUID)
+	var cfgStr *string
+	if err := row.Scan(&cfgStr); err == nil && cfgStr != nil {
+		return json.RawMessage(*cfgStr), nil
 	}
 
 	return json.RawMessage("{}"), nil
 }
 
-func getSubNodeUUIDsBySubpageConfigUUID(ctx context.Context, db *sql.DB, subpageConfigUUID string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func getSubNodeUUIDsBySubpageConfigUUID(ctx context.Context, db *pgxpool.Pool, subpageConfigUUID string) ([]string, error) {
+	rows, err := db.Query(ctx, `
 		SELECT node_uuid
 		FROM sub_nodes_to_subscription_page_config
 		WHERE subpage_config_uuid = $1
@@ -197,12 +197,8 @@ func randomSuffix(n int) string {
 	return string(buf)
 }
 
-func isUniqueNameError(err error) bool {
-	return util.IsUniqueViolation(err)
-}
-
-func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func getAllTags(ctx context.Context, db *pgxpool.Pool) ([]string, error) {
+	rows, err := db.Query(ctx, `
 		SELECT DISTINCT unnest(tags) AS tag
 		FROM subscription_page_config
 		WHERE tags IS NOT NULL AND cardinality(tags) > 0
@@ -226,9 +222,9 @@ func getAllTags(ctx context.Context, db *sql.DB) ([]string, error) {
 	return tags, rows.Err()
 }
 
-func setTags(ctx context.Context, db *sql.DB, configUUID string, tags []string) error {
+func setTags(ctx context.Context, db *pgxpool.Pool, configUUID string, tags []string) error {
 	sanitized := shared.SanitizeTags(tags)
-	result, err := db.ExecContext(ctx, `
+	result, err := db.Exec(ctx, `
 		UPDATE subscription_page_config
 		SET tags = $1::text[], updated_at = CURRENT_TIMESTAMP
 		WHERE uuid = $2
@@ -236,12 +232,8 @@ func setTags(ctx context.Context, db *sql.DB, configUUID string, tags []string) 
 	if err != nil {
 		return err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return sql.ErrNoRows
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }

@@ -1,12 +1,15 @@
 package subscription
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -23,7 +26,7 @@ import (
 // @Success      200    {object}  map[string]any
 // @Failure      500    {object}  shared.ErrorResponse
 // @Router       /subscriptions [get]
-func SubscriptionsHandler(db, backgroundDB *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionsHandler(db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	renderService := NewRenderService(db, backgroundDB, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -95,7 +98,7 @@ func SubscriptionsHandler(db, backgroundDB *sql.DB, cfg *config.BackendConfig) h
 // @Router       /subscriptions/by-short-uuid/{shortUuid} [get]
 // @Router       /subscriptions/by-username/{username} [get]
 // @Router       /subscriptions/connection-keys/{userId} [get]
-func SubscriptionByUUIDHandler(db, backgroundDB *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionByUUIDHandler(db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	renderService := NewRenderService(db, backgroundDB, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -147,7 +150,7 @@ func SubscriptionByUUIDHandler(db, backgroundDB *sql.DB, cfg *config.BackendConf
 			user, err = getSubscriptionUserByUUID(ctx, db, path)
 		}
 		if err != nil {
-			if errorsIsNoRows(err) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 				return
 			}
@@ -206,11 +209,11 @@ func SubscriptionByUUIDHandler(db, backgroundDB *sql.DB, cfg *config.BackendConf
 	}
 }
 
-func handleGetConnectionKeysByUserID(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, userID int64) {
+func handleGetConnectionKeysByUserID(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, userID int64) {
 	ctx := r.Context()
 	user, err := getSubscriptionUserByID(ctx, db, userID)
 	if err != nil {
-		if errorsIsNoRows(err) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrUserNotFound, cfg)
 			return
 		}
@@ -276,8 +279,4 @@ func handleGetConnectionKeysByUserID(w http.ResponseWriter, r *http.Request, db 
 			"disabledKeys": disabledKeys,
 		},
 	})
-}
-
-func errorsIsNoRows(err error) bool {
-	return err != nil && (err == sql.ErrNoRows || strings.Contains(err.Error(), "no rows in result set"))
 }

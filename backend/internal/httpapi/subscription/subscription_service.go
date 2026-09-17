@@ -11,7 +11,6 @@ CROSS-CUTTING RULES / НЕЯВНЫЕ ЗАВИСИМОСТИ:
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"exodus/internal/config"
 	"exodus/internal/httpapi/subscriptionresponserules"
 	"exodus/internal/httpapi/subscriptionsettings"
@@ -30,12 +31,12 @@ import (
 )
 
 type RenderService struct {
-	db           *sql.DB
-	backgroundDB *sql.DB
+	db           *pgxpool.Pool
+	backgroundDB *pgxpool.Pool
 	cfg          *config.BackendConfig
 }
 
-func NewRenderService(db, backgroundDB *sql.DB, cfg *config.BackendConfig) *RenderService {
+func NewRenderService(db, backgroundDB *pgxpool.Pool, cfg *config.BackendConfig) *RenderService {
 	return &RenderService{db: db, backgroundDB: backgroundDB, cfg: cfg}
 }
 

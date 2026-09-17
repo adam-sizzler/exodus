@@ -1,17 +1,20 @@
 package subscriptionpageconfigs
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"exodus/internal/config"
 	exodusdb "exodus/internal/db"
 	"exodus/internal/httpapi/shared"
 	monitor "exodus/internal/subscriptionnodes"
+	"exodus/internal/util"
 
 	"github.com/google/uuid"
 )
@@ -31,7 +34,7 @@ import (
 // @Router       /subscription-page-configs [get]
 // @Router       /subscription-page-configs [post]
 // @Router       /subscription-page-configs [patch]
-func SubscriptionPageConfigsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionPageConfigsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -59,7 +62,7 @@ func SubscriptionPageConfigsHandler(db *sql.DB, cfg *config.BackendConfig) http.
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /subscription-page-configs/actions/reorder [post]
 // @Router       /subscription-page-configs/actions/clone [post]
-func SubscriptionPageConfigsActionsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionPageConfigsActionsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -93,7 +96,7 @@ func SubscriptionPageConfigsActionsHandler(db *sql.DB, cfg *config.BackendConfig
 // @Failure      500   {object}  shared.ErrorResponse
 // @Router       /subscription-page-configs/{uuid} [get]
 // @Router       /subscription-page-configs/{uuid} [delete]
-func SubscriptionPageConfigByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionPageConfigByUUIDHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uuidStr := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, subpageConfigsBasePath+"/"))
 		if uuidStr == "" {
@@ -125,9 +128,9 @@ func SubscriptionPageConfigByUUIDHandler(db *sql.DB, cfg *config.BackendConfig) 
 	}
 }
 
-func handleGetSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	ctx := r.Context()
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT uuid, view_position, name, tags, created_at, updated_at
 		FROM subscription_page_config
 		ORDER BY view_position ASC
@@ -141,16 +144,16 @@ func handleGetSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request, db
 	configs := []SubscriptionPageConfig{}
 	for rows.Next() {
 		var cfgItem SubscriptionPageConfig
-		var viewPosition sql.NullInt64
-		var tags exodusdb.StringArray
+		var viewPosition *int
+		var tags []string
 		if err := rows.Scan(&cfgItem.UUID, &viewPosition, &cfgItem.Name, &tags, &cfgItem.CreatedAt, &cfgItem.UpdatedAt); err != nil {
 			shared.SendAPIError(w, shared.ErrGetAllSubpageConfigsFailed.WithCause(err), cfg)
 			return
 		}
-		if viewPosition.Valid {
-			cfgItem.ViewPosition = int(viewPosition.Int64)
+		if viewPosition != nil {
+			cfgItem.ViewPosition = *viewPosition
 		}
-		cfgItem.Tags = tags.Slice()
+		cfgItem.Tags = tags
 		if cfgItem.Tags == nil {
 			cfgItem.Tags = []string{}
 		}
@@ -169,11 +172,11 @@ func handleGetSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request, db
 	})
 }
 
-func handleGetSubscriptionPageConfigByUUID(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, uuidStr string) {
+func handleGetSubscriptionPageConfigByUUID(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, uuidStr string) {
 	ctx := r.Context()
 	cfgItem, err := fetchSubscriptionPageConfig(ctx, db, uuidStr, true)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubpageConfigNotFound, cfg)
 			return
 		}
@@ -186,7 +189,7 @@ func handleGetSubscriptionPageConfigByUUID(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func handleCreateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCreateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req subpageConfigCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -207,33 +210,33 @@ func handleCreateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, 
 
 	tags := shared.SanitizeTags(req.Tags)
 
-	row := db.QueryRowContext(ctx, `
+	row := db.QueryRow(ctx, `
 		INSERT INTO subscription_page_config (name, tags, config)
 		VALUES ($1, $2::text[], $3)
 		RETURNING uuid, view_position, name, tags, config, created_at, updated_at
 	`, name, shared.PostgresTextArrayLiteral(tags), string(defaultConfig))
 
 	var created SubscriptionPageConfig
-	var viewPosition sql.NullInt64
-	var configStr sql.NullString
-	var tagsArr exodusdb.StringArray
+	var viewPosition *int
+	var configStr *string
+	var tagsArr []string
 	if err := row.Scan(&created.UUID, &viewPosition, &created.Name, &tagsArr, &configStr, &created.CreatedAt, &created.UpdatedAt); err != nil {
-		if isUniqueNameError(err) {
+		if util.IsUniqueViolation(err) {
 			shared.SendAPIError(w, shared.ErrSubpageConfigNameAlreadyExists, cfg)
 			return
 		}
 		shared.SendAPIError(w, shared.ErrCreateSubpageConfigFailed.WithCause(err), cfg)
 		return
 	}
-	if viewPosition.Valid {
-		created.ViewPosition = int(viewPosition.Int64)
+	if viewPosition != nil {
+		created.ViewPosition = *viewPosition
 	}
-	created.Tags = tagsArr.Slice()
+	created.Tags = tagsArr
 	if created.Tags == nil {
 		created.Tags = []string{}
 	}
-	if configStr.Valid {
-		created.Config = json.RawMessage(configStr.String)
+	if configStr != nil {
+		created.Config = json.RawMessage(*configStr)
 	}
 
 	shared.WriteJSON(w, http.StatusCreated, map[string]any{
@@ -251,7 +254,7 @@ func handleCreateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, 
 	monitor.RequestSubNodeSubpageConfigPush(created.UUID, created.Config, targetNodeUUIDs...)
 }
 
-func handleUpdateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleUpdateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req subpageConfigUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -316,32 +319,32 @@ func handleUpdateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, 
 		RETURNING uuid, view_position, name, tags, config, created_at, updated_at
 	`, strings.Join(updates, ", "), idx)
 
-	row := db.QueryRowContext(ctx, query, args...)
+	row := db.QueryRow(ctx, query, args...)
 	var updated SubscriptionPageConfig
-	var viewPosition sql.NullInt64
-	var configStr sql.NullString
-	var tagsArr exodusdb.StringArray
+	var viewPosition *int
+	var configStr *string
+	var tagsArr []string
 	if err := row.Scan(&updated.UUID, &viewPosition, &updated.Name, &tagsArr, &configStr, &updated.CreatedAt, &updated.UpdatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubpageConfigNotFound, cfg)
 			return
 		}
-		if isUniqueNameError(err) {
+		if util.IsUniqueViolation(err) {
 			shared.SendAPIError(w, shared.ErrSubpageConfigNameAlreadyExists, cfg)
 			return
 		}
 		shared.SendAPIError(w, shared.ErrUpdateSubpageConfigFailed.WithCause(err), cfg)
 		return
 	}
-	if viewPosition.Valid {
-		updated.ViewPosition = int(viewPosition.Int64)
+	if viewPosition != nil {
+		updated.ViewPosition = *viewPosition
 	}
-	updated.Tags = tagsArr.Slice()
+	updated.Tags = tagsArr
 	if updated.Tags == nil {
 		updated.Tags = []string{}
 	}
-	if configStr.Valid {
-		updated.Config = json.RawMessage(configStr.String)
+	if configStr != nil {
+		updated.Config = json.RawMessage(*configStr)
 	}
 
 	shared.WriteJSON(w, http.StatusOK, map[string]any{
@@ -366,7 +369,7 @@ func handleUpdateSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, 
 	monitor.RequestSubNodeSubpageConfigPush(updated.UUID, updated.Config, targetNodeUUIDs...)
 }
 
-func handleDeleteSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig, uuidStr string) {
+func handleDeleteSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig, uuidStr string) {
 	if uuidStr == defaultSubpageConfigUUID {
 		shared.SendAPIError(w, shared.ErrReservedSubpageConfigCantBeDeleted, cfg)
 		return
@@ -379,17 +382,13 @@ func handleDeleteSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	result, err := db.ExecContext(ctx, `DELETE FROM subscription_page_config WHERE uuid = $1`, uuidStr)
+	result, err := db.Exec(ctx, `DELETE FROM subscription_page_config WHERE uuid = $1`, uuidStr)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrDeleteSubpageConfigFailed.WithCause(err), cfg)
 		return
 	}
 
-	rows, err := result.RowsAffected()
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrDeleteSubpageConfigFailed.WithCause(err), cfg)
-		return
-	}
+	rows := result.RowsAffected()
 	if rows == 0 {
 		shared.SendAPIError(w, shared.ErrSubpageConfigNotFound, cfg)
 		return
@@ -403,7 +402,7 @@ func handleDeleteSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, 
 	monitor.RequestSubNodeSubpageConfigPush(uuidStr, nil, targetNodeUUIDs...)
 }
 
-func handleReorderSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleReorderSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req subpageConfigReorderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -428,15 +427,6 @@ func handleReorderSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request
 	}
 
 	ctx := r.Context()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrReorderSubpageConfigsFailed.WithCause(err), cfg)
-		return
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
 	uuids := make([]string, len(req.Items))
 	positions := make([]int32, len(req.Items))
 	for i, item := range req.Items {
@@ -444,22 +434,23 @@ func handleReorderSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request
 		positions[i] = int32(item.ViewPosition)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE subscription_page_config AS c
-		SET view_position = v.view_position
-		FROM (
-			SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
-		) AS v
-		WHERE c.uuid = v.uuid
-	`, uuids, positions); err != nil {
-		shared.SendAPIError(w, shared.ErrReorderSubpageConfigsFailed.WithCause(err), cfg)
-		return
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT setval('subscription_page_config_view_position_seq', (SELECT COALESCE(MAX(view_position), 0) FROM subscription_page_config) + 1)`); err != nil {
-		shared.SendAPIError(w, shared.ErrReorderSubpageConfigsFailed.WithCause(err), cfg)
-		return
-	}
-	if err := tx.Commit(); err != nil {
+	err := exodusdb.WithRetryTx(ctx, db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE subscription_page_config AS c
+			SET view_position = v.view_position
+			FROM (
+				SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
+			) AS v
+			WHERE c.uuid = v.uuid
+		`, uuids, positions); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT setval('subscription_page_config_view_position_seq', (SELECT COALESCE(MAX(view_position), 0) FROM subscription_page_config) + 1)`); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		shared.SendAPIError(w, shared.ErrReorderSubpageConfigsFailed.WithCause(err), cfg)
 		return
 	}
@@ -468,7 +459,7 @@ func handleReorderSubscriptionPageConfigs(w http.ResponseWriter, r *http.Request
 	handleGetSubscriptionPageConfigs(w, r, db, cfg)
 }
 
-func handleCloneSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleCloneSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req subpageConfigCloneRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -481,49 +472,49 @@ func handleCloneSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, d
 
 	ctx := r.Context()
 	var cfgItem SubscriptionPageConfig
-	row := db.QueryRowContext(ctx, `
+	row := db.QueryRow(ctx, `
 		SELECT uuid, view_position, name, config, created_at, updated_at
 		FROM subscription_page_config
 		WHERE uuid = $1
 		LIMIT 1
 	`, req.CloneFromUUID)
 
-	var viewPosition sql.NullInt64
-	var configStr sql.NullString
+	var viewPosition *int
+	var configStr *string
 	if err := row.Scan(&cfgItem.UUID, &viewPosition, &cfgItem.Name, &configStr, &cfgItem.CreatedAt, &cfgItem.UpdatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubpageConfigNotFound, cfg)
 			return
 		}
 		shared.SendAPIError(w, shared.ErrCloneSubpageConfigFailed.WithCause(err), cfg)
 		return
 	}
-	if viewPosition.Valid {
-		cfgItem.ViewPosition = int(viewPosition.Int64)
+	if viewPosition != nil {
+		cfgItem.ViewPosition = *viewPosition
 	}
-	if configStr.Valid {
-		cfgItem.Config = json.RawMessage(configStr.String)
+	if configStr != nil {
+		cfgItem.Config = json.RawMessage(*configStr)
 	}
 
 	cloneName := fmt.Sprintf("Clone %s", randomSuffix(5))
-	insertRow := db.QueryRowContext(ctx, `
+	insertRow := db.QueryRow(ctx, `
 		INSERT INTO subscription_page_config (name, config)
 		VALUES ($1, $2)
 		RETURNING uuid, view_position, name, config, created_at, updated_at
 	`, cloneName, string(cfgItem.Config))
 
 	var created SubscriptionPageConfig
-	var insertViewPosition sql.NullInt64
-	var insertConfigStr sql.NullString
+	var insertViewPosition *int
+	var insertConfigStr *string
 	if err := insertRow.Scan(&created.UUID, &insertViewPosition, &created.Name, &insertConfigStr, &created.CreatedAt, &created.UpdatedAt); err != nil {
 		shared.SendAPIError(w, shared.ErrCloneSubpageConfigFailed.WithCause(err), cfg)
 		return
 	}
-	if insertViewPosition.Valid {
-		created.ViewPosition = int(insertViewPosition.Int64)
+	if insertViewPosition != nil {
+		created.ViewPosition = *insertViewPosition
 	}
-	if insertConfigStr.Valid {
-		created.Config = json.RawMessage(insertConfigStr.String)
+	if insertConfigStr != nil {
+		created.Config = json.RawMessage(*insertConfigStr)
 	}
 
 	shared.WriteJSON(w, http.StatusOK, map[string]any{
@@ -553,7 +544,7 @@ func handleCloneSubscriptionPageConfig(w http.ResponseWriter, r *http.Request, d
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /subscription-page-configs/tags [get]
 // @Router       /subscription-page-configs/tags [patch]
-func SubscriptionPageConfigsTagsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionPageConfigsTagsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -566,7 +557,7 @@ func SubscriptionPageConfigsTagsHandler(db *sql.DB, cfg *config.BackendConfig) h
 	}
 }
 
-func handleGetSubscriptionPageConfigTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleGetSubscriptionPageConfigTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	tags, err := getAllTags(r.Context(), db)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetAllSubpageConfigsFailed.WithCause(err), cfg)
@@ -579,7 +570,7 @@ func handleGetSubscriptionPageConfigTags(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func handleSetSubscriptionPageConfigTags(w http.ResponseWriter, r *http.Request, db *sql.DB, cfg *config.BackendConfig) {
+func handleSetSubscriptionPageConfigTags(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req shared.SetEntityTagsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -591,7 +582,7 @@ func handleSetSubscriptionPageConfigTags(w http.ResponseWriter, r *http.Request,
 	}
 
 	if err := setTags(r.Context(), db, req.UUID, req.Tags); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			shared.SendAPIError(w, shared.ErrSubpageConfigNotFound, cfg)
 			return
 		}

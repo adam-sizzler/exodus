@@ -2,7 +2,6 @@ package hwiduserdevices
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,7 +115,7 @@ type tableSorting struct {
 // @Router       /hwid/devices/{userId} [get]
 // @Router       /hwid/devices [post]
 // @Router       /hwid/devices/delete [post]
-func HWIDCompatDevicesHandler(db *pgxpool.Pool, sqlDB *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func HWIDCompatDevicesHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/hwid/devices"), "/")
 
@@ -130,7 +129,7 @@ func HWIDCompatDevicesHandler(db *pgxpool.Pool, sqlDB *sql.DB, cfg *config.Backe
 		}
 
 		if r.Method == http.MethodPost && path == "" {
-			handleHWIDCompatCreateUserDevice(w, r, db, sqlDB, cfg)
+			handleHWIDCompatCreateUserDevice(w, r, db, cfg)
 			return
 		}
 
@@ -184,7 +183,7 @@ func handleHWIDCompatGetUserDevices(w http.ResponseWriter, r *http.Request, db *
 	})
 }
 
-func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, sqlDB *sql.DB, cfg *config.BackendConfig) {
+func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cfg *config.BackendConfig) {
 	var req createUserHWIDDeviceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON", err, cfg)
@@ -226,7 +225,7 @@ func handleHWIDCompatCreateUserDevice(w http.ResponseWriter, r *http.Request, db
 		return
 	}
 
-	renderService := subscription.NewRenderService(sqlDB, sqlDB, cfg)
+	renderService := subscription.NewRenderService(db, db, cfg)
 	settings, err := renderService.LoadSubscriptionSettings(ctx)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetSubscriptionSettingsFailed.WithCause(err), cfg)

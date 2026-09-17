@@ -1,13 +1,14 @@
 package subscriptionrequesthistory
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/shared"
@@ -46,7 +47,7 @@ type tableSorting struct {
 // @Success      200      {object}  map[string]any
 // @Failure      500      {object}  shared.ErrorResponse
 // @Router       /subscription-request-history [get]
-func SubscriptionRequestHistoryHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionRequestHistoryHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -69,7 +70,7 @@ func SubscriptionRequestHistoryHandler(db *sql.DB, cfg *config.BackendConfig) ht
 
 		total := 0
 		countQuery := `SELECT COUNT(*) FROM user_subscription_request_history` + whereSQL
-		if err := db.QueryRowContext(r.Context(), countQuery, whereArgs...).Scan(&total); err != nil {
+		if err := db.QueryRow(r.Context(), countQuery, whereArgs...).Scan(&total); err != nil {
 			shared.SendAPIError(w, shared.ErrGetSubscriptionRequestHistoryFailed.WithCause(err), cfg)
 			return
 		}
@@ -80,7 +81,7 @@ func SubscriptionRequestHistoryHandler(db *sql.DB, cfg *config.BackendConfig) ht
 			FROM user_subscription_request_history
 		`+whereSQL+orderSQL+` OFFSET $%d LIMIT $%d`, len(whereArgs)+1, len(whereArgs)+2)
 
-		rows, err := db.QueryContext(r.Context(), query, args...)
+		rows, err := db.Query(r.Context(), query, args...)
 		if err != nil {
 			shared.SendAPIError(w, shared.ErrGetSubscriptionRequestHistoryFailed.WithCause(err), cfg)
 			return
@@ -90,13 +91,13 @@ func SubscriptionRequestHistoryHandler(db *sql.DB, cfg *config.BackendConfig) ht
 		records := make([]historyRecord, 0)
 		for rows.Next() {
 			var item historyRecord
-			var requestAt sql.NullTime
+			var requestAt *time.Time
 			if scanErr := rows.Scan(&item.ID, &item.UserID, &item.SRRResponseType, &item.SRRRuleName, &item.RequestIP, &item.UserAgent, &requestAt); scanErr != nil {
 				shared.SendAPIError(w, shared.ErrGetSubscriptionRequestHistoryFailed.WithCause(scanErr), cfg)
 				return
 			}
-			if requestAt.Valid {
-				item.RequestAt = requestAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")
+			if requestAt != nil {
+				item.RequestAt = requestAt.UTC().Format("2006-01-02T15:04:05.000Z")
 			}
 			records = append(records, item)
 		}
@@ -123,7 +124,7 @@ func SubscriptionRequestHistoryHandler(db *sql.DB, cfg *config.BackendConfig) ht
 // @Success      200  {object}  map[string]any
 // @Failure      500  {object}  shared.ErrorResponse
 // @Router       /subscription-request-history/stats [get]
-func SubscriptionRequestHistoryStatsHandler(db *sql.DB, cfg *config.BackendConfig) http.HandlerFunc {
+func SubscriptionRequestHistoryStatsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -131,7 +132,7 @@ func SubscriptionRequestHistoryStatsHandler(db *sql.DB, cfg *config.BackendConfi
 		}
 
 		byParsedApp := make([]map[string]any, 0)
-		rows, err := db.QueryContext(r.Context(), `
+		rows, err := db.Query(r.Context(), `
 			SELECT
 				COALESCE(NULLIF(SPLIT_PART(COALESCE(user_agent, ''), '/', 1), ''), 'Unknown') AS app,
 				COUNT(*) AS count
@@ -160,7 +161,7 @@ func SubscriptionRequestHistoryStatsHandler(db *sql.DB, cfg *config.BackendConfi
 		}
 
 		hourly := make([]map[string]any, 0)
-		rows2, err := db.QueryContext(r.Context(), `
+		rows2, err := db.Query(r.Context(), `
 			SELECT date_trunc('hour', request_at) AS date_time, COUNT(*) AS request_count
 			FROM user_subscription_request_history
 			WHERE request_at >= NOW() - INTERVAL '48 hours'

@@ -2,10 +2,11 @@ package subscription
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/util"
 )
@@ -351,7 +352,7 @@ type UserTrafficDTO struct {
 
 func buildRawSubscriptionResponse(
 	ctx context.Context,
-	db *sql.DB,
+	db *pgxpool.Pool,
 	user SubscriptionUser,
 	settings SubscriptionSettingsParsed,
 	hosts []SubscriptionHost,
@@ -359,7 +360,7 @@ func buildRawSubscriptionResponse(
 ) RawSubscriptionResponse {
 	activeSquads := []InternalSquadDTO{}
 	if db != nil {
-		rows, err := db.QueryContext(ctx, `
+		rows, err := db.Query(ctx, `
 			SELECT isq.uuid, isq.name
 			FROM internal_squads isq
 			JOIN user_internal_squads uis ON uis.internal_squad_uuid = isq.uuid

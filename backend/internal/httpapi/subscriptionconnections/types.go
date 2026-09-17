@@ -1,15 +1,16 @@
 package subscriptionconnections
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 var (
 	errNoEnabledNodes = errors.New("enabled nodes not found")
-	errNodeNotFound   = sql.ErrNoRows
+	errNodeNotFound   = pgx.ErrNoRows
 )
 
 type OptionalString struct {

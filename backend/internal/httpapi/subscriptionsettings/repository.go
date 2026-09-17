@@ -1,7 +1,6 @@
 package subscriptionsettings
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -119,11 +118,11 @@ func (s SubscriptionSettings) ProfileUpdateIntervalValue() int {
 func ScanSubscriptionSettings(scanner shared.RowScanner) (SubscriptionSettings, error) {
 	var s SubscriptionSettings
 	var (
-		address, apiSchema, apiPath, customHeaders sql.NullString
-		responseRules, hwidSettings, customRemarks sql.NullString
-		port                                       sql.NullInt64
-		serveJSONAtBase                            sql.NullBool
-		isShowCustomRemarks, randomizeHosts        sql.NullBool
+		address, apiSchema, apiPath, customHeaders *string
+		responseRules, hwidSettings, customRemarks *string
+		port                                       *int
+		serveJSONAtBase                            *bool
+		isShowCustomRemarks, randomizeHosts        *bool
 	)
 
 	err := scanner.Scan(
@@ -146,38 +145,38 @@ func ScanSubscriptionSettings(scanner shared.RowScanner) (SubscriptionSettings, 
 		return s, err
 	}
 
-	if address.Valid {
-		s.Address = address.String
+	if address != nil {
+		s.Address = *address
 	}
-	if port.Valid {
-		s.Port = int(port.Int64)
+	if port != nil {
+		s.Port = *port
 	}
-	if apiSchema.Valid {
-		s.APISchema = apiSchema.String
+	if apiSchema != nil {
+		s.APISchema = *apiSchema
 	}
-	if apiPath.Valid {
-		s.APIPath = apiPath.String
+	if apiPath != nil {
+		s.APIPath = *apiPath
 	}
-	if serveJSONAtBase.Valid {
-		s.ServeJSONAtBaseSubscription = serveJSONAtBase.Bool
+	if serveJSONAtBase != nil {
+		s.ServeJSONAtBaseSubscription = *serveJSONAtBase
 	}
-	if isShowCustomRemarks.Valid {
-		s.IsShowCustomRemarks = isShowCustomRemarks.Bool
+	if isShowCustomRemarks != nil {
+		s.IsShowCustomRemarks = *isShowCustomRemarks
 	}
-	if customRemarks.Valid {
-		s.CustomRemarks = customRemarks.String
+	if customRemarks != nil {
+		s.CustomRemarks = *customRemarks
 	}
-	if customHeaders.Valid {
-		s.CustomResponseHeaders = customHeaders.String
+	if customHeaders != nil {
+		s.CustomResponseHeaders = *customHeaders
 	}
-	if randomizeHosts.Valid {
-		s.RandomizeHosts = randomizeHosts.Bool
+	if randomizeHosts != nil {
+		s.RandomizeHosts = *randomizeHosts
 	}
-	if responseRules.Valid {
-		s.ResponseRules = responseRules.String
+	if responseRules != nil {
+		s.ResponseRules = *responseRules
 	}
-	if hwidSettings.Valid {
-		s.HWIDSettings = hwidSettings.String
+	if hwidSettings != nil {
+		s.HWIDSettings = *hwidSettings
 	}
 
 	// Default fallback values

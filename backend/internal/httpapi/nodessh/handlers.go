@@ -3,7 +3,6 @@ package nodessh
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	"exodus/internal/config"
-	"exodus/internal/db"
 	"exodus/internal/httpapi/auth"
 	"exodus/internal/httpapi/middleware"
 	"exodus/internal/httpapi/shared"
@@ -114,7 +112,7 @@ func extractNodeUUID(path string) string {
 
 // NodeSSHTicketHandler issues a one-time 15-second ticket for SSH web terminal.
 // POST /api/node-ssh/:uuid/ticket  or  /api/node-ssh/tickets/:uuid
-func NodeSSHTicketHandler(dbConn any, cfg *config.BackendConfig) http.HandlerFunc {
+func NodeSSHTicketHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return auth.RequireAdminRole(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -137,19 +135,9 @@ func NodeSSHTicketHandler(dbConn any, cfg *config.BackendConfig) http.HandlerFun
 
 		// Verify node exists
 		var exists int
-		var err error
-		switch d := dbConn.(type) {
-		case *pgxpool.Pool:
-			err = d.QueryRow(r.Context(), `SELECT 1 FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&exists)
-		case db.DBTX:
-			err = d.QueryRow(r.Context(), `SELECT 1 FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&exists)
-		case *sql.DB:
-			err = d.QueryRowContext(r.Context(), `SELECT 1 FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&exists)
-		default:
-			err = fmt.Errorf("unsupported db connection type: %T", dbConn)
-		}
+		err := db.QueryRow(r.Context(), `SELECT 1 FROM nodes WHERE uuid = $1`, nodeUUID).Scan(&exists)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				shared.SendAPIError(w, shared.ErrNodeNotFound, cfg)
 				return
 			}
@@ -288,7 +276,7 @@ func (l *vaultRateLimiter) allow(ctx context.Context, adminUUID string, cfg *con
 
 // NodeSSHVaultEvaluateHandler handles OPRF evaluation of blinded elements.
 // POST /api/node-ssh/vault/evaluate
-func NodeSSHVaultEvaluateHandler(dbConn any, cfg *config.BackendConfig) http.HandlerFunc {
+func NodeSSHVaultEvaluateHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return auth.RequireAdminRole(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			shared.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -347,10 +335,10 @@ func NodeSSHVaultEvaluateHandler(dbConn any, cfg *config.BackendConfig) http.Han
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
 
 // NodeSSHDispatcherHandler dispatches all /api/node-ssh/ requests.
-func NodeSSHDispatcherHandler(dbConn any, cfg *config.BackendConfig) http.HandlerFunc {
-	ticketHandler := NodeSSHTicketHandler(dbConn, cfg)
-	vaultHandler := NodeSSHVaultEvaluateHandler(dbConn, cfg)
-	wsHandler := NodeSSHWSHandler(dbConn, cfg)
+func NodeSSHDispatcherHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
+	ticketHandler := NodeSSHTicketHandler(db, cfg)
+	vaultHandler := NodeSSHVaultEvaluateHandler(db, cfg)
+	wsHandler := NodeSSHWSHandler(db, cfg)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path

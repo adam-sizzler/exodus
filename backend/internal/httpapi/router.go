@@ -40,6 +40,8 @@ import (
 	"exodus/internal/httpapi/system"
 	"exodus/internal/httpapi/users"
 	"exodus/internal/jobqueue"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func NewAPIHandler(pools *db.Pools, cfg *config.BackendConfig) http.Handler {
@@ -51,12 +53,12 @@ func NewAPIHandler(pools *db.Pools, cfg *config.BackendConfig) http.Handler {
 
 	// 1. Public routes (unprotected) with optional auth parsing
 	publicMux := http.NewServeMux()
-	RegisterPublicRoutes(publicMux, pools.Interactive, pools.Background, cfg)
+	RegisterPublicRoutes(publicMux, pools.Interactive, pools.Background, pools.PgxInteractive, cfg)
 	publicHandler := auth.WithOptionalPanelAuth(pools.Interactive, cfg, publicMux)
 
 	// 2. Protected routes with strict Auth enforcement
 	protectedMux := http.NewServeMux()
-	RegisterProtectedRoutes(protectedMux, pools.Interactive, pools.Background, cfg, routeCounter)
+	RegisterProtectedRoutes(protectedMux, pools.Interactive, pools.Background, pools.PgxInteractive, cfg, routeCounter)
 	protectedHandler := auth.WithPanelAuth(pools.Interactive, cfg, protectedMux)
 
 	// Mount protected routes under /api/ first, then fall back to public routes / mainMux
@@ -114,8 +116,8 @@ func isPublicPath(path string, cfg *config.BackendConfig) bool {
 	return false
 }
 
-func RegisterPublicRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, cfg *config.BackendConfig) {
-	mux.HandleFunc("/api/node-ssh/ws", nodessh.NodeSSHWSHandler(db, cfg))
+func RegisterPublicRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB *pgxpool.Pool, cfg *config.BackendConfig) {
+	mux.HandleFunc("/api/node-ssh/ws", nodessh.NodeSSHWSHandler(pgxDB, cfg))
 	if cfg != nil && cfg.Logger != nil {
 		wsPath := "/api/node-ssh/ws"
 		if cfg.Backend.IsCustom() {
@@ -164,7 +166,7 @@ func RegisterPublicRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, cfg *con
 	mux.HandleFunc("/api/health", health.HealthHandler())
 }
 
-func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, cfg *config.BackendConfig, routeCounter *system.RouteCounter) {
+func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB *pgxpool.Pool, cfg *config.BackendConfig, routeCounter *system.RouteCounter) {
 	mux.HandleFunc("/api/auth/logout", auth.AuthLogoutHandler(db, cfg))
 	mux.HandleFunc("/api/auth/me", auth.AuthMeHandler(db, cfg))
 
@@ -187,11 +189,11 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, cfg *
 	mux.HandleFunc("/api/node-integrations", nodeintegrations.Handler(db, cfg))
 	mux.HandleFunc("/api/node-integrations/", nodeintegrations.Handler(db, cfg))
 	mux.HandleFunc("/api/connections/", connections.Handler(db, cfg))
-	mux.HandleFunc("/api/node-ssh/", nodessh.NodeSSHDispatcherHandler(db, cfg))
-	mux.HandleFunc("/api/node-ssh", nodessh.NodeSSHDispatcherHandler(db, cfg))
-	mux.HandleFunc("/api/node-ssh/tickets/", nodessh.NodeSSHTicketHandler(db, cfg))
-	mux.HandleFunc("/api/node-ssh/tickets", nodessh.NodeSSHTicketHandler(db, cfg))
-	mux.HandleFunc("/api/node-ssh/vault/evaluate", nodessh.NodeSSHVaultEvaluateHandler(db, cfg))
+	mux.HandleFunc("/api/node-ssh/", nodessh.NodeSSHDispatcherHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-ssh", nodessh.NodeSSHDispatcherHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-ssh/tickets/", nodessh.NodeSSHTicketHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-ssh/tickets", nodessh.NodeSSHTicketHandler(pgxDB, cfg))
+	mux.HandleFunc("/api/node-ssh/vault/evaluate", nodessh.NodeSSHVaultEvaluateHandler(pgxDB, cfg))
 	// /api/node-ssh/ws is registered in the public mux (isPublicPath) — no duplicate here (#12)
 
 	mux.HandleFunc("/api/metadata/user/", auth.RequireAdminRole(metadata.UserHandler(db, cfg)))
@@ -301,10 +303,10 @@ func RegisterProtectedRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, cfg *
 	mux.Handle("/api/", http.NotFoundHandler())
 }
 
-func RegisterRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, cfg *config.BackendConfig) {
+func RegisterRoutes(mux *http.ServeMux, db, backgroundDB *sql.DB, pgxDB *pgxpool.Pool, cfg *config.BackendConfig) {
 	redisClient, _ := jobqueue.NewRedisClient(cfg)
 	routeCounter := system.NewRouteCounter(redisClient, cfg)
 	routeCounter.Start(context.Background())
-	RegisterPublicRoutes(mux, db, backgroundDB, cfg)
-	RegisterProtectedRoutes(mux, db, backgroundDB, cfg, routeCounter)
+	RegisterPublicRoutes(mux, db, backgroundDB, pgxDB, cfg)
+	RegisterProtectedRoutes(mux, db, backgroundDB, pgxDB, cfg, routeCounter)
 }

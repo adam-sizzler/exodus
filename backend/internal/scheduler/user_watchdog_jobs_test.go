@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,3 +163,54 @@ func TestMultiplierOverflowSafety(t *testing.T) {
 		t.Fatalf("extreme usage multiplier overflowed to non-positive: %d", extremeScaled)
 	}
 }
+
+func TestSkipOverlappingJobRuns(t *testing.T) {
+	l, _ := logger.NewLogger("debug", "UTC", io.Discard)
+	s := &Scheduler{
+		cfg: &config.BackendConfig{
+			Logger: l,
+		},
+	}
+
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var executions int
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runJob(context.Background(), "testJob", func(ctx context.Context) error {
+			executions++
+			close(started)
+			<-unblock
+			return nil
+		})
+	}()
+
+	<-started
+
+	// Second concurrent job execution should be skipped
+	s.runJob(context.Background(), "testJob", func(ctx context.Context) error {
+		executions++
+		return nil
+	})
+
+	close(unblock)
+	wg.Wait()
+
+	if executions != 1 {
+		t.Fatalf("expected exactly 1 execution (overlapping skipped), got %d", executions)
+	}
+
+	// After first job finishes completely, running it again should work
+	s.runJob(context.Background(), "testJob", func(ctx context.Context) error {
+		executions++
+		return nil
+	})
+
+	if executions != 2 {
+		t.Fatalf("expected 2 executions after completion, got %d", executions)
+	}
+}
+

@@ -19,6 +19,7 @@ type Scheduler struct {
 	cron                *cron.Cron
 	mu                  sync.Mutex
 	nodeTrafficNotified map[string]bool
+	runningJobs         sync.Map
 }
 
 func Start(ctx context.Context, wg *sync.WaitGroup, db *pgxpool.Pool, cfg *config.BackendConfig) {
@@ -26,7 +27,7 @@ func Start(ctx context.Context, wg *sync.WaitGroup, db *pgxpool.Pool, cfg *confi
 		return
 	}
 
-	c := cron.New(cron.WithLocation(time.Local))
+	c := cron.New(cron.WithLocation(time.Local), cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
 
 	s := &Scheduler{
 		db:                  db,
@@ -144,12 +145,24 @@ func (s *Scheduler) runJob(ctx context.Context, name string, fn func(context.Con
 	if ctx.Err() != nil {
 		return
 	}
-	start := time.Now()
-	if err := fn(ctx); err != nil {
-		s.cfg.Logger.RoleService(logger.RoleScheduler, logger.ServiceJobs).Warn("Scheduler job failed", "job", name, "error", err, "duration", time.Since(start).String())
+	if _, loaded := s.runningJobs.LoadOrStore(name, struct{}{}); loaded {
+		if s.cfg != nil && s.cfg.Logger != nil {
+			s.cfg.Logger.RoleService(logger.RoleScheduler, logger.ServiceJobs).Debug("Skipping overlapping job run", "job", name)
+		}
 		return
 	}
-	s.cfg.Logger.RoleService(logger.RoleScheduler, logger.ServiceJobs).Debug("Scheduler job completed", "job", name, "duration", time.Since(start).String())
+	defer s.runningJobs.Delete(name)
+
+	start := time.Now()
+	if err := fn(ctx); err != nil {
+		if s.cfg != nil && s.cfg.Logger != nil {
+			s.cfg.Logger.RoleService(logger.RoleScheduler, logger.ServiceJobs).Warn("Scheduler job failed", "job", name, "error", err, "duration", time.Since(start).String())
+		}
+		return
+	}
+	if s.cfg != nil && s.cfg.Logger != nil {
+		s.cfg.Logger.RoleService(logger.RoleScheduler, logger.ServiceJobs).Debug("Scheduler job completed", "job", name, "duration", time.Since(start).String())
+	}
 }
 
 func startOfDay(t time.Time) time.Time {

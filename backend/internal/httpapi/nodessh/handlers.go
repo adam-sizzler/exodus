@@ -203,7 +203,7 @@ var globalVaultRateLimiter = &vaultRateLimiter{
 func (l *vaultRateLimiter) getRedis(cfg *config.BackendConfig) *redis.Client {
 	l.once.Do(func() {
 		if cfg != nil {
-			client, err := jobqueue.NewRedisClient(cfg)
+			client, err := jobqueue.GetSharedRedisClient(cfg)
 			if err == nil {
 				l.redis = client
 			}

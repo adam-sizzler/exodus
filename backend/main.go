@@ -121,14 +121,21 @@ func main() {
 	subNodeMonitor := subscriptionnodes.NewSubNodeMonitor(pools.PgxBackground, &cfg)
 	subscriptionnodes.RegisterGlobalSubNodeMonitor(subNodeMonitor)
 
-	redisWorker, err := redisqueue.NewWorker(&cfg, pools.PgxBackground)
+	sharedRedisClient, err := jobqueue.GetSharedRedisClient(&cfg)
+	var redisWorker *redisqueue.Worker
 	redisStatus := "Disabled"
 	if err != nil {
-		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceRedis).Warn("Redis worker disabled", "error", err)
-	} else if redisWorker != nil {
+		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceRedis).Warn("Redis connection failed", "error", err)
+	} else if sharedRedisClient != nil {
 		redisStatus = "Connected"
 		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceRedis).Info("Connected to Redis")
-		nodeMonitor.SetNodeUserUsageRecorder(redisWorker)
+		worker, err := redisqueue.NewWorkerWithClient(sharedRedisClient, &cfg, pools.PgxBackground)
+		if err != nil {
+			cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceRedis).Warn("Redis worker initialization failed", "error", err)
+		} else {
+			redisWorker = worker
+			nodeMonitor.SetNodeUserUsageRecorder(redisWorker)
+		}
 	} else {
 		cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceRedis).Warn("Redis disabled: REDIS_HOST or REDIS_SOCKET is not configured")
 	}
@@ -220,6 +227,10 @@ func main() {
 		if err := redisWorker.Close(); err != nil {
 			cfg.Logger.Warn("Failed to close redis worker", "error", err)
 		}
+	}
+
+	if err := jobqueue.CloseSharedRedisClient(); err != nil {
+		cfg.Logger.Warn("Failed to close shared redis client", "error", err)
 	}
 
 	cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceBootstrap).Info("Program terminated")

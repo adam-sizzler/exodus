@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/time/rate"
 
 	"exodus/internal/config"
@@ -47,9 +48,17 @@ func NewWorker(cfg *config.BackendConfig) (*Worker, error) {
 		return nil, fmt.Errorf("config is nil")
 	}
 
-	client, err := jobqueue.NewRedisClient(cfg)
+	client, err := jobqueue.GetSharedRedisClient(cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	return NewWorkerWithClient(client, cfg)
+}
+
+func NewWorkerWithClient(client *redis.Client, cfg *config.BackendConfig) (*Worker, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
 	}
 
 	processor := jobqueue.NewProcessor(client, cfg)
@@ -65,7 +74,7 @@ func NewWorker(cfg *config.BackendConfig) (*Worker, error) {
 	// an inline retry inside sendWebhook (see notifier.go), mirroring
 	// upstream's rxjs retry({count: 3, delay: 5000}) — safe because webhook
 	// receivers are expected to tolerate at-least-once delivery.
-	err = processor.RegisterQueue(jobqueue.QueueOptions{
+	err := processor.RegisterQueue(jobqueue.QueueOptions{
 		Name:              webhookQueueName,
 		Concurrency:       100,
 		VisibilityTimeout: 10 * time.Minute,

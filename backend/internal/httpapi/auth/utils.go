@@ -39,7 +39,7 @@ var globalAuthRateLimiter = &AuthRateLimiter{
 func (l *AuthRateLimiter) getRedis(cfg *config.BackendConfig) *redis.Client {
 	l.redisOnce.Do(func() {
 		if cfg != nil {
-			client, err := jobqueue.NewRedisClient(cfg)
+			client, err := jobqueue.GetSharedRedisClient(cfg)
 			if err == nil {
 				l.redis = client
 			}

@@ -68,7 +68,7 @@ func Default(cfg *config.BackendConfig) *Cache {
 		return nil
 	}
 
-	client, err := jobqueue.NewRedisClient(cfg)
+	client, err := jobqueue.GetSharedRedisClient(cfg)
 	if err != nil || client == nil {
 		// Logged, not just swallowed: node system stats (rx/tx speed,
 		// uptime, users online, versions) live only in Redis, so if this

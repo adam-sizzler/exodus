@@ -44,7 +44,7 @@ import (
 )
 
 func NewAPIHandler(pools *db.Pools, cfg *config.BackendConfig) http.Handler {
-	redisClient, _ := jobqueue.NewRedisClient(cfg)
+	redisClient, _ := jobqueue.GetSharedRedisClient(cfg)
 	routeCounter := system.NewRouteCounter(redisClient, cfg)
 	routeCounter.Start(context.Background())
 
@@ -303,7 +303,7 @@ func RegisterProtectedRoutes(mux *http.ServeMux, pgxDB *pgxpool.Pool, cfg *confi
 }
 
 func RegisterRoutes(mux *http.ServeMux, pgxDB *pgxpool.Pool, cfg *config.BackendConfig) {
-	redisClient, _ := jobqueue.NewRedisClient(cfg)
+	redisClient, _ := jobqueue.GetSharedRedisClient(cfg)
 	routeCounter := system.NewRouteCounter(redisClient, cfg)
 	routeCounter.Start(context.Background())
 	RegisterPublicRoutes(mux, pgxDB, cfg)

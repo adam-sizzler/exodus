@@ -3,12 +3,15 @@ package jobqueue
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
 	"exodus/internal/config"
 	"exodus/internal/db"
 	"exodus/internal/logger"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -36,9 +39,16 @@ var (
 )
 
 func StartUserEventsQueue(ctx context.Context, wg *sync.WaitGroup, dbConn db.DBTX, cfg *config.BackendConfig, notifier UserEventNotifier) (*Processor, error) {
-	client, err := NewRedisClient(cfg)
+	client, err := GetSharedRedisClient(cfg)
 	if err != nil || client == nil {
 		return nil, err
+	}
+	return StartUserEventsQueueWithClient(ctx, wg, dbConn, cfg, client, notifier)
+}
+
+func StartUserEventsQueueWithClient(ctx context.Context, wg *sync.WaitGroup, dbConn db.DBTX, cfg *config.BackendConfig, client *redis.Client, notifier UserEventNotifier) (*Processor, error) {
+	if client == nil {
+		return nil, fmt.Errorf("redis client is nil")
 	}
 
 	processor := NewProcessor(client, cfg)
@@ -62,7 +72,6 @@ func StartUserEventsQueue(ctx context.Context, wg *sync.WaitGroup, dbConn db.DBT
 			return handleFireUserEvent(ctx, dbConn, cfg, notifier, payload)
 		},
 	}); err != nil {
-		_ = client.Close()
 		return nil, err
 	}
 

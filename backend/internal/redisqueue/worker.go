@@ -50,9 +50,19 @@ func NewWorker(cfg *config.BackendConfig, dbConn db.DBTX) (*Worker, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
-	client, err := jobqueue.NewRedisClient(cfg)
+	client, err := jobqueue.GetSharedRedisClient(cfg)
 	if err != nil || client == nil {
 		return nil, err
+	}
+	return NewWorkerWithClient(client, cfg, dbConn)
+}
+
+func NewWorkerWithClient(client *redis.Client, cfg *config.BackendConfig, dbConn db.DBTX) (*Worker, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+	if client == nil {
+		return nil, fmt.Errorf("redis client is nil")
 	}
 
 	worker := &Worker{
@@ -82,7 +92,6 @@ func NewWorker(cfg *config.BackendConfig, dbConn db.DBTX) (*Worker, error) {
 			return worker.handleRecordUserUsage(ctx, payload.RedisKey)
 		},
 	}); err != nil {
-		_ = client.Close()
 		return nil, err
 	}
 	worker.processor = processor
@@ -156,19 +165,10 @@ func (w *Worker) Close() error {
 	if w == nil {
 		return nil
 	}
-	var errs []error
 	if w.processor != nil {
 		if err := w.processor.Close(); err != nil {
-			errs = append(errs, err)
+			return fmt.Errorf("errors closing redis worker: %w", err)
 		}
-	}
-	if w.client != nil {
-		if err := w.client.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("errors closing redis worker: %v", errs)
 	}
 	return nil
 }

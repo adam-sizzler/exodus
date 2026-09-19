@@ -65,7 +65,49 @@ type Job struct {
 	Attempts int             `json:"attempts"`
 }
 
+var (
+	sharedRedisClient *redis.Client
+	sharedRedisMu     sync.Mutex
+)
+
+// GetSharedRedisClient returns the application-wide singleton Redis client.
+// It initializes the client on first call and returns the shared instance thereafter.
+func GetSharedRedisClient(cfg *config.BackendConfig) (*redis.Client, error) {
+	sharedRedisMu.Lock()
+	defer sharedRedisMu.Unlock()
+
+	if sharedRedisClient != nil {
+		return sharedRedisClient, nil
+	}
+
+	client, err := createRedisClient(cfg)
+	if err != nil || client == nil {
+		return nil, err
+	}
+	sharedRedisClient = client
+	return sharedRedisClient, nil
+}
+
+// CloseSharedRedisClient closes the shared Redis client upon application shutdown.
+func CloseSharedRedisClient() error {
+	sharedRedisMu.Lock()
+	defer sharedRedisMu.Unlock()
+
+	if sharedRedisClient != nil {
+		err := sharedRedisClient.Close()
+		sharedRedisClient = nil
+		return err
+	}
+	return nil
+}
+
+// NewRedisClient returns the application-wide singleton Redis client.
+// Maintained for compatibility across the codebase while guaranteeing a single connection pool.
 func NewRedisClient(cfg *config.BackendConfig) (*redis.Client, error) {
+	return GetSharedRedisClient(cfg)
+}
+
+func createRedisClient(cfg *config.BackendConfig) (*redis.Client, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}

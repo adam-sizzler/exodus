@@ -56,9 +56,16 @@ var (
 )
 
 func StartSubscriptionQueues(ctx context.Context, wg *sync.WaitGroup, dbConn db.DBTX, cfg *config.BackendConfig) (*Processor, error) {
-	client, err := NewRedisClient(cfg)
+	client, err := GetSharedRedisClient(cfg)
 	if err != nil || client == nil {
 		return nil, err
+	}
+	return StartSubscriptionQueuesWithClient(ctx, wg, dbConn, cfg, client)
+}
+
+func StartSubscriptionQueuesWithClient(ctx context.Context, wg *sync.WaitGroup, dbConn db.DBTX, cfg *config.BackendConfig, client *redis.Client) (*Processor, error) {
+	if client == nil {
+		return nil, fmt.Errorf("redis client is nil")
 	}
 
 	processor := NewProcessor(client, cfg)
@@ -96,7 +103,6 @@ func StartSubscriptionQueues(ctx context.Context, wg *sync.WaitGroup, dbConn db.
 			return upsertHwidDevice(ctx, dbConn, payload)
 		},
 	}); err != nil {
-		_ = client.Close()
 		return nil, err
 	}
 

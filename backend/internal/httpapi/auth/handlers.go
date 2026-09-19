@@ -612,7 +612,7 @@ func OAuth2AuthorizeHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Ha
 			shared.SendAPIError(w, shared.ErrOAuth2AuthorizeFailed.WithCause(err), cfg)
 			return
 		}
-		storeOAuthState(provider, state, codeVerifier)
+		storeOAuthState(r.Context(), cfg, provider, state, codeVerifier)
 		shared.WriteJSON(w, http.StatusOK, map[string]any{
 			"response": map[string]any{"authorizationUrl": authURL},
 		})
@@ -636,8 +636,14 @@ func OAuth2CallbackHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Han
 			shared.SendAPIError(w, shared.ErrOAuth2ProviderNotFound, cfg)
 			return
 		}
-		stateEntry, ok := takeOAuthState(provider)
-		if !ok || stateEntry.State != strings.TrimSpace(req.State) {
+		state := strings.TrimSpace(req.State)
+		if state == "" {
+			emitExternalLoginNotification(r.Context(), cfg, notifications.EventLoginAttemptFailed, "oauth2", provider, "", "", "state_missing", r)
+			shared.SendAPIError(w, shared.ErrOAuth2StateMismatch, cfg)
+			return
+		}
+		stateEntry, ok := takeOAuthState(r.Context(), cfg, state)
+		if !ok || stateEntry.Provider != provider {
 			emitExternalLoginNotification(r.Context(), cfg, notifications.EventLoginAttemptFailed, "oauth2", provider, "", "", "state_mismatch", r)
 			shared.SendAPIError(w, shared.ErrOAuth2StateMismatch, cfg)
 			return

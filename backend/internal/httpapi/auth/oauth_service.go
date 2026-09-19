@@ -17,15 +17,18 @@ import (
 
 	"exodus/internal/config"
 	"exodus/internal/httpapi/middleware"
+	"exodus/internal/jobqueue"
 	"exodus/internal/notifications"
 	"exodus/internal/security"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
 	oauthStateTTL        = 10 * time.Minute
+	oauthStatePrefix     = "oauth2:state:"
 	oauthScope           = "openid email profile"
 	customOAuthClaimName = "exodusAccess"
 )
@@ -506,7 +509,22 @@ func extractTelegramIDFromIDToken(idToken string) (string, bool, error) {
 	}
 }
 
-func storeOAuthState(provider, state, codeVerifier string) {
+func storeOAuthState(ctx context.Context, cfg *config.BackendConfig, provider, state, codeVerifier string) {
+	entry := oauthStateEntry{
+		Provider:     provider,
+		State:        state,
+		CodeVerifier: codeVerifier,
+		ExpiresAt:    time.Now().Add(oauthStateTTL),
+	}
+
+	if redisClient, _ := jobqueue.GetSharedRedisClient(cfg); redisClient != nil {
+		data, err := json.Marshal(entry)
+		if err == nil {
+			_ = redisClient.Set(ctx, oauthStatePrefix+state, data, oauthStateTTL).Err()
+			return
+		}
+	}
+
 	oauthStateCache.Lock()
 	defer oauthStateCache.Unlock()
 	now := time.Now()
@@ -515,22 +533,39 @@ func storeOAuthState(provider, state, codeVerifier string) {
 			delete(oauthStateCache.items, key)
 		}
 	}
-	oauthStateCache.items[provider] = oauthStateEntry{
-		State:        state,
-		CodeVerifier: codeVerifier,
-		ExpiresAt:    now.Add(oauthStateTTL),
-	}
+	oauthStateCache.items[state] = entry
 }
 
-func takeOAuthState(provider string) (oauthStateEntry, bool) {
+func takeOAuthState(ctx context.Context, cfg *config.BackendConfig, state string) (oauthStateEntry, bool) {
+	if redisClient, _ := jobqueue.GetSharedRedisClient(cfg); redisClient != nil {
+		key := oauthStatePrefix + state
+		val, err := redisClient.GetDel(ctx, key).Result()
+		if err != nil && !errors.Is(err, redis.Nil) && strings.Contains(err.Error(), "unknown command") {
+			val, err = redisClient.Get(ctx, key).Result()
+			_ = redisClient.Del(ctx, key).Err()
+		}
+		if err == nil && val != "" {
+			var entry oauthStateEntry
+			if jsonErr := json.Unmarshal([]byte(val), &entry); jsonErr == nil {
+				return entry, true
+			}
+		}
+		if errors.Is(err, redis.Nil) {
+			return oauthStateEntry{}, false
+		}
+	}
+
 	oauthStateCache.Lock()
 	defer oauthStateCache.Unlock()
-	item, ok := oauthStateCache.items[provider]
-	delete(oauthStateCache.items, provider)
-	if !ok || time.Now().After(item.ExpiresAt) {
-		return oauthStateEntry{}, false
+	item, ok := oauthStateCache.items[state]
+	if ok {
+		delete(oauthStateCache.items, state)
+		if time.Now().After(item.ExpiresAt) {
+			return oauthStateEntry{}, false
+		}
+		return item, true
 	}
-	return item, true
+	return oauthStateEntry{}, false
 }
 
 func generatePKCEPair() (string, string, error) {

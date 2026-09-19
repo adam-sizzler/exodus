@@ -80,9 +80,10 @@ type AuthStatusBranding struct {
 }
 
 type oauthStateEntry struct {
-	State        string
-	CodeVerifier string
-	ExpiresAt    time.Time
+	Provider     string    `json:"provider"`
+	State        string    `json:"state"`
+	CodeVerifier string    `json:"codeVerifier"`
+	ExpiresAt    time.Time `json:"expiresAt"`
 }
 
 type oauthAuthorizeRequest struct {

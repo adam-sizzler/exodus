@@ -301,20 +301,22 @@ func (r *UserRepository) replaceUserInternalSquadsTx(ctx context.Context, tx pgx
 	if _, err := tx.Exec(ctx, `DELETE FROM internal_squad_members WHERE user_id = $1`, userID); err != nil {
 		return err
 	}
+	cleanSquads := make([]string, 0, len(squadUUIDs))
 	for _, squadUUID := range dedupeStrings(squadUUIDs) {
-		clean := strings.TrimSpace(squadUUID)
-		if clean == "" {
-			continue
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
-			VALUES ($1::uuid, $2)
-			ON CONFLICT (internal_squad_uuid, user_id) DO NOTHING
-		`, clean, userID); err != nil {
-			return err
+		if clean := strings.TrimSpace(squadUUID); clean != "" {
+			cleanSquads = append(cleanSquads, clean)
 		}
 	}
-	return nil
+	if len(cleanSquads) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
+		SELECT s::uuid, $2
+		FROM unnest($1::text[]) AS s
+		ON CONFLICT (internal_squad_uuid, user_id) DO NOTHING
+	`, cleanSquads, userID)
+	return err
 }
 
 func (r *UserRepository) resolveUserUUIDForUpdate(ctx context.Context, id *int64, userUUID *string, username *string) (string, error) {
@@ -856,12 +858,30 @@ func (r *UserRepository) bulkUpdateUsersSquads(ctx context.Context, cleanUserUUI
 			return err
 		}
 
-		for _, userID := range userIDs {
-			if err := r.replaceUserInternalSquadsTx(ctx, tx, userID, requestedSquads); err != nil {
+		if len(userIDs) > 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM internal_squad_members WHERE user_id = ANY($1)`, userIDs); err != nil {
 				return err
 			}
-		}
-		if len(cleanUserUUIDs) > 0 {
+
+			cleanSquads := make([]string, 0, len(requestedSquads))
+			for _, sq := range dedupeStrings(requestedSquads) {
+				if clean := strings.TrimSpace(sq); clean != "" {
+					cleanSquads = append(cleanSquads, clean)
+				}
+			}
+
+			if len(cleanSquads) > 0 {
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO internal_squad_members (internal_squad_uuid, user_id)
+					SELECT s::uuid, u
+					FROM unnest($1::text[]) AS s
+					CROSS JOIN unnest($2::bigint[]) AS u
+					ON CONFLICT (internal_squad_uuid, user_id) DO NOTHING
+				`, cleanSquads, userIDs); err != nil {
+					return err
+				}
+			}
+
 			if _, err := tx.Exec(ctx, `UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE uuid = ANY($1)`, cleanUserUUIDs); err != nil {
 				return err
 			}

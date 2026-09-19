@@ -11,13 +11,12 @@ import (
 )
 
 const (
-	ExodusRealIPHeader      = "X-Exodus-Real-IP"
-	canonicalExodusRealIP   = "X-Exodus-Real-Ip"
-	canonicalCFConnectingIP = "Cf-Connecting-Ip"
-	canonicalTrueClientIP   = "True-Client-Ip"
-	canonicalXForwardedFor  = "X-Forwarded-For"
-	canonicalXRealIP        = "X-Real-Ip"
-	canonicalXClientIP      = "X-Client-Ip"
+	ExodusRealIPHeader   = "X-Exodus-Real-Ip"
+	HeaderCFConnectingIP = "Cf-Connecting-Ip"
+	HeaderTrueClientIP   = "True-Client-Ip"
+	HeaderXForwardedFor  = "X-Forwarded-For"
+	HeaderXRealIP        = "X-Real-Ip"
+	HeaderXClientIP      = "X-Client-Ip"
 )
 
 type clientIPContextKey struct{}
@@ -73,29 +72,29 @@ func ResolveClientIP(r *http.Request, cfg *config.BackendConfig) string {
 
 	// For trusted proxies, evaluate headers using direct canonical map indexing (zero allocations)
 	if r.Header != nil {
-		// 1. Fast-path: X-Exodus-Real-IP (trusted upstream/internal header)
-		if v := r.Header[canonicalExodusRealIP]; len(v) > 0 && v[0] != "" {
+		// 1. Fast-path: X-Exodus-Real-Ip (trusted upstream/internal header)
+		if v := r.Header[ExodusRealIPHeader]; len(v) > 0 && v[0] != "" {
 			if candidate, ok := normalizeIPAddr(v[0]); ok && candidate.IsValid() {
 				return candidate.String()
 			}
 		}
 
-		// 2. Cf-Connecting-IP (Cloudflare edge)
-		if v := r.Header[canonicalCFConnectingIP]; len(v) > 0 && v[0] != "" {
+		// 2. Cf-Connecting-Ip (Cloudflare edge)
+		if v := r.Header[HeaderCFConnectingIP]; len(v) > 0 && v[0] != "" {
 			if candidate, ok := normalizeIPAddr(v[0]); ok && candidate.IsValid() {
 				return candidate.String()
 			}
 		}
 
-		// 3. True-Client-IP (Akamai / Cloudflare Enterprise)
-		if v := r.Header[canonicalTrueClientIP]; len(v) > 0 && v[0] != "" {
+		// 3. True-Client-Ip (Akamai / Cloudflare Enterprise)
+		if v := r.Header[HeaderTrueClientIP]; len(v) > 0 && v[0] != "" {
 			if candidate, ok := normalizeIPAddr(v[0]); ok && candidate.IsValid() {
 				return candidate.String()
 			}
 		}
 
 		// 4. X-Forwarded-For: traverse right-to-left to find the first untrusted client IP
-		if v := r.Header[canonicalXForwardedFor]; len(v) > 0 && v[0] != "" {
+		if v := r.Header[HeaderXForwardedFor]; len(v) > 0 && v[0] != "" {
 			remaining := v[0]
 			var lastValid netip.Addr
 			for len(remaining) > 0 {
@@ -121,15 +120,15 @@ func ResolveClientIP(r *http.Request, cfg *config.BackendConfig) string {
 			}
 		}
 
-		// 5. X-Real-IP
-		if v := r.Header[canonicalXRealIP]; len(v) > 0 && v[0] != "" {
+		// 5. X-Real-Ip
+		if v := r.Header[HeaderXRealIP]; len(v) > 0 && v[0] != "" {
 			if candidate, ok := normalizeIPAddr(v[0]); ok && candidate.IsValid() {
 				return candidate.String()
 			}
 		}
 
-		// 6. X-Client-IP
-		if v := r.Header[canonicalXClientIP]; len(v) > 0 && v[0] != "" {
+		// 6. X-Client-Ip
+		if v := r.Header[HeaderXClientIP]; len(v) > 0 && v[0] != "" {
 			if candidate, ok := normalizeIPAddr(v[0]); ok && candidate.IsValid() {
 				return candidate.String()
 			}

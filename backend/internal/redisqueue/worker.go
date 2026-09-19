@@ -179,6 +179,14 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 	}
 	processingKey := redisKey + processingPostfix
 
+	// Invariant matching upstream push-from-redis:
+	// Always drop processingKey on completion or failure (drop on failure).
+	defer func() {
+		delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = w.client.Del(delCtx, processingKey).Err()
+	}()
+
 	pipe := w.client.Pipeline()
 	pipe.RenameNX(ctx, redisKey, processingKey)
 	pipe.HGetAll(ctx, processingKey)
@@ -193,13 +201,14 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 		}
 	}
 	if len(data) == 0 {
-		_ = w.client.Del(context.Background(), processingKey).Err()
 		return nil
 	}
 
 	nodeID, err := parseNodeID(redisKey)
 	if err != nil {
-		_ = w.restoreProcessingKey(context.Background(), redisKey, processingKey, data)
+		if w.cfg != nil && w.cfg.Logger != nil {
+			w.cfg.Logger.RoleService(logger.RoleWorkers, logger.ServiceRedis).Error("Failed to parse node ID from redis key", "error", err, "key", redisKey)
+		}
 		return err
 	}
 
@@ -219,7 +228,6 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 		})
 	}
 	if len(entries) == 0 {
-		_ = w.client.Del(context.Background(), processingKey).Err()
 		return nil
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -232,7 +240,9 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 			end = len(entries)
 		}
 		if err := bulkUpsertNodeUserUsageHistory(ctx, w.db, nodeID, entries[start:end]); err != nil {
-			_ = w.restoreProcessingKey(context.Background(), redisKey, processingKey, data)
+			if w.cfg != nil && w.cfg.Logger != nil {
+				w.cfg.Logger.RoleService(logger.RoleWorkers, logger.ServiceRedis).Error("Failed to upsert node user usage history batch, dropping batch", "error", err, "node_id", nodeID)
+			}
 			return err
 		}
 		if w.cfg != nil && w.cfg.Redis.ExportToStreamEnabled {
@@ -249,35 +259,7 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 		}
 	}
 
-	return w.client.Del(ctx, processingKey).Err()
-}
-
-func (w *Worker) restoreProcessingKey(ctx context.Context, redisKey, processingKey string, data map[string]string) error {
-	if len(data) == 0 {
-		redisData, err := w.client.HGetAll(ctx, processingKey).Result()
-		if err != nil {
-			return err
-		}
-		data = redisData
-	}
-	if len(data) == 0 {
-		return w.client.Del(ctx, processingKey).Err()
-	}
-
-	pipe := w.client.Pipeline()
-	for userID, totalBytes := range data {
-		parsed, err := strconv.ParseInt(totalBytes, 10, 64)
-		if err != nil || parsed <= 0 {
-			continue
-		}
-		pipe.HIncrBy(ctx, redisKey, userID, parsed)
-	}
-	if w.usageTTL > 0 {
-		pipe.Expire(ctx, redisKey, w.usageTTL)
-	}
-	pipe.Del(ctx, processingKey)
-	_, err := pipe.Exec(ctx)
-	return err
+	return nil
 }
 
 func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, entries []nodeUsageEntry) error {

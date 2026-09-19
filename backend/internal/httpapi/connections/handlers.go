@@ -17,6 +17,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const geocheckJobTTL = 15 * time.Minute
+
 type GeocheckImage struct {
 	Format    string `json:"format"`
 	MediaType string `json:"media_type"`
@@ -33,6 +35,7 @@ type GeocheckResult struct {
 }
 
 type GeocheckJob struct {
+	mu          sync.RWMutex
 	JobID       string
 	NodeUUID    string
 	IsCompleted bool
@@ -41,10 +44,46 @@ type GeocheckJob struct {
 	CreatedAt   time.Time
 }
 
+func (j *GeocheckJob) Snapshot() (isCompleted, isFailed bool, result *GeocheckResult) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.IsCompleted, j.IsFailed, j.Result
+}
+
+func (j *GeocheckJob) SetResult(isCompleted, isFailed bool, result *GeocheckResult) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.IsCompleted = isCompleted
+	j.IsFailed = isFailed
+	j.Result = result
+}
+
 var (
 	jobsMu sync.RWMutex
 	jobs   = make(map[string]*GeocheckJob)
 )
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		for range ticker.C {
+			cleanupExpiredJobs(time.Now())
+		}
+	}()
+}
+
+func cleanupExpiredJobs(now time.Time) {
+	jobsMu.Lock()
+	defer jobsMu.Unlock()
+	for id, job := range jobs {
+		isCompleted, isFailed, _ := job.Snapshot()
+		if (isCompleted || isFailed) && now.Sub(job.CreatedAt) > geocheckJobTTL {
+			delete(jobs, id)
+		} else if now.Sub(job.CreatedAt) > 2*geocheckJobTTL {
+			delete(jobs, id)
+		}
+	}
+}
 
 func Handler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -109,11 +148,12 @@ func Handler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 					return
 				}
 
+				isCompleted, isFailed, result := job.Snapshot()
 				shared.WriteJSON(w, http.StatusOK, map[string]any{
 					"response": map[string]any{
-						"isCompleted": job.IsCompleted,
-						"isFailed":    job.IsFailed,
-						"result":      job.Result,
+						"isCompleted": isCompleted,
+						"isFailed":    isFailed,
+						"result":      result,
 					},
 				})
 				return
@@ -144,13 +184,15 @@ func Handler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 				return
 			}
 
+			isCompleted, isFailed, result := job.Snapshot()
 			shared.WriteJSON(w, http.StatusOK, map[string]any{
 				"response": map[string]any{
-					"isCompleted": job.IsCompleted,
-					"isFailed":    job.IsFailed,
-					"result":      job.Result,
+					"isCompleted": isCompleted,
+					"isFailed":    isFailed,
+					"result":      result,
 				},
 			})
+			return
 
 		case len(parts) >= 2 && (parts[0] == "by-user" || parts[0] == "users"):
 			if r.Method == http.MethodPost {
@@ -251,18 +293,13 @@ func runGeocheckJob(job *GeocheckJob, ip string, iface string, cfg *config.Backe
 
 	outputJSON, err := monitor.RequestGeocheck(ctx, job.NodeUUID, ip, iface)
 
-	jobsMu.Lock()
-	defer jobsMu.Unlock()
-
 	if err != nil {
 		msg := err.Error()
-		job.IsCompleted = true
-		job.IsFailed = true
-		job.Result = &GeocheckResult{
+		job.SetResult(true, true, &GeocheckResult{
 			Success:  false,
 			NodeUUID: job.NodeUUID,
 			Message:  &msg,
-		}
+		})
 		if cfg != nil && cfg.Logger != nil {
 			cfg.Logger.Warn("Geocheck job failed", "job_id", job.JobID, "node_uuid", job.NodeUUID, "error", err)
 		}
@@ -272,13 +309,11 @@ func runGeocheckJob(job *GeocheckJob, ip string, iface string, cfg *config.Backe
 	var rawMap map[string]any
 	if err := json.Unmarshal([]byte(outputJSON), &rawMap); err != nil {
 		msg := "failed to parse geocheck JSON: " + err.Error()
-		job.IsCompleted = true
-		job.IsFailed = true
-		job.Result = &GeocheckResult{
+		job.SetResult(true, true, &GeocheckResult{
 			Success:  false,
 			NodeUUID: job.NodeUUID,
 			Message:  &msg,
-		}
+		})
 		return
 	}
 
@@ -294,13 +329,11 @@ func runGeocheckJob(job *GeocheckJob, ip string, iface string, cfg *config.Backe
 		delete(rawMap, "image")
 	}
 
-	job.IsCompleted = true
-	job.IsFailed = false
-	job.Result = &GeocheckResult{
+	job.SetResult(true, false, &GeocheckResult{
 		Success:   true,
 		NodeUUID:  job.NodeUUID,
 		Image:     img,
 		RawReport: rawMap,
 		Message:   nil,
-	}
+	})
 }

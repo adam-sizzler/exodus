@@ -232,3 +232,62 @@ func TestDeployFailureIsolation(t *testing.T) {
 	}
 }
 
+func TestRequestDeployNonBlockingAndThreadSafe(t *testing.T) {
+	nm := NewNodeMonitor(nil, nil)
+
+	// Fill the channel buffer
+	nm.RequestDeployWithForce(true, false, "uuid-1")
+
+	// Trigger multiple concurrent requests without reading from deployNow
+	// to verify it never deadlocks or blocks indefinitely
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			nm.RequestDeployWithForce(false, true, fmt.Sprintf("uuid-%d", id))
+		}(i)
+	}
+	wg.Wait()
+
+	// Drain request from channel
+	select {
+	case req := <-nm.deployNow:
+		if !req.ForceRestart {
+			t.Errorf("expected force restart to be merged into request")
+		}
+	default:
+		t.Errorf("expected at least one pending deploy request")
+	}
+}
+
+func TestCloseNodeStateThreadSafety(t *testing.T) {
+	nm := NewNodeMonitor(nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	state := &nodeState{
+		nodeUUID: "test-node",
+		nodeName: "node-1",
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			nm.closeNodeState(state)
+		}()
+	}
+	wg.Wait()
+
+	state.mutex.RLock()
+	defer state.mutex.RUnlock()
+	if state.isConnected || state.isConnecting {
+		t.Errorf("expected state to be disconnected")
+	}
+}
+
+

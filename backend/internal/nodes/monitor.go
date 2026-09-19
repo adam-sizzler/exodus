@@ -99,7 +99,11 @@ func (nm *NodeMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 		nm.nodesLock.RLock()
 		defer nm.nodesLock.RUnlock()
 		for _, state := range nm.nodes {
-			state.cancel()
+			state.mutex.Lock()
+			if state.cancel != nil {
+				state.cancel()
+			}
+			state.mutex.Unlock()
 		}
 	}
 
@@ -220,10 +224,7 @@ func (nm *NodeMonitor) syncNodes() {
 		desiredNode, exists := desired[name]
 		if !exists {
 			nm.cfg.Logger.Debug("Node removed from DB, stopping monitor", "node", name)
-			state.cancel()
-			if state.conn != nil {
-				state.conn.Close()
-			}
+			nm.closeNodeState(state)
 			if state.nodeUUID != "" {
 				nm.removeNodeMetrics(state.nodeUUID)
 			}
@@ -241,10 +242,7 @@ func (nm *NodeMonitor) syncNodes() {
 				"old_schema", state.apiSchema, "new_schema", desiredNode.APISchema,
 				"old_path", state.apiPath, "new_path", desiredNode.APIPath,
 			)
-			state.cancel()
-			if state.conn != nil {
-				state.conn.Close()
-			}
+			nm.closeNodeState(state)
 			nm.nodeMetaCache.Delete(name)
 			delete(nm.nodes, name)
 			toStart[name] = desiredNode
@@ -392,6 +390,30 @@ func (nm *NodeMonitor) Stop() {
 	}
 }
 
+// closeNodeState safely cancels contexts and closes grpc connection under state.mutex.
+func (nm *NodeMonitor) closeNodeState(state *nodeState) {
+	if state == nil {
+		return
+	}
+	state.mutex.Lock()
+	if state.cancel != nil {
+		state.cancel()
+	}
+	if state.streamCancel != nil {
+		state.streamCancel()
+		state.streamCancel = nil
+	}
+	state.stream = nil
+	if state.conn != nil {
+		_ = state.conn.Close()
+		state.conn = nil
+	}
+	state.client = nil
+	state.isConnected = false
+	state.isConnecting = false
+	state.mutex.Unlock()
+}
+
 // stopAll cancels and stops all connections.
 func (nm *NodeMonitor) stopAll() {
 	nm.nodesLock.Lock()
@@ -399,10 +421,7 @@ func (nm *NodeMonitor) stopAll() {
 
 	for name, state := range nm.nodes {
 		nm.cfg.Logger.Trace("Canceling node monitor context", "node", name)
-		state.cancel()
-		if state.conn != nil {
-			state.conn.Close()
-		}
+		nm.closeNodeState(state)
 		delete(nm.nodes, name)
 	}
 }
@@ -554,9 +573,15 @@ func (nm *NodeMonitor) RequestDeployWithForce(restart bool, forceRestart bool, n
 			req = mergeDeployRequests(prev, req)
 		default:
 		}
-		nm.deployNow <- req
-		if nm.cfg != nil && nm.cfg.Logger != nil {
-			nm.cfg.Logger.Debug("Node deploy queue merged pending request", "restart", req.Restart, "force_restart", req.ForceRestart, "node_targets", len(req.NodeUUIDs))
+		select {
+		case nm.deployNow <- req:
+			if nm.cfg != nil && nm.cfg.Logger != nil {
+				nm.cfg.Logger.Debug("Node deploy queue merged pending request", "restart", req.Restart, "force_restart", req.ForceRestart, "node_targets", len(req.NodeUUIDs))
+			}
+		default:
+			if nm.cfg != nil && nm.cfg.Logger != nil {
+				nm.cfg.Logger.Warn("Node deploy queue full, dropping deploy request", "restart", req.Restart, "node_targets", len(req.NodeUUIDs))
+			}
 		}
 	}
 }

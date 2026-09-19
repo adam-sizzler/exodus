@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"exodus/internal/config"
 )
 
 func TestAuthRateLimiterInMemoryFallback(t *testing.T) {
@@ -77,3 +79,37 @@ func TestLoginRateLimitKeyPrefersClientIP(t *testing.T) {
 		t.Fatalf("expected loginRateLimitKey to resolve to client IP 203.0.113.42, got %q", key)
 	}
 }
+
+func TestAuthLoginRateLimitHeaders(t *testing.T) {
+	cfg := &config.BackendConfig{}
+	ip := "198.51.100.99"
+
+	// Exhaust attempts
+	for i := 0; i < AuthRateLimitMaxAttempts; i++ {
+		globalAuthRateLimiter.RecordFailedAttempt(context.Background(), ip, cfg)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+	req.RemoteAddr = ip + ":54321"
+
+	rr := httptest.NewRecorder()
+	handler := AuthLoginCompatHandler(nil, cfg)
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d", rr.Code)
+	}
+	if limit := rr.Header().Get("X-RateLimit-Limit"); limit != "5" {
+		t.Fatalf("expected X-RateLimit-Limit 5, got %q", limit)
+	}
+	if remaining := rr.Header().Get("X-RateLimit-Remaining"); remaining != "0" {
+		t.Fatalf("expected X-RateLimit-Remaining 0, got %q", remaining)
+	}
+	if retryAfter := rr.Header().Get("Retry-After"); retryAfter == "" {
+		t.Fatalf("expected Retry-After header to be set")
+	}
+
+	// Clean up
+	globalAuthRateLimiter.Reset(context.Background(), ip, cfg)
+}
+

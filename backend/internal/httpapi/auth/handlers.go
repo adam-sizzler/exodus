@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -147,7 +148,7 @@ func AuthLoginCompatHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Ha
 		}
 
 		rateLimitKey := loginRateLimitKey(r, cfg)
-		allowed, _, retryAfter := globalAuthRateLimiter.Allow(r.Context(), rateLimitKey, cfg)
+		allowed, remaining, retryAfter := globalAuthRateLimiter.Allow(r.Context(), rateLimitKey, cfg)
 		if !allowed {
 			retrySeconds := int(math.Ceil(retryAfter.Seconds()))
 			if retrySeconds <= 0 {
@@ -160,6 +161,8 @@ func AuthLoginCompatHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Ha
 			shared.WriteJSONError(w, http.StatusTooManyRequests, "too many login attempts, please try again later")
 			return
 		}
+		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(AuthRateLimitMaxAttempts))
+		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
 
 		var req LoginRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -227,11 +230,14 @@ func AuthLoginCompatHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Ha
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			_ = security.VerifyPassword(password, cfg.JWT.AuthSecret, getDummyPasswordHash(cfg.JWT.AuthSecret))
 			globalAuthRateLimiter.RecordFailedAttempt(r.Context(), rateLimitKey, cfg)
+			if remaining > 0 {
+				w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining-1))
+			} else {
+				w.Header().Set("X-RateLimit-Remaining", "0")
+			}
 			cfg.Logger.Warn("Auth login failed: user not found", "username", username, "client_ip", rateLimitKey)
 			emitLoginNotification(r.Context(), cfg, notifications.EventLoginAttemptFailed, username, "", password, "invalid_credentials", r)
-			select {
-			case <-time.After(AuthFailedLoginDelay):
-			case <-r.Context().Done():
+			if !delayFailedLogin(r.Context()) {
 				return
 			}
 			shared.SendAPIError(w, shared.ErrInvalidCredentials, cfg)
@@ -240,11 +246,14 @@ func AuthLoginCompatHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Ha
 
 		if !security.VerifyPassword(password, cfg.JWT.AuthSecret, storedPasswordHash) {
 			globalAuthRateLimiter.RecordFailedAttempt(r.Context(), rateLimitKey, cfg)
+			if remaining > 0 {
+				w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining-1))
+			} else {
+				w.Header().Set("X-RateLimit-Remaining", "0")
+			}
 			cfg.Logger.Warn("Auth login failed: wrong password", "username", username, "client_ip", rateLimitKey)
 			emitLoginNotification(r.Context(), cfg, notifications.EventLoginAttemptFailed, username, adminUUID, password, "invalid_credentials", r)
-			select {
-			case <-time.After(AuthFailedLoginDelay):
-			case <-r.Context().Done():
+			if !delayFailedLogin(r.Context()) {
 				return
 			}
 			shared.SendAPIError(w, shared.ErrInvalidCredentials, cfg)
@@ -672,3 +681,15 @@ func OAuth2CallbackHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Han
 		})
 	}
 }
+
+func delayFailedLogin(ctx context.Context) bool {
+	timer := time.NewTimer(AuthFailedLoginDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+

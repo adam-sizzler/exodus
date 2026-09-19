@@ -837,6 +837,15 @@ func (p PanelConfig) IsTrustedProxy(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
+	if len(p.trustedProxyNets) == 0 && len(p.TrustedProxies) > 0 {
+		nets, _ := parseTrustedProxies(p.TrustedProxies)
+		for _, netBlock := range nets {
+			if netBlock != nil && netBlock.Contains(ip) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, netBlock := range p.trustedProxyNets {
 		if netBlock != nil && netBlock.Contains(ip) {
 			return true

@@ -45,7 +45,6 @@ type LoginResponse struct {
 type BootstrapResponse struct {
 	BrandingSettings   map[string]any `json:"branding_settings"`
 	PasswordSettings   map[string]any `json:"password_settings"`
-	DefaultUsername    string         `json:"default_username"`
 	HasAdminConfigured bool           `json:"has_admin_configured"`
 }
 

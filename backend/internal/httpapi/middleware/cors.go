@@ -52,13 +52,13 @@ func WithCORS(cfg *config.BackendConfig, next http.Handler) http.Handler {
 
 		// Content Security Policy.
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self' *;"+
-				"script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' *;"+
-				"img-src 'self' data: *;"+
-				"connect-src 'self' *;"+
-				"worker-src 'self' blob: *;"+
-				"frame-src 'self' oauth.telegram.org *;"+
-				"frame-ancestors 'self' *;"+
+			"default-src 'self';"+
+				"script-src 'self' 'wasm-unsafe-eval';"+
+				"img-src 'self' data: https:;"+
+				"connect-src 'self' https://raw.githubusercontent.com https://ungh.cc;"+
+				"worker-src 'self' blob:;"+
+				"frame-src 'self' https://oauth.telegram.org;"+
+				"frame-ancestors 'self';"+
 				"base-uri 'self';"+
 				"font-src 'self' https: data:;"+
 				"form-action 'self';"+

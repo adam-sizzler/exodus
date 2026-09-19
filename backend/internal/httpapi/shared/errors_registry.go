@@ -377,6 +377,7 @@ var (
 	ErrRequestedTokenNotFound    = &APIError{StatusCode: http.StatusNotFound, Code: "REQUESTED_TOKEN_NOT_FOUND", Message: "Requested token not found"}
 	ErrApiTokenNotFound          = &APIError{StatusCode: http.StatusNotFound, Code: "API_TOKEN_NOT_FOUND", Message: "API token not found"}
 	ErrAPITokenNotFound          = &APIError{StatusCode: http.StatusNotFound, Code: "API_TOKEN_NOT_FOUND", Message: "API token not found"}
+	ErrInvalidApiTokenScope      = &APIError{StatusCode: http.StatusBadRequest, Code: "INVALID_API_TOKEN_SCOPE", Message: "One or more provided API token scopes are invalid"}
 	ErrCreateApiTokenFailed      = &APIError{StatusCode: http.StatusInternalServerError, Code: "CREATE_API_TOKEN_ERROR", Message: "Create API token error"}
 	ErrDeleteApiTokenFailed      = &APIError{StatusCode: http.StatusInternalServerError, Code: "DELETE_API_TOKEN_ERROR", Message: "Delete API token error"}
 	ErrFindAllApiTokensFailed    = &APIError{StatusCode: http.StatusInternalServerError, Code: "FIND_ALL_API_TOKENS_ERROR", Message: "Find all API tokens error"}

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"exodus/internal/config"
+	"exodus/internal/httpapi/scopecatalog"
 	"exodus/internal/httpapi/shared"
 	"exodus/internal/notifications"
 	panelsettingsDefaults "exodus/internal/panelsettings"
@@ -184,10 +185,16 @@ func PanelAPITokensHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Han
 				return
 			}
 			expiresInDays := payload.ExpiresInDays
-			if expiresInDays <= 0 {
-				expiresInDays = int(security.APITokenLifetime / (24 * time.Hour))
+			if expiresInDays < 1 {
+				shared.SendError(w, http.StatusBadRequest, "expiresInDays must be greater than or equal to 1", nil, cfg)
+				return
 			}
 			scopes := normalizeAPITokenScopes(payload.Scopes)
+			if invalidScopes := scopecatalog.FindInvalidScopes(scopes); len(invalidScopes) > 0 {
+				cfg.Logger.Warn("Rejected API token with invalid scopes", "invalidScopes", strings.Join(invalidScopes, ", "))
+				shared.SendAPIError(w, shared.ErrInvalidApiTokenScope, cfg)
+				return
+			}
 
 			tokenUUID := uuid.NewString()
 			lifetime := time.Duration(expiresInDays) * 24 * time.Hour

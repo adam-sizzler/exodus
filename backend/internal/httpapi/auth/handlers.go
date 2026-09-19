@@ -39,7 +39,7 @@ func AuthBootstrapHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Hand
 			return
 		}
 
-		brandingSettings, passwordSettings, defaultUsername, hasAdmin, err := getBootstrapData(r.Context(), db)
+		brandingSettings, passwordSettings, hasAdmin, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Error("Failed to read auth bootstrap data", "error", err)
 			shared.SendAPIError(w, shared.ErrGetAuthBootstrapFailed.WithCause(err), cfg)
@@ -49,7 +49,6 @@ func AuthBootstrapHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Hand
 		shared.WriteJSON(w, http.StatusOK, BootstrapResponse{
 			BrandingSettings:   brandingSettings,
 			PasswordSettings:   passwordSettings,
-			DefaultUsername:    defaultUsername,
 			HasAdminConfigured: hasAdmin,
 		})
 	}
@@ -70,7 +69,7 @@ func AuthStatusHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Handler
 			return
 		}
 
-		brandingSettings, passwordSettings, _, hasAdmin, err := getBootstrapData(r.Context(), db)
+		brandingSettings, passwordSettings, hasAdmin, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Error("Failed to load auth status", "error", err)
 			shared.SendAPIError(w, shared.ErrGetAuthStatusFailed.WithCause(err), cfg)
@@ -179,7 +178,7 @@ func AuthLoginCompatHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Ha
 		}
 		cfg.Logger.Trace("Auth login attempt", "username", username, "client_ip", rateLimitKey)
 
-		_, passwordSettings, _, hasAdmin, err := getBootstrapData(r.Context(), db)
+		_, passwordSettings, hasAdmin, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Error("Failed to read auth bootstrap for login", "error", err)
 			shared.SendAPIError(w, shared.ErrValidateCredentialsFailed.WithCause(err), cfg)
@@ -428,7 +427,7 @@ func AuthSetupHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerF
 		}
 		setAuthCookie(w, r, cfg, accessToken, expiresAt)
 
-		brandingSettings, passwordSettings, _, _, bootstrapErr := getBootstrapData(r.Context(), db)
+		brandingSettings, passwordSettings, _, bootstrapErr := getBootstrapData(r.Context(), db)
 		if bootstrapErr != nil {
 			cfg.Logger.Warn("Failed to include bootstrap settings in setup response", "error", bootstrapErr)
 			brandingSettings = panelsettings.DefaultBrandingSettings()
@@ -500,7 +499,7 @@ func AuthMeHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc
 		adminInfo.Role = strings.ToUpper(adminInfo.Role)
 		adminInfo.SessionTTLMinutes = AuthTTLMinutes()
 
-		brandingSettings, passwordSettings, _, _, err := getBootstrapData(r.Context(), db)
+		brandingSettings, passwordSettings, _, err := getBootstrapData(r.Context(), db)
 		if err != nil {
 			cfg.Logger.Warn("Failed to load branding for auth/me response", "error", err)
 			brandingSettings = panelsettings.DefaultBrandingSettings()

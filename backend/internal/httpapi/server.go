@@ -42,7 +42,7 @@ func StartWebServer(ctx context.Context, pools *db.Pools, cfg *config.BackendCon
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           middleware.WithCORS(cfg, middleware.WithClientIP(cfg, middleware.WithRequestLogging(cfg, "web", mux))),
+		Handler:           middleware.WithCORS(cfg, middleware.WithBodyLimit(cfg, middleware.WithClientIP(cfg, middleware.WithRequestLogging(cfg, "web", mux)))),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

@@ -13,10 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func getBootstrapData(ctx context.Context, db *pgxpool.Pool) (brandingSettings map[string]any, passwordSettings map[string]any, defaultUsername string, hasAdmin bool, err error) {
+func getBootstrapData(ctx context.Context, db *pgxpool.Pool) (brandingSettings map[string]any, passwordSettings map[string]any, hasAdmin bool, err error) {
 	brandingSettings = panelsettings.DefaultBrandingSettings()
 	passwordSettings = panelsettings.DefaultPasswordSettings()
-	defaultUsername = "admin"
 	hasAdmin = false
 
 	row := db.QueryRow(ctx, `
@@ -28,7 +27,7 @@ func getBootstrapData(ctx context.Context, db *pgxpool.Pool) (brandingSettings m
 
 	var brandingRaw, passwordRaw *string
 	if scanErr := row.Scan(&brandingRaw, &passwordRaw); scanErr != nil && !errors.Is(scanErr, pgx.ErrNoRows) {
-		return brandingSettings, passwordSettings, defaultUsername, hasAdmin, scanErr
+		return brandingSettings, passwordSettings, hasAdmin, scanErr
 	}
 
 	if brandingRaw != nil && strings.TrimSpace(*brandingRaw) != "" {
@@ -46,20 +45,11 @@ func getBootstrapData(ctx context.Context, db *pgxpool.Pool) (brandingSettings m
 
 	var adminCount int
 	if countErr := db.QueryRow(ctx, "SELECT COUNT(*) FROM admin").Scan(&adminCount); countErr != nil {
-		return brandingSettings, passwordSettings, defaultUsername, hasAdmin, countErr
+		return brandingSettings, passwordSettings, hasAdmin, countErr
 	}
 	hasAdmin = adminCount > 0
 
-	if hasAdmin {
-		var firstUsername *string
-		if firstErr := db.QueryRow(ctx, "SELECT username FROM admin ORDER BY created_at ASC LIMIT 1").Scan(&firstUsername); firstErr != nil && !errors.Is(firstErr, pgx.ErrNoRows) {
-			return brandingSettings, passwordSettings, defaultUsername, hasAdmin, firstErr
-		}
-		if firstUsername != nil && strings.TrimSpace(*firstUsername) != "" {
-			defaultUsername = *firstUsername
-		}
-	}
-	return brandingSettings, passwordSettings, defaultUsername, hasAdmin, nil
+	return brandingSettings, passwordSettings, hasAdmin, nil
 }
 
 func getAuthMethodsStatus(ctx context.Context, db *pgxpool.Pool) (passkeyEnabled bool, oauth2Providers map[string]bool) {

@@ -77,7 +77,13 @@ func GetSharedRedisClient(cfg *config.BackendConfig) (*redis.Client, error) {
 	defer sharedRedisMu.Unlock()
 
 	if sharedRedisClient != nil {
-		return sharedRedisClient, nil
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		err := sharedRedisClient.Ping(ctx).Err()
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "client is closed") {
+			return sharedRedisClient, nil
+		}
+		sharedRedisClient = nil
 	}
 
 	client, err := createRedisClient(cfg)

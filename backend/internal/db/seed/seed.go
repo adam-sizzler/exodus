@@ -14,11 +14,10 @@ const divider = "▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰
 
 func ClearRedis(ctx context.Context, cfg *config.BackendConfig) error {
 	fmt.Println("◐ Clearing Redis...")
-	client, err := jobqueue.NewRedisClient(cfg)
+	client, err := jobqueue.GetSharedRedisClient(cfg)
 	if err != nil || client == nil {
 		return err
 	}
-	defer client.Close()
 	if err := client.FlushDB(ctx).Err(); err != nil {
 		return err
 	}

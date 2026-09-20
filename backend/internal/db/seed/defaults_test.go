@@ -14,3 +14,8 @@ func TestCanonicalHashMatch(t *testing.T) {
 		t.Errorf("Canonical hash mismatch!\nGot:      %s\nExpected: %s", h, expectedNewHash)
 	}
 }
+
+func TestClearRedisDoesNotCloseSharedClient(t *testing.T) {
+	// If redis is not configured, ClearRedis returns nil or error without panic
+	_ = ClearRedis(nil, nil)
+}

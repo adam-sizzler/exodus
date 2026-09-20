@@ -28,6 +28,13 @@ func NewUserRepository(db *pgxpool.Pool) *UserRepository {
 // sorting and pagination applied in SQL (WHERE/ORDER BY/LIMIT/OFFSET), instead
 // of loading the whole users table into memory and slicing it in Go.
 func (r *UserRepository) getUsersTableRecords(ctx context.Context, whereSQL, orderSQL string, whereArgs []any, start, size int) ([]userRecord, int64, error) {
+	if size <= 0 || size > 1000 {
+		size = 25
+	}
+	if start < 0 {
+		start = 0
+	}
+
 	baseFrom := `FROM users u LEFT JOIN user_traffic ut ON ut.id = u.id ` + whereSQL
 
 	var total int64

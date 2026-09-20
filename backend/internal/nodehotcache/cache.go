@@ -154,7 +154,7 @@ func (c *Cache) GetMany(ctx context.Context, uuids []string) (map[string]HotCach
 
 		hot := HotCache{
 			SingboxUptime: parseInt64(uptimeRaw),
-			UsersOnline:   int(parseInt64(onlineRaw)),
+			UsersOnline:   parseInt(onlineRaw),
 		}
 		if len(infoRaw) > 0 && len(statsRaw) > 0 {
 			hot.System = &NodeSystem{
@@ -303,9 +303,17 @@ func stringValue(cmd *redis.StringCmd) string {
 	return strings.TrimSpace(cmd.Val())
 }
 
+func parseInt(raw string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
 func parseInt64(raw string) int64 {
 	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
-	if err != nil {
+	if err != nil || value < 0 {
 		return 0
 	}
 	return value

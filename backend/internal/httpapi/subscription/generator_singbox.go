@@ -12,6 +12,7 @@ CROSS-CUTTING RULES / НЕЯВНЫЕ ЗАВИСИМОСТИ:
 import (
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"math/rand"
 	"sort"
 	"strconv"
@@ -673,8 +674,12 @@ func extractEarlyDataFromPath(path string) (string, int) {
 }
 
 func appendUniqueStrings(base []string, extra ...string) []string {
-	result := make([]string, 0, len(base)+len(extra))
-	seen := make(map[string]struct{}, len(base)+len(extra))
+	capacity := len(base)
+	if len(extra) > 0 && (math.MaxInt-capacity > len(extra)) {
+		capacity += len(extra)
+	}
+	result := make([]string, 0, capacity)
+	seen := make(map[string]struct{}, capacity)
 	for _, value := range base {
 		value = strings.TrimSpace(value)
 		if value == "" {

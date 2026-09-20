@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 	"strconv"
@@ -137,7 +138,11 @@ func generateYAMLConfigExt(templateYAML []byte, hosts []SubscriptionHost, user S
 					middleEntries = append(middleEntries, entry)
 				}
 			}
-			finalEntries := make([]string, 0, len(middleEntries)+len(trailingSelectorProxyNames))
+			capacity := len(middleEntries)
+			if len(trailingSelectorProxyNames) > 0 && (math.MaxInt-capacity > len(trailingSelectorProxyNames)) {
+				capacity += len(trailingSelectorProxyNames)
+			}
+			finalEntries := make([]string, 0, capacity)
 			finalEntries = append(finalEntries, middleEntries...)
 			finalEntries = append(finalEntries, trailingSelectorProxyNames...)
 			setYAMLSequenceStrings(groupProxies, finalEntries)

@@ -2368,14 +2368,14 @@
                 }
             }
         },
-        "/hosts/actions/reorder": {
+        "/hosts/actions/clone": {
             "post": {
                 "security": [
                     {
                         "BearerAuth": []
                     }
                 ],
-                "description": "Reorder hosts",
+                "description": "Reorder or clone hosts",
                 "consumes": [
                     "application/json"
                 ],
@@ -2399,6 +2399,71 @@
                 "responses": {
                     "200": {
                         "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/shared.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/shared.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/hosts/actions/reorder": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Reorder or clone hosts",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Hosts Controller"
+                ],
+                "summary": "Host actions",
+                "parameters": [
+                    {
+                        "description": "Action payload",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -7290,6 +7355,86 @@
                 }
             }
         },
+        "/srs-lists/tags": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Get unique SRS list tags or set tags for an SRS list",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "SRS Lists Controller"
+                ],
+                "summary": "Manage SRS list tags",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/shared.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/shared.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Get unique SRS list tags or set tags for an SRS list",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "SRS Lists Controller"
+                ],
+                "summary": "Manage SRS list tags",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/shared.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/shared.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/srs-lists/{uuid}": {
             "get": {
                 "security": [
@@ -9847,14 +9992,14 @@
                         "BearerAuth": []
                     }
                 ],
-                "description": "Get user creations, expirations, HWID devices, and traffic within date range",
+                "description": "Get aggregated system digest between start and end timestamps",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "System Controller"
                 ],
-                "summary": "System activity digest",
+                "summary": "System digest",
                 "parameters": [
                     {
                         "type": "string",
@@ -11605,9 +11750,6 @@
                 "branding_settings": {
                     "type": "object",
                     "additionalProperties": {}
-                },
-                "default_username": {
-                    "type": "string"
                 },
                 "has_admin_configured": {
                     "type": "boolean"

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestParseConfigInbounds_Success(t *testing.T) {
@@ -234,6 +235,7 @@ func (m *mockEmptyRows) Scan(dest ...any) error                       { return n
 func (m *mockEmptyRows) Values() ([]any, error)                       { return nil, nil }
 func (m *mockEmptyRows) RawValues() [][]byte                          { return nil }
 func (m *mockEmptyRows) Conn() *pgx.Conn                              { return nil }
+func (m *mockEmptyRows) TypeMap() *pgtype.Map                         { return nil }
 
 func TestSyncConfigProfileInboundsTx_TagIsolationAndCleanup(t *testing.T) {
 	ctx := context.Background()

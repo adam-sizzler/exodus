@@ -77,8 +77,6 @@ definitions:
       branding_settings:
         additionalProperties: {}
         type: object
-      default_username:
-        type: string
       has_admin_configured:
         type: boolean
       password_settings:
@@ -2454,11 +2452,11 @@ paths:
       summary: Host by UUID
       tags:
       - Hosts Controller
-  /hosts/actions/reorder:
+  /hosts/actions/clone:
     post:
       consumes:
       - application/json
-      description: Reorder hosts
+      description: Reorder or clone hosts
       parameters:
       - description: Action payload
         in: body
@@ -2470,6 +2468,48 @@ paths:
       responses:
         "200":
           description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/shared.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/shared.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Host actions
+      tags:
+      - Hosts Controller
+  /hosts/actions/reorder:
+    post:
+      consumes:
+      - application/json
+      description: Reorder or clone hosts
+      parameters:
+      - description: Action payload
+        in: body
+        name: body
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "201":
+          description: Created
           schema:
             additionalProperties: true
             type: object
@@ -5633,6 +5673,57 @@ paths:
       summary: Bulk SRS rule list operations
       tags:
       - SRS Lists Controller
+  /srs-lists/tags:
+    get:
+      consumes:
+      - application/json
+      description: Get unique SRS list tags or set tags for an SRS list
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/shared.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/shared.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Manage SRS list tags
+      tags:
+      - SRS Lists Controller
+    patch:
+      consumes:
+      - application/json
+      description: Get unique SRS list tags or set tags for an SRS list
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/shared.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/shared.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Manage SRS list tags
+      tags:
+      - SRS Lists Controller
   /sub/{shortUuid}:
     get:
       description: Fetch subscription config (sing-box, xray, mihomo, base64) or user
@@ -7212,8 +7303,7 @@ paths:
       - System Controller
   /system/stats/digest:
     get:
-      description: Get user creations, expirations, HWID devices, and traffic within
-        date range
+      description: Get aggregated system digest between start and end timestamps
       parameters:
       - description: Start timestamp (RFC3339)
         in: query
@@ -7233,7 +7323,7 @@ paths:
             type: object
       security:
       - BearerAuth: []
-      summary: System activity digest
+      summary: System digest
       tags:
       - System Controller
   /system/stats/http:

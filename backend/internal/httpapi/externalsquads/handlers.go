@@ -420,28 +420,28 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpo
 	}
 
 	if req.SubscriptionSettings != nil {
-		if string(req.SubscriptionSettings) == "null" {
+		if shared.IsJSONNull(req.SubscriptionSettings) {
 			add("subscription_settings", nil)
 		} else {
 			add("subscription_settings", string(req.SubscriptionSettings))
 		}
 	}
 	if req.HostOverrides != nil {
-		if string(req.HostOverrides) == "null" {
+		if shared.IsJSONNull(req.HostOverrides) {
 			add("host_overrides", nil)
 		} else {
 			add("host_overrides", string(req.HostOverrides))
 		}
 	}
 	if req.ResponseHeadersAdd != nil {
-		if string(req.ResponseHeadersAdd) == "null" {
+		if shared.IsJSONNull(req.ResponseHeadersAdd) {
 			add("response_headers_add", nil)
 		} else {
 			add("response_headers_add", string(req.ResponseHeadersAdd))
 		}
 	}
 	if req.ResponseHeadersRemove != nil {
-		if string(req.ResponseHeadersRemove) == "null" {
+		if shared.IsJSONNull(req.ResponseHeadersRemove) {
 			add("response_headers_remove", "{}")
 		} else {
 			items := shared.ParsePgTextArray(string(req.ResponseHeadersRemove))
@@ -449,14 +449,14 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpo
 		}
 	}
 	if req.HWIDSettings != nil {
-		if string(req.HWIDSettings) == "null" {
+		if shared.IsJSONNull(req.HWIDSettings) {
 			add("hwid_settings", nil)
 		} else {
 			add("hwid_settings", string(req.HWIDSettings))
 		}
 	}
 	if req.CustomRemarks != nil {
-		if string(req.CustomRemarks) == "null" {
+		if shared.IsJSONNull(req.CustomRemarks) {
 			add("custom_remarks", nil)
 		} else {
 			add("custom_remarks", string(req.CustomRemarks))

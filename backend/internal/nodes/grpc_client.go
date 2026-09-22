@@ -40,8 +40,12 @@ type nodeState struct {
 	lastResponseAt   time.Time
 	isConnected      bool
 	isConnecting     bool
-	lastError        string
-	mutex            sync.RWMutex
+	lastError         string
+	hasSentStaticInfo    bool
+	lastStaticInfoSentAt time.Time
+	lastSingboxVer       string
+	lastNodeVer          string
+	mutex                sync.RWMutex
 }
 
 // monitorNode monitors a single node with reconnection logic.
@@ -201,6 +205,10 @@ func (nm *NodeMonitor) connectAndStream(state *nodeState) bool {
 	state.isConnected = true
 	state.isConnecting = false
 	state.lastError = ""
+	state.hasSentStaticInfo = false
+	state.lastStaticInfoSentAt = time.Time{}
+	state.lastSingboxVer = ""
+	state.lastNodeVer = ""
 	state.mutex.Unlock()
 
 	go nm.watchStreamHeartbeat(state, generation, nodeStreamIdleTimeout, nodeStreamWatchInterval)

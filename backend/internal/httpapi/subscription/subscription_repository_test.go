@@ -127,3 +127,42 @@ func TestConfigGenerators_ConcurrentStability(t *testing.T) {
 		}
 	}
 }
+
+func TestSubHistoryFallbackSemaphore(t *testing.T) {
+	// Verify that the semaphore has capacity 16 and non-blocking select drops when saturated
+	if cap(subHistoryFallbackSem) != 16 {
+		t.Fatalf("expected subHistoryFallbackSem capacity 16, got %d", cap(subHistoryFallbackSem))
+	}
+
+	// Fill all 16 slots
+	for i := 0; i < 16; i++ {
+		select {
+		case subHistoryFallbackSem <- struct{}{}:
+		default:
+			t.Fatalf("expected to fill slot %d", i)
+		}
+	}
+
+	// Attempting 17th acquire must drop via default
+	dropped := false
+	select {
+	case subHistoryFallbackSem <- struct{}{}:
+		t.Fatal("expected slot 17 to fail")
+	default:
+		dropped = true
+	}
+	if !dropped {
+		t.Fatal("expected 17th acquire to be dropped")
+	}
+
+	// Drain all 16 slots back
+	for i := 0; i < 16; i++ {
+		<-subHistoryFallbackSem
+	}
+
+	// Channel must now be empty
+	if len(subHistoryFallbackSem) != 0 {
+		t.Fatalf("expected empty semaphore, got len %d", len(subHistoryFallbackSem))
+	}
+}
+

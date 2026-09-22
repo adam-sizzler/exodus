@@ -13,6 +13,7 @@ import (
 	"exodus/internal/streamexport"
 	"exodus/internal/util"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -184,14 +185,13 @@ func addSubscriptionRequestRecord(ctx context.Context, dbConn db.DBTX, client *r
 	if srrType == "" {
 		srrType = "UNKNOWN"
 	}
-	if _, err := dbConn.Exec(ctx, `
+	batch := &pgx.Batch{}
+	batch.Queue(`
 		INSERT INTO user_subscription_request_history (user_id, srr_response_type, srr_rule_name, request_ip, user_agent)
 		VALUES ($1, $2, $3, $4, $5)
-	`, payload.UserID, srrType, payload.SRRRuleName, payload.RequestIP, payload.UserAgent); err != nil {
-		return err
-	}
+	`, payload.UserID, srrType, payload.SRRRuleName, payload.RequestIP, payload.UserAgent)
 
-	_, err := dbConn.Exec(ctx, `
+	batch.Queue(`
 		DELETE FROM user_subscription_request_history
 		WHERE user_id = $1
 		  AND id NOT IN (
@@ -202,6 +202,20 @@ func addSubscriptionRequestRecord(ctx context.Context, dbConn db.DBTX, client *r
 			  LIMIT 24
 		  )
 	`, payload.UserID, payload.UserID)
+
+	br := dbConn.SendBatch(ctx, batch)
+	var batchErr error
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil && batchErr == nil {
+			batchErr = err
+		}
+	}
+	if err := br.Close(); err != nil && batchErr == nil {
+		batchErr = err
+	}
+	if batchErr != nil {
+		return batchErr
+	}
 
 	if cfg != nil && cfg.Redis.ExportToStreamEnabled && client != nil {
 		if streamErr := streamexport.ExportSubscriptionRequest(ctx, client, true, cfg.Redis.ExportToStreamMaxLen, streamexport.SubscriptionRequestExport{
@@ -216,7 +230,7 @@ func addSubscriptionRequestRecord(ctx context.Context, dbConn db.DBTX, client *r
 		}
 	}
 
-	return err
+	return nil
 }
 
 func upsertHwidDevice(ctx context.Context, dbConn db.DBTX, payload UpsertHwidDevicePayload) error {

@@ -38,8 +38,8 @@ func TestWithCORS_CSPHeaders(t *testing.T) {
 		t.Errorf("expected default-src 'self', got CSP: %s", csp)
 	}
 
-	if !strings.Contains(csp, "script-src 'self' 'wasm-unsafe-eval'") {
-		t.Errorf("expected script-src 'self' 'wasm-unsafe-eval', got CSP: %s", csp)
+	if !strings.Contains(csp, "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'") {
+		t.Errorf("expected script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval', got CSP: %s", csp)
 	}
 
 	// Verify no '*' wildcard in script-src, connect-src, frame-ancestors, default-src

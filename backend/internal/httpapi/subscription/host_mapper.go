@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -97,13 +98,13 @@ func ApplyHostMapperToMap(target map[string]interface{}, operations []HostMapper
 
 // ShareLink represents a raw share link structure before serialization.
 type ShareLink struct {
-	Scheme   string            // "vless", "trojan", "ss", "hysteria2", "tuic", "vmess", "anytls"
-	Password string            // user credentials: UUID or password
-	Address  string            // host address
-	Port     int               // host port
-	Method   string            // for shadowsocks
-	Params   map[string]string // query params
-	Remark   string            // descriptive text / remark
+	Scheme   string     // "vless", "trojan", "ss", "hysteria2", "tuic", "vmess", "anytls"
+	Password string     // user credentials: UUID or password
+	Address  string     // host address
+	Port     int        // host port
+	Method   string     // for shadowsocks
+	Params   url.Values // query params
+	Remark   string     // descriptive text / remark
 }
 
 // ApplyBase64Mapper applies base64 mapper operations to a ShareLink and its query params.
@@ -112,7 +113,7 @@ func ApplyBase64Mapper(link *ShareLink, operations []HostMapperOperation, host S
 		return
 	}
 	if link.Params == nil {
-		link.Params = make(map[string]string)
+		link.Params = make(url.Values, len(operations))
 	}
 
 	for _, op := range operations {
@@ -127,10 +128,10 @@ func ApplyBase64Mapper(link *ShareLink, operations []HostMapperOperation, host S
 			case "password":
 				switch op.Op {
 				case "set":
-					link.Password = fmt.Sprintf("%v", op.Value)
+					link.Password = formatMapperValue(op.Value)
 				case "copy":
 					if val, ok := resolveSourceValue(op.From, host); ok {
-						link.Password = fmt.Sprintf("%v", val)
+						link.Password = formatMapperValue(val)
 					}
 				case "unset":
 					link.Password = ""
@@ -138,10 +139,10 @@ func ApplyBase64Mapper(link *ShareLink, operations []HostMapperOperation, host S
 			case "address":
 				switch op.Op {
 				case "set":
-					link.Address = fmt.Sprintf("%v", op.Value)
+					link.Address = formatMapperValue(op.Value)
 				case "copy":
 					if val, ok := resolveSourceValue(op.From, host); ok {
-						link.Address = fmt.Sprintf("%v", val)
+						link.Address = formatMapperValue(val)
 					}
 				}
 			case "port":
@@ -160,10 +161,10 @@ func ApplyBase64Mapper(link *ShareLink, operations []HostMapperOperation, host S
 			case "remark":
 				switch op.Op {
 				case "set":
-					link.Remark = fmt.Sprintf("%v", op.Value)
+					link.Remark = formatMapperValue(op.Value)
 				case "copy":
 					if val, ok := resolveSourceValue(op.From, host); ok {
-						link.Remark = fmt.Sprintf("%v", val)
+						link.Remark = formatMapperValue(val)
 					}
 				case "unset":
 					link.Remark = ""
@@ -171,10 +172,10 @@ func ApplyBase64Mapper(link *ShareLink, operations []HostMapperOperation, host S
 			case "method":
 				switch op.Op {
 				case "set":
-					link.Method = fmt.Sprintf("%v", op.Value)
+					link.Method = formatMapperValue(op.Value)
 				case "copy":
 					if val, ok := resolveSourceValue(op.From, host); ok {
-						link.Method = fmt.Sprintf("%v", val)
+						link.Method = formatMapperValue(val)
 					}
 				case "unset":
 					link.Method = ""
@@ -186,14 +187,37 @@ func ApplyBase64Mapper(link *ShareLink, operations []HostMapperOperation, host S
 		// Query params operation
 		switch op.Op {
 		case "set":
-			link.Params[to] = fmt.Sprintf("%v", op.Value)
+			link.Params.Set(to, formatMapperValue(op.Value))
 		case "unset":
-			delete(link.Params, to)
+			link.Params.Del(to)
 		case "copy":
 			if val, ok := resolveSourceValue(op.From, host); ok {
-				link.Params[to] = fmt.Sprintf("%v", val)
+				link.Params.Set(to, formatMapperValue(val))
 			}
 		}
+	}
+}
+
+func formatMapperValue(val any) string {
+	if val == nil {
+		return ""
+	}
+	switch v := val.(type) {
+	case string:
+		return v
+	case []byte:
+		return string(v)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", val)
 	}
 }
 

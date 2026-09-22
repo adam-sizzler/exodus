@@ -53,3 +53,100 @@ func BenchmarkExtractSyntheticHwidHeaders(b *testing.B) {
 		_ = extractSyntheticHwidHeaders(req, userUUID, "1.2.3.4")
 	}
 }
+
+func BenchmarkBuildVlessLink(b *testing.B) {
+	vlessProto := "vless"
+	realitySec := "reality"
+	tcpNet := "tcp"
+	sni := "example.com"
+	fp := "chrome"
+	host := SubscriptionHost{
+		Remark:          "US-Reality-1",
+		Address:         "198.51.100.1",
+		Port:            443,
+		InboundType:     &vlessProto,
+		InboundSecurity: &realitySec,
+		InboundNetwork:  &tcpNet,
+		SNI:             &sni,
+		Fingerprint:     &fp,
+	}
+	user := SubscriptionUser{
+		VlessUUID: "11111111-2222-3333-4444-555555555555",
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = buildVlessLink(host, user)
+	}
+}
+
+func BenchmarkBuildTrojanLink(b *testing.B) {
+	trojanProto := "trojan"
+	tlsSec := "tls"
+	tcpNet := "tcp"
+	sni := "example.com"
+	host := SubscriptionHost{
+		Remark:          "DE-Trojan-1",
+		Address:         "198.51.100.2",
+		Port:            443,
+		InboundType:     &trojanProto,
+		InboundSecurity: &tlsSec,
+		InboundNetwork:  &tcpNet,
+		SNI:             &sni,
+	}
+	user := SubscriptionUser{
+		TrojanPassword: "super-secret-password",
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = buildTrojanLink(host, user)
+	}
+}
+
+func BenchmarkBuildSubscriptionLinks(b *testing.B) {
+	vlessProto := "vless"
+	realitySec := "reality"
+	tcpNet := "tcp"
+	sni := "example.com"
+	fp := "chrome"
+	ssProto := "shadowsocks"
+
+	hosts := make([]SubscriptionHost, 16)
+	for i := 0; i < 16; i++ {
+		if i%4 == 0 {
+			hosts[i] = SubscriptionHost{
+				Remark:      "SS-Server",
+				Address:     "198.51.100.10",
+				Port:        8388,
+				InboundType: &ssProto,
+			}
+		} else {
+			hosts[i] = SubscriptionHost{
+				Remark:          "VLESS-Server",
+				Address:         "198.51.100.1",
+				Port:            443,
+				InboundType:     &vlessProto,
+				InboundSecurity: &realitySec,
+				InboundNetwork:  &tcpNet,
+				SNI:             &sni,
+				Fingerprint:     &fp,
+			}
+		}
+	}
+	user := SubscriptionUser{
+		ShortUUID: "usr123",
+		VlessUUID: "11111111-2222-3333-4444-555555555555",
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		links, ssConf := buildSubscriptionLinks(hosts, user)
+		_ = links
+		_ = ssConf
+	}
+}
+

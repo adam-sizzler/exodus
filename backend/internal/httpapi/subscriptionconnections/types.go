@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"exodus/internal/httpapi/shared"
+
 	"github.com/jackc/pgx/v5"
 )
 
@@ -20,7 +22,7 @@ type OptionalString struct {
 
 func (o *OptionalString) UnmarshalJSON(data []byte) error {
 	o.Set = true
-	if string(data) == "null" {
+	if shared.IsJSONNull(data) {
 		o.Value = nil
 		return nil
 	}

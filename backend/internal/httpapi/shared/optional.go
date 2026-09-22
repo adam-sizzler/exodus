@@ -1,6 +1,16 @@
 package shared
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
+
+// IsJSONNull checks if raw JSON data is either empty or the literal "null"
+// without heap-allocating a string conversion.
+func IsJSONNull(data []byte) bool {
+	trimmed := bytes.TrimSpace(data)
+	return len(trimmed) == 0 || (len(trimmed) == 4 && trimmed[0] == 'n' && trimmed[1] == 'u' && trimmed[2] == 'l' && trimmed[3] == 'l')
+}
 
 type OptionalString struct {
 	Set   bool
@@ -9,7 +19,7 @@ type OptionalString struct {
 
 func (o *OptionalString) UnmarshalJSON(data []byte) error {
 	o.Set = true
-	if string(data) == "null" {
+	if IsJSONNull(data) {
 		o.Value = nil
 		return nil
 	}
@@ -28,7 +38,7 @@ type OptionalInt struct {
 
 func (o *OptionalInt) UnmarshalJSON(data []byte) error {
 	o.Set = true
-	if string(data) == "null" {
+	if IsJSONNull(data) {
 		o.Value = nil
 		return nil
 	}
@@ -47,7 +57,7 @@ type OptionalInt64 struct {
 
 func (o *OptionalInt64) UnmarshalJSON(data []byte) error {
 	o.Set = true
-	if string(data) == "null" {
+	if IsJSONNull(data) {
 		o.Value = nil
 		return nil
 	}

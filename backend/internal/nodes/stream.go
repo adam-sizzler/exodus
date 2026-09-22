@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"exodus/internal/jobqueue"
+	"exodus/internal/nodehotcache"
 	"exodus/internal/notifications"
 	"exodus/internal/proto"
 
@@ -42,9 +43,13 @@ func (nm *NodeMonitor) receiveStream(state *nodeState) {
 					return
 				}
 				if st.Code() == codes.Unavailable {
-					reason := "Node unavailable"
-					if strings.TrimSpace(st.Message()) != "" {
-						reason = fmt.Sprintf("Node unavailable: %s", st.Message())
+					reason := formatNodeConnectionError(err)
+					if reason == err.Error() {
+						if strings.TrimSpace(st.Message()) != "" {
+							reason = fmt.Sprintf("Node unavailable: %s", st.Message())
+						} else {
+							reason = "Node unavailable"
+						}
 					}
 					nm.cfg.Logger.Warn(
 						"Node unavailable",
@@ -56,13 +61,17 @@ func (nm *NodeMonitor) receiveStream(state *nodeState) {
 					return
 				}
 			}
-			nm.cfg.Logger.Error("Stream error", "node", state.nodeName, "error", err)
-			nm.handleDisconnect(state, fmt.Sprintf("Stream error: %v", err))
+			friendlyErr := formatNodeConnectionError(err)
+			if friendlyErr == err.Error() {
+				friendlyErr = fmt.Sprintf("Stream error: %v", err)
+			}
+			nm.cfg.Logger.Error("Stream error", "node", state.nodeName, "error", friendlyErr)
+			nm.handleDisconnect(state, friendlyErr)
 			return
 		}
 
 		nm.markStreamActivity(state)
-		nm.processResponse(state.nodeName, resp)
+		nm.processResponse(state, resp)
 	}
 }
 
@@ -73,6 +82,10 @@ func (nm *NodeMonitor) handleDisconnect(state *nodeState, reason string) {
 	state.isConnected = false
 	state.isConnecting = false
 	state.lastError = reason
+	state.hasSentStaticInfo = false
+	state.lastStaticInfoSentAt = time.Time{}
+	state.lastSingboxVer = ""
+	state.lastNodeVer = ""
 	if state.streamCancel != nil {
 		state.streamCancel()
 		state.streamCancel = nil
@@ -84,8 +97,24 @@ func (nm *NodeMonitor) handleDisconnect(state *nodeState, reason string) {
 		_ = state.conn.Close()
 		state.conn = nil
 	}
+	state.client = nil
 	state.lastResponseAt = time.Time{}
+	nodeUUID := state.nodeUUID
 	state.mutex.Unlock()
+
+	// Unconditionally delete all node transient keys from Redis hot cache immediately
+	if nm.hotCache != nil && nodeUUID != "" {
+		_ = nm.hotCache.DeleteTransient(context.Background(), nodeUUID)
+	}
+
+	if nodeUUID != "" {
+		nm.metricsLock.Lock()
+		if s, ok := nm.metricsByNodeUUID[nodeUUID]; ok && s != nil {
+			s.UsersOnline = 0
+			s.UpdatedAt = time.Now().UTC()
+		}
+		nm.metricsLock.Unlock()
+	}
 
 	if wasConnected {
 		nm.updateConnectionStatus(state.nodeName, false, false, reason)
@@ -100,24 +129,28 @@ func (nm *NodeMonitor) handleDisconnect(state *nodeState, reason string) {
 }
 
 // processResponse processes node response data.
-func (nm *NodeMonitor) processResponse(nodeName string, resp *proto.NodeDataResponse) {
+func (nm *NodeMonitor) processResponse(state *nodeState, resp *proto.NodeDataResponse) {
+	if state == nil {
+		return
+	}
 	switch payload := resp.Response.(type) {
 	case *proto.NodeDataResponse_Stats:
-		nm.cfg.Logger.Trace("Node stats received", "node", nodeName)
-		nm.updateNodeRuntimeFromStats(nodeName, payload.Stats.GetStats())
+		nm.cfg.Logger.Trace("Node stats received", "node", state.nodeName)
+		nm.updateNodeRuntimeFromStats(state, payload.Stats.GetStats())
 	case *proto.NodeDataResponse_Users:
-		nm.cfg.Logger.Trace("Node users received", "node", nodeName)
+		nm.cfg.Logger.Trace("Node users received", "node", state.nodeName)
 	case *proto.NodeDataResponse_LogData:
-		nm.cfg.Logger.Trace("Node log data received", "node", nodeName)
+		nm.cfg.Logger.Trace("Node log data received", "node", state.nodeName)
 	default:
-		nm.cfg.Logger.Trace("Node message received", "node", nodeName)
+		nm.cfg.Logger.Trace("Node message received", "node", state.nodeName)
 	}
 }
 
-func (nm *NodeMonitor) updateNodeRuntimeFromStats(nodeName string, stats []*proto.Stat) {
-	if len(stats) == 0 {
+func (nm *NodeMonitor) updateNodeRuntimeFromStats(state *nodeState, stats []*proto.Stat) {
+	if len(stats) == 0 || state == nil {
 		return
 	}
+	nodeName := state.nodeName
 
 	var (
 		rawCoreStatus     string
@@ -173,6 +206,36 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(nodeName string, stats []*prot
 	systemInfo := parseOptionalJSONRaw(rawSystemInfo)
 	systemStats := parseOptionalJSONRaw(rawSystemStats)
 	usersOnline := trafficDelta.UsersOnline
+
+	now := time.Now()
+	state.mutex.Lock()
+	needStaticInfo := !state.hasSentStaticInfo ||
+		now.Sub(state.lastStaticInfoSentAt) > 30*time.Minute ||
+		(singboxVersion != "" && singboxVersion != state.lastSingboxVer) ||
+		(nodeVersion != "" && nodeVersion != state.lastNodeVer)
+
+	if needStaticInfo {
+		state.hasSentStaticInfo = true
+		state.lastStaticInfoSentAt = now
+		if singboxVersion != "" {
+			state.lastSingboxVer = singboxVersion
+		}
+		if nodeVersion != "" {
+			state.lastNodeVer = nodeVersion
+		}
+	}
+	state.mutex.Unlock()
+
+	var (
+		cachedSystemInfo json.RawMessage
+		cachedSingboxVer string
+		cachedNodeVer    string
+	)
+	if needStaticInfo {
+		cachedSystemInfo = systemInfo
+		cachedSingboxVer = singboxVersion
+		cachedNodeVer = nodeVersion
+	}
 
 	persistedNodeUUID := ""
 	firstConnectedEvents := make([]notifications.Event, 0)
@@ -366,7 +429,7 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(nodeName string, stats []*prot
 	}
 
 	nm.updateNodeMetricsSnapshot(persistedNodeUUID, usersOnline, trafficDelta)
-	nm.updateHotCacheNodeRuntime(nodeName, persistedNodeUUID, singboxVersion, nodeVersion, hasSingboxUptime, singboxUptime, usersOnline, systemInfo, systemStats, trafficDelta)
+	nm.updateHotCacheNodeRuntime(nodeName, persistedNodeUUID, cachedSingboxVer, cachedNodeVer, hasSingboxUptime, singboxUptime, usersOnline, cachedSystemInfo, systemStats, trafficDelta)
 }
 
 func (nm *NodeMonitor) updateHotCacheNodeRuntime(
@@ -390,21 +453,15 @@ func (nm *NodeMonitor) updateHotCacheNodeRuntime(
 	}
 
 	if nm.hotCache != nil && strings.TrimSpace(nodeUUID) != "" {
-		if len(systemInfo) > 0 {
-			_ = nm.hotCache.SetSystemInfo(ctx, nodeUUID, systemInfo)
-		}
-		if len(systemStats) > 0 {
-			_ = nm.hotCache.SetSystemStats(ctx, nodeUUID, systemStats)
-		}
-		if singboxVersion != "" || nodeVersion != "" {
-			_ = nm.hotCache.SetVersions(ctx, nodeUUID, singboxVersion, nodeVersion)
-		}
-		if hasSingboxUptime {
-			_ = nm.hotCache.SetUptime(ctx, nodeUUID, singboxUptime)
-		}
-		if usersOnline >= 0 {
-			_ = nm.hotCache.SetUsersOnline(ctx, nodeUUID, usersOnline)
-		}
+		_ = nm.hotCache.SetNodeRuntimeState(ctx, nodeUUID, nodehotcache.NodeRuntimeUpdate{
+			SystemInfo:       systemInfo,
+			SystemStats:      systemStats,
+			SingboxVersion:   singboxVersion,
+			NodeVersion:      nodeVersion,
+			HasSingboxUptime: hasSingboxUptime,
+			SingboxUptime:    singboxUptime,
+			UsersOnline:      usersOnline,
+		})
 	}
 }
 

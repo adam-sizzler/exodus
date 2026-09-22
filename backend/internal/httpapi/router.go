@@ -20,7 +20,6 @@ import (
 	"exodus/internal/httpapi/infrabilling"
 	"exodus/internal/httpapi/keygen"
 	"exodus/internal/httpapi/metadata"
-	"exodus/internal/httpapi/middleware"
 	"exodus/internal/httpapi/nodeintegrations"
 	"exodus/internal/httpapi/nodeplugins"
 	"exodus/internal/httpapi/nodes"
@@ -73,8 +72,7 @@ func NewAPIHandler(pools *db.Pools, cfg *config.BackendConfig) http.Handler {
 	// Non-/api/ public routes (e.g. /health)
 	mainMux.HandleFunc("/health", health.HealthHandler())
 
-	handler := middleware.WithRequestLogging(cfg, "api", system.Middleware(routeCounter)(mainMux))
-	return middleware.WithCORS(cfg, handler)
+	return system.Middleware(routeCounter)(mainMux)
 }
 
 func isPublicPath(path string, cfg *config.BackendConfig) bool {

@@ -79,8 +79,11 @@ func WithRequestLogging(cfg *config.BackendConfig, component string, next http.H
 		}
 
 		role := logger.RoleAPI
+		comp := component
 		if strings.EqualFold(component, "metrics") {
 			role = logger.RoleScheduler
+		} else if strings.Contains(r.URL.Path, "/api/") {
+			comp = "api"
 		}
 		serviceLogger := cfg.Logger.RoleService(role, logger.ServiceHTTP)
 
@@ -88,7 +91,7 @@ func WithRequestLogging(cfg *config.BackendConfig, component string, next http.H
 		msg := formatRequestLogMessage(msgBuf[:0], r.Method, r.URL.Path, statusCode, durationMs)
 		if cfg.Log.IsHTTPLoggingEnabled {
 			serviceLogger.Info(msg,
-				"component", component,
+				"component", comp,
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", statusCode,
@@ -97,7 +100,7 @@ func WithRequestLogging(cfg *config.BackendConfig, component string, next http.H
 			)
 		} else {
 			serviceLogger.Debug(msg,
-				"component", component,
+				"component", comp,
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", statusCode,
@@ -107,7 +110,7 @@ func WithRequestLogging(cfg *config.BackendConfig, component string, next http.H
 		}
 		if serviceLogger.IsTraceEnabled() {
 			serviceLogger.Trace("HTTP request details",
-				"component", component,
+				"component", comp,
 				"method", r.Method,
 				"path", r.URL.Path,
 				"query", r.URL.RawQuery,

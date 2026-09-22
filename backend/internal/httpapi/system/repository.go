@@ -186,7 +186,7 @@ func readNodesRecap(ctx context.Context, db *pgxpool.Pool, cfg *config.BackendCo
 
 	uuids := make([]string, 0, recap.total)
 
-	rows, err := db.Query(ctx, `SELECT uuid FROM nodes`)
+	rows, err := db.Query(ctx, `SELECT uuid FROM nodes WHERE is_disabled = false AND is_connected = true`)
 	if err != nil {
 		return recap, err
 	}

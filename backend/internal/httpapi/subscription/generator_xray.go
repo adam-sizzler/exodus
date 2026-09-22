@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -54,7 +53,7 @@ func buildSubscriptionLinks(hosts []SubscriptionHost, user SubscriptionUser) ([]
 
 func buildSubscriptionLinksExt(hosts []SubscriptionHost, user SubscriptionUser, isExtendedClient bool) ([]string, map[string]string) {
 	links := make([]string, 0, len(hosts))
-	ssConfLinks := make(map[string]string)
+	ssConfLinks := make(map[string]string, len(hosts))
 	for _, host := range hosts {
 		if hostExcludesResponseType(host.ExcludeFromSubscriptionTypes, responseTypeXrayBase64) {
 			continue
@@ -65,7 +64,7 @@ func buildSubscriptionLinksExt(hosts []SubscriptionHost, user SubscriptionUser, 
 		}
 		if isExtendedClient && host.ServerDescription != nil && strings.TrimSpace(*host.ServerDescription) != "" {
 			descB64 := base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(*host.ServerDescription)))
-			link = fmt.Sprintf("%s?serverDescription=%s", link, descB64)
+			link = link + "?serverDescription=" + descB64
 		}
 		links = append(links, link)
 		if protocol == "shadowsocks" || protocol == "ss" {
@@ -75,7 +74,17 @@ func buildSubscriptionLinksExt(hosts []SubscriptionHost, user SubscriptionUser, 
 			}
 			encoded := base64.RawURLEncoding.EncodeToString([]byte(remark))
 			domain := host.Address
-			ssConfLinks[remark] = fmt.Sprintf("ssconf://%s/%s/ss/%s#%s", domain, user.ShortUUID, encoded, encodeRemark(remark))
+			var sb strings.Builder
+			sb.Grow(len("ssconf://") + len(domain) + 1 + len(user.ShortUUID) + len("/ss/") + len(encoded) + 1 + len(remark)*3)
+			sb.WriteString("ssconf://")
+			sb.WriteString(domain)
+			sb.WriteByte('/')
+			sb.WriteString(user.ShortUUID)
+			sb.WriteString("/ss/")
+			sb.WriteString(encoded)
+			sb.WriteByte('#')
+			sb.WriteString(encodeRemark(remark))
+			ssConfLinks[remark] = sb.String()
 		}
 	}
 	return links, ssConfLinks
@@ -149,33 +158,72 @@ func effectiveNaiveUsername(user SubscriptionUser) string {
 	return firstNonEmpty(user.Username, user.ShortUUID, user.UUID)
 }
 
-func mapValuesToQueryParams(params *url.Values) map[string]string {
-	m := make(map[string]string)
-	if params == nil {
-		return m
+func formatShareURL(scheme, password, address string, port int, query, remark string, escapePassword bool) string {
+	var sb strings.Builder
+	pass := password
+	if escapePassword {
+		pass = url.QueryEscape(password)
 	}
-	for k, v := range *params {
-		if len(v) > 0 {
-			m[k] = v[0]
-		}
+	rem := encodeRemark(remark)
+	extraLen := len(scheme) + 3 + len(pass) + 1 + len(address) + 6 + len(rem) + 2
+	if query != "" {
+		extraLen += len(query) + 1
 	}
-	return m
+	sb.Grow(extraLen)
+	sb.WriteString(scheme)
+	sb.WriteString("://")
+	sb.WriteString(pass)
+	sb.WriteByte('@')
+	sb.WriteString(address)
+	sb.WriteByte(':')
+	sb.WriteString(strconv.Itoa(port))
+	if query != "" {
+		sb.WriteByte('?')
+		sb.WriteString(query)
+	}
+	sb.WriteByte('#')
+	sb.WriteString(rem)
+	return sb.String()
 }
 
-func encodeQueryParams(params map[string]string) string {
-	if len(params) == 0 {
-		return ""
+func formatTuicURL(uuidStr, password, address string, port int, query, remark string) string {
+	var sb strings.Builder
+	rem := encodeRemark(remark)
+	extraLen := 7 + len(uuidStr) + 1 + len(password) + 1 + len(address) + 6 + len(rem) + 2
+	if query != "" {
+		extraLen += len(query) + 1
 	}
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
+	sb.Grow(extraLen)
+	sb.WriteString("tuic://")
+	sb.WriteString(uuidStr)
+	sb.WriteByte(':')
+	sb.WriteString(password)
+	sb.WriteByte('@')
+	sb.WriteString(address)
+	sb.WriteByte(':')
+	sb.WriteString(strconv.Itoa(port))
+	if query != "" {
+		sb.WriteByte('?')
+		sb.WriteString(query)
 	}
-	sort.Strings(keys)
-	v := url.Values{}
-	for _, k := range keys {
-		v.Set(k, params[k])
-	}
-	return v.Encode()
+	sb.WriteByte('#')
+	sb.WriteString(rem)
+	return sb.String()
+}
+
+func formatShadowsocksURL(encodedCreds, address string, port int, remark string) string {
+	var sb strings.Builder
+	rem := encodeRemark(remark)
+	sb.Grow(5 + len(encodedCreds) + 1 + len(address) + 6 + len(rem) + 1)
+	sb.WriteString("ss://")
+	sb.WriteString(encodedCreds)
+	sb.WriteByte('@')
+	sb.WriteString(address)
+	sb.WriteByte(':')
+	sb.WriteString(strconv.Itoa(port))
+	sb.WriteByte('#')
+	sb.WriteString(rem)
+	return sb.String()
 }
 
 func buildVlessLink(host SubscriptionHost, user SubscriptionUser) string {
@@ -183,9 +231,9 @@ func buildVlessLink(host SubscriptionHost, user SubscriptionUser) string {
 	if credential == "" {
 		return ""
 	}
-	params := url.Values{}
+	params := make(url.Values, 12)
 	params.Set("encryption", "none")
-	applyTransportParams(&params, host)
+	applyTransportParams(params, host)
 	remark := host.Remark
 	if remark == "" {
 		remark = host.Address
@@ -196,7 +244,7 @@ func buildVlessLink(host SubscriptionHost, user SubscriptionUser) string {
 		Password: credential,
 		Address:  host.Address,
 		Port:     host.Port,
-		Params:   mapValuesToQueryParams(&params),
+		Params:   params,
 		Remark:   remark,
 	}
 
@@ -204,11 +252,7 @@ func buildVlessLink(host SubscriptionHost, user SubscriptionUser) string {
 		ApplyBase64Mapper(&link, host.Mapper.Base64, host)
 	}
 
-	q := encodeQueryParams(link.Params)
-	if q != "" {
-		return fmt.Sprintf("vless://%s@%s:%d?%s#%s", link.Password, link.Address, link.Port, q, encodeRemark(link.Remark))
-	}
-	return fmt.Sprintf("vless://%s@%s:%d#%s", link.Password, link.Address, link.Port, encodeRemark(link.Remark))
+	return formatShareURL("vless", link.Password, link.Address, link.Port, link.Params.Encode(), link.Remark, false)
 }
 
 func buildTrojanLink(host SubscriptionHost, user SubscriptionUser) string {
@@ -216,8 +260,8 @@ func buildTrojanLink(host SubscriptionHost, user SubscriptionUser) string {
 	if credential == "" {
 		return ""
 	}
-	params := url.Values{}
-	applyTransportParams(&params, host)
+	params := make(url.Values, 12)
+	applyTransportParams(params, host)
 	remark := host.Remark
 	if remark == "" {
 		remark = host.Address
@@ -228,7 +272,7 @@ func buildTrojanLink(host SubscriptionHost, user SubscriptionUser) string {
 		Password: credential,
 		Address:  host.Address,
 		Port:     host.Port,
-		Params:   mapValuesToQueryParams(&params),
+		Params:   params,
 		Remark:   remark,
 	}
 
@@ -236,11 +280,7 @@ func buildTrojanLink(host SubscriptionHost, user SubscriptionUser) string {
 		ApplyBase64Mapper(&link, host.Mapper.Base64, host)
 	}
 
-	q := encodeQueryParams(link.Params)
-	if q != "" {
-		return fmt.Sprintf("trojan://%s@%s:%d?%s#%s", url.QueryEscape(link.Password), link.Address, link.Port, q, encodeRemark(link.Remark))
-	}
-	return fmt.Sprintf("trojan://%s@%s:%d#%s", url.QueryEscape(link.Password), link.Address, link.Port, encodeRemark(link.Remark))
+	return formatShareURL("trojan", link.Password, link.Address, link.Port, link.Params.Encode(), link.Remark, true)
 }
 
 func buildShadowsocksLink(host SubscriptionHost, user SubscriptionUser) string {
@@ -263,7 +303,7 @@ func buildShadowsocksLink(host SubscriptionHost, user SubscriptionUser) string {
 		Address:  host.Address,
 		Port:     host.Port,
 		Method:   method,
-		Params:   make(map[string]string),
+		Params:   make(url.Values, 2),
 		Remark:   remark,
 	}
 
@@ -273,7 +313,7 @@ func buildShadowsocksLink(host SubscriptionHost, user SubscriptionUser) string {
 
 	creds := fmt.Sprintf("%s:%s", link.Method, link.Password)
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(creds))
-	return fmt.Sprintf("ss://%s@%s:%d#%s", encoded, link.Address, link.Port, encodeRemark(link.Remark))
+	return formatShadowsocksURL(encoded, link.Address, link.Port, link.Remark)
 }
 
 func buildHysteria2Link(host SubscriptionHost, user SubscriptionUser) string {
@@ -281,7 +321,7 @@ func buildHysteria2Link(host SubscriptionHost, user SubscriptionUser) string {
 	if credential == "" {
 		return ""
 	}
-	params := url.Values{}
+	params := make(url.Values, 6)
 	sni := resolveFinalServerName(host, "")
 	if sni != "" {
 		params.Set("sni", sni)
@@ -304,7 +344,7 @@ func buildHysteria2Link(host SubscriptionHost, user SubscriptionUser) string {
 		Password: credential,
 		Address:  host.Address,
 		Port:     host.Port,
-		Params:   mapValuesToQueryParams(&params),
+		Params:   params,
 		Remark:   remark,
 	}
 
@@ -312,11 +352,7 @@ func buildHysteria2Link(host SubscriptionHost, user SubscriptionUser) string {
 		ApplyBase64Mapper(&link, host.Mapper.Base64, host)
 	}
 
-	query := encodeQueryParams(link.Params)
-	if query != "" {
-		return fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s", url.QueryEscape(link.Password), link.Address, link.Port, query, encodeRemark(link.Remark))
-	}
-	return fmt.Sprintf("hysteria2://%s@%s:%d#%s", url.QueryEscape(link.Password), link.Address, link.Port, encodeRemark(link.Remark))
+	return formatShareURL("hysteria2", link.Password, link.Address, link.Port, link.Params.Encode(), link.Remark, true)
 }
 
 func buildAnytlsLink(host SubscriptionHost, user SubscriptionUser) string {
@@ -324,8 +360,8 @@ func buildAnytlsLink(host SubscriptionHost, user SubscriptionUser) string {
 	if credential == "" {
 		return ""
 	}
-	params := url.Values{}
-	applyTransportParams(&params, host)
+	params := make(url.Values, 12)
+	applyTransportParams(params, host)
 	remark := host.Remark
 	if remark == "" {
 		remark = host.Address
@@ -336,7 +372,7 @@ func buildAnytlsLink(host SubscriptionHost, user SubscriptionUser) string {
 		Password: credential,
 		Address:  host.Address,
 		Port:     host.Port,
-		Params:   mapValuesToQueryParams(&params),
+		Params:   params,
 		Remark:   remark,
 	}
 
@@ -344,11 +380,7 @@ func buildAnytlsLink(host SubscriptionHost, user SubscriptionUser) string {
 		ApplyBase64Mapper(&link, host.Mapper.Base64, host)
 	}
 
-	query := encodeQueryParams(link.Params)
-	if query != "" {
-		return fmt.Sprintf("anytls://%s@%s:%d?%s#%s", url.QueryEscape(link.Password), link.Address, link.Port, query, encodeRemark(link.Remark))
-	}
-	return fmt.Sprintf("anytls://%s@%s:%d#%s", url.QueryEscape(link.Password), link.Address, link.Port, encodeRemark(link.Remark))
+	return formatShareURL("anytls", link.Password, link.Address, link.Port, link.Params.Encode(), link.Remark, true)
 }
 
 func buildTuicLink(host SubscriptionHost, user SubscriptionUser) string {
@@ -357,7 +389,7 @@ func buildTuicLink(host SubscriptionHost, user SubscriptionUser) string {
 		return ""
 	}
 	uuidStr := user.VlessUUID
-	params := url.Values{}
+	params := make(url.Values, 6)
 	sni := ""
 	if host.SNI != nil {
 		sni = *host.SNI
@@ -381,7 +413,7 @@ func buildTuicLink(host SubscriptionHost, user SubscriptionUser) string {
 		Password: credential,
 		Address:  host.Address,
 		Port:     host.Port,
-		Params:   mapValuesToQueryParams(&params),
+		Params:   params,
 		Remark:   remark,
 	}
 
@@ -389,11 +421,7 @@ func buildTuicLink(host SubscriptionHost, user SubscriptionUser) string {
 		ApplyBase64Mapper(&link, host.Mapper.Base64, host)
 	}
 
-	query := encodeQueryParams(link.Params)
-	if query != "" {
-		return fmt.Sprintf("tuic://%s:%s@%s:%d?%s#%s", uuidStr, link.Password, link.Address, link.Port, query, encodeRemark(link.Remark))
-	}
-	return fmt.Sprintf("tuic://%s:%s@%s:%d#%s", uuidStr, link.Password, link.Address, link.Port, encodeRemark(link.Remark))
+	return formatTuicURL(uuidStr, link.Password, link.Address, link.Port, link.Params.Encode(), link.Remark)
 }
 
 func buildVmessLink(_ SubscriptionHost, _ SubscriptionUser) string {
@@ -401,7 +429,10 @@ func buildVmessLink(_ SubscriptionHost, _ SubscriptionUser) string {
 	return ""
 }
 
-func applyTransportParams(params *url.Values, host SubscriptionHost) {
+func applyTransportParams(params url.Values, host SubscriptionHost) {
+	if params == nil {
+		return
+	}
 	defaults := resolveSingboxInboundDefaults(host)
 	network := "tcp"
 	if host.InboundNetwork != nil && *host.InboundNetwork != "" {

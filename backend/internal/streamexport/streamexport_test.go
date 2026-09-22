@@ -166,3 +166,52 @@ func TestLiveRedisStreamExportIfAvailable(t *testing.T) {
 		t.Errorf("expected srrRuleName='SingBox Rule', got %v", subMsg["srrRuleName"])
 	}
 }
+
+func TestFormatUserUsageRecords(t *testing.T) {
+	// Empty or all zero
+	if got := formatUserUsageRecords(nil); got != "" {
+		t.Fatalf("expected empty for nil, got %q", got)
+	}
+	if got := formatUserUsageRecords([]UserUsageEntry{{UserID: 0, TotalBytes: 100}, {UserID: 1, TotalBytes: 0}}); got != "" {
+		t.Fatalf("expected empty for non-positive, got %q", got)
+	}
+
+	// Single entry
+	if got := formatUserUsageRecords([]UserUsageEntry{{UserID: 42, TotalBytes: 1024}}); got != "42:1024" {
+		t.Fatalf("expected '42:1024', got %q", got)
+	}
+
+	// Multiple entries with some invalid filtered out
+	entries := []UserUsageEntry{
+		{UserID: 1, TotalBytes: 100},
+		{UserID: -1, TotalBytes: 50},
+		{UserID: 2, TotalBytes: 200},
+		{UserID: 3, TotalBytes: 0},
+		{UserID: 4, TotalBytes: 400},
+	}
+	expected := "1:100;2:200;4:400"
+	if got := formatUserUsageRecords(entries); got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
+func BenchmarkFormatUserUsageRecords(b *testing.B) {
+	entries := make([]UserUsageEntry, 1000)
+	for i := range entries {
+		entries[i] = UserUsageEntry{
+			UserID:     int64(i + 1),
+			TotalBytes: int64((i + 1) * 1024),
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		res := formatUserUsageRecords(entries)
+		if len(res) == 0 {
+			b.Fatal("empty records")
+		}
+	}
+}
+

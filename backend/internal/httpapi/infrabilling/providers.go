@@ -57,7 +57,7 @@ type optionalString struct {
 
 func (field *optionalString) UnmarshalJSON(data []byte) error {
 	field.Set = true
-	if string(data) == "null" {
+	if shared.IsJSONNull(data) {
 		field.Value = nil
 		return nil
 	}

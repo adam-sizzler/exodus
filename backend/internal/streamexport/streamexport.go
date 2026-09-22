@@ -2,7 +2,6 @@ package streamexport
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -41,13 +40,8 @@ func ExportUserUsageBatch(ctx context.Context, client *redis.Client, enabled boo
 		maxLen = 3000
 	}
 
-	parts := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.UserID > 0 && entry.TotalBytes > 0 {
-			parts = append(parts, fmt.Sprintf("%d:%d", entry.UserID, entry.TotalBytes))
-		}
-	}
-	if len(parts) == 0 {
+	records := formatUserUsageRecords(entries)
+	if records == "" {
 		return nil
 	}
 
@@ -55,7 +49,7 @@ func ExportUserUsageBatch(ctx context.Context, client *redis.Client, enabled boo
 		"v":       UserUsageStreamMessageVersion,
 		"nodeId":  strconv.FormatInt(nodeID, 10),
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
-		"records": strings.Join(parts, ";"),
+		"records": records,
 	}
 
 	return client.XAdd(ctx, &redis.XAddArgs{
@@ -108,4 +102,39 @@ func ExportSubscriptionRequest(ctx context.Context, client *redis.Client, enable
 		Approx: true,
 		Values: values,
 	}).Err()
+}
+
+// formatUserUsageRecords formats a slice of UserUsageEntry into a semicolon-separated string
+// of "userID:totalBytes" pairs with minimal memory allocations.
+func formatUserUsageRecords(entries []UserUsageEntry) string {
+	validCount := 0
+	for i := range entries {
+		if entries[i].UserID > 0 && entries[i].TotalBytes > 0 {
+			validCount++
+		}
+	}
+	if validCount == 0 {
+		return ""
+	}
+
+	// Pre-allocate buffer: typical entry "12345:1048576;" is ~15-25 bytes.
+	var sb strings.Builder
+	sb.Grow(validCount * 24)
+
+	var buf [32]byte
+	first := true
+	for i := range entries {
+		if entries[i].UserID > 0 && entries[i].TotalBytes > 0 {
+			if !first {
+				sb.WriteByte(';')
+			}
+			first = false
+
+			sb.Write(strconv.AppendInt(buf[:0], entries[i].UserID, 10))
+			sb.WriteByte(':')
+			sb.Write(strconv.AppendInt(buf[:0], entries[i].TotalBytes, 10))
+		}
+	}
+
+	return sb.String()
 }

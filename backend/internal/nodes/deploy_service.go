@@ -53,8 +53,9 @@ func (nm *NodeMonitor) deployToConnectedNodes(restart bool, forceRestart bool, r
 		}
 		state.mutex.RLock()
 		client := state.client
+		isConnected := state.isConnected
 		state.mutex.RUnlock()
-		if client == nil {
+		if client == nil || !isConnected {
 			continue
 		}
 		nodeUUID, ok := nodesByName[nodeName]
@@ -238,7 +239,17 @@ func (nm *NodeMonitor) submitDeployTask(
 		if nm.cfg != nil && nm.cfg.Logger != nil {
 			nm.cfg.Logger.Warn("Deploy task failed", "node", target.name, "error", err)
 		}
-		nm.updateConnectionStatus(target.name, false, false, fmt.Sprintf("Deploy transport error: %v", err))
+		errStr := err.Error()
+		if strings.Contains(errStr, "the client connection is closing") ||
+			strings.Contains(errStr, "connection is closing") ||
+			strings.Contains(errStr, "code = Canceled") {
+			return err
+		}
+		friendlyErr := formatNodeConnectionError(err)
+		if friendlyErr == errStr {
+			friendlyErr = fmt.Sprintf("Deploy transport error: %v", err)
+		}
+		nm.updateConnectionStatus(target.name, false, false, friendlyErr)
 		return err
 	}
 	if resp == nil || resp.Code != int32(codes.OK) {

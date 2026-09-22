@@ -51,6 +51,10 @@ func (m *mockDBTX) QueryRow(ctx context.Context, sql string, args ...any) pgx.Ro
 	return nil
 }
 
+func (m *mockDBTX) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
+	return nil
+}
+
 func TestDBTXInterfaceVerification(t *testing.T) {
 	// Verify that mockDBTX satisfies DBTX interface
 	var _ DBTX = (*mockDBTX)(nil)

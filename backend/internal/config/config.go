@@ -34,6 +34,7 @@ type BackendAppConfig struct {
 	StaticDir         string
 	BasePath          string
 	AllowInsecureHTTP bool
+	EnablePprof       bool
 	TrustedProxies    []string
 	AppPort           int
 	ShortUUIDLength   int
@@ -166,6 +167,7 @@ var defaultConfig = BackendConfig{
 		StaticDir:         "/opt/app/frontend",
 		BasePath:          "/",
 		AllowInsecureHTTP: false,
+		EnablePprof:       false,
 		TrustedProxies:    []string{},
 		AppPort:           3000,
 		ShortUUIDLength:   16,
@@ -353,6 +355,14 @@ func applyEnvOverrides(cfg *BackendConfig) {
 			cfg.Backend.AllowInsecureHTTP = parsed
 		} else if cfg.Logger != nil {
 			cfg.Logger.Warn("Invalid EXODUS_ALLOW_INSECURE_HTTP value, ignoring", "value", value)
+		}
+	}
+
+	if value := envFirst("EXODUS_ENABLE_PPROF"); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Backend.EnablePprof = parsed
+		} else if cfg.Logger != nil {
+			cfg.Logger.Warn("Invalid EXODUS_ENABLE_PPROF value, ignoring", "value", value)
 		}
 	}
 

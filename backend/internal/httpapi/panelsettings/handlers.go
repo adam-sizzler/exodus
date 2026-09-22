@@ -1,6 +1,7 @@
 package panelsettings
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,8 +62,8 @@ func PanelSettingsHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.Hand
 				if !ok {
 					continue
 				}
-				raw = json.RawMessage(strings.TrimSpace(string(raw)))
-				if len(raw) == 0 || string(raw) == "null" {
+				raw = json.RawMessage(bytes.TrimSpace(raw))
+				if shared.IsJSONNull(raw) {
 					continue
 				}
 				if !json.Valid(raw) {

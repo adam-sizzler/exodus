@@ -110,6 +110,7 @@ func (nm *NodeMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	// Initial load and start
 	nm.cfg.Logger.Trace("Node monitor initial sync")
 	nm.syncNodes()
+	go nm.cleanupInactiveNodesHotCache()
 
 	// Periodic sync every 30 seconds
 	syncTicker := time.NewTicker(scheduler.RecordNodeUsageInterval)
@@ -184,7 +185,7 @@ func (nm *NodeMonitor) retryFailedNodes() {
 			continue
 		}
 		state.mutex.RLock()
-		hasClient := state.client != nil
+		hasClient := state.client != nil && state.isConnected
 		state.mutex.RUnlock()
 
 		if hasClient {
@@ -411,7 +412,39 @@ func (nm *NodeMonitor) closeNodeState(state *nodeState) {
 	state.client = nil
 	state.isConnected = false
 	state.isConnecting = false
+	state.hasSentStaticInfo = false
+	state.lastStaticInfoSentAt = time.Time{}
+	state.lastSingboxVer = ""
+	state.lastNodeVer = ""
+	nodeUUID := state.nodeUUID
 	state.mutex.Unlock()
+
+	if nm.hotCache != nil && nodeUUID != "" {
+		_ = nm.hotCache.DeleteTransient(context.Background(), nodeUUID)
+	}
+}
+
+// cleanupInactiveNodesHotCache removes transient Redis hot cache data for offline or disabled nodes.
+func (nm *NodeMonitor) cleanupInactiveNodesHotCache() {
+	if nm == nil || nm.hotCache == nil || nm.db == nil {
+		return
+	}
+	ctx := nm.globalCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := nm.db.Query(ctx, `SELECT uuid::text FROM nodes WHERE is_disabled = true OR is_connected = false`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err == nil && u != "" {
+			_ = nm.hotCache.DeleteTransient(ctx, u)
+		}
+	}
 }
 
 // stopAll cancels and stops all connections.

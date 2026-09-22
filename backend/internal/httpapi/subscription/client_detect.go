@@ -173,24 +173,6 @@ func deterministicSyntheticHwid(userUUID, signature string) string {
 	return uuid.NewSHA1(namespace, []byte(signature)).String()
 }
 
-func firstNonEmptyHeader(r *http.Request, names ...string) *string {
-	for _, name := range names {
-		value := strings.TrimSpace(r.Header.Get(name))
-		if value == "" {
-			continue
-		}
-		return &value
-	}
-	return nil
-}
-
-func firstNonEmptyLowerHeader(r *http.Request, names ...string) *string {
-	value := firstNonEmptyHeader(r, names...)
-	if value == nil {
-		return nil
-	}
-	return lowerStringPtr(value)
-}
 
 func stringPtrIfNotEmpty(value string) *string {
 	return util.StringPtrIfNotEmpty(value)

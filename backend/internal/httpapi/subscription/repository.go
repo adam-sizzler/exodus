@@ -463,7 +463,7 @@ func getHostsForUserWithOptions(ctx context.Context, dbConn *pgxpool.Pool, user 
 	}
 	defer rows.Close()
 
-	var hosts []SubscriptionHost
+	hosts := make([]SubscriptionHost, 0, 16)
 	for rows.Next() {
 		host, err := scanSubscriptionHost(rows)
 		if err != nil {
@@ -746,6 +746,10 @@ func enqueueOrUpsertHwidUserDevice(ctx context.Context, dbConn *pgxpool.Pool, us
 	return upsertHwidUserDevice(ctx, dbConn, userID, hwid)
 }
 
+// subHistoryFallbackSem bounds how many synchronous DB fallback goroutines can run
+// concurrently when Redis/jobqueue is unavailable. This prevents connection pool exhaustion.
+var subHistoryFallbackSem = make(chan struct{}, 16)
+
 func updateSubscriptionRequest(ctx context.Context, dbConn *pgxpool.Pool, userUUID string, userID int64, userAgent, requestIP, responseType, ruleName string) {
 	if responseType == "" {
 		responseType = "UNKNOWN"
@@ -771,27 +775,44 @@ func updateSubscriptionRequest(ctx context.Context, dbConn *pgxpool.Pool, userUU
 		return
 	}
 
-	go func() {
-		jobCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
+	select {
+	case subHistoryFallbackSem <- struct{}{}:
+		go func() {
+			defer func() { <-subHistoryFallbackSem }()
 
-		_, _ = dbConn.Exec(jobCtx, `
-			INSERT INTO user_subscription_request_history (user_id, srr_response_type, srr_rule_name, request_ip, user_agent)
-			VALUES ($1, $2, $3, $4, $5)
-		`, userID, responseType, ruleVal, requestIP, userAgent)
+			jobCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
 
-		_, _ = dbConn.Exec(jobCtx, `
-			DELETE FROM user_subscription_request_history
-			WHERE user_id = $1
-			  AND id NOT IN (
-				  SELECT id
-				  FROM user_subscription_request_history
-				  WHERE user_id = $2
-				  ORDER BY request_at DESC, id DESC
-				  LIMIT 24
-			  )
-		`, userID, userID)
-	}()
+			batch := &pgx.Batch{}
+			batch.Queue(`
+				INSERT INTO user_subscription_request_history (user_id, srr_response_type, srr_rule_name, request_ip, user_agent)
+				VALUES ($1, $2, $3, $4, $5)
+			`, userID, responseType, ruleVal, requestIP, userAgent)
+
+			batch.Queue(`
+				DELETE FROM user_subscription_request_history
+				WHERE user_id = $1
+				  AND id NOT IN (
+					  SELECT id
+					  FROM user_subscription_request_history
+					  WHERE user_id = $2
+					  ORDER BY request_at DESC, id DESC
+					  LIMIT 24
+				  )
+			`, userID, userID)
+
+			br := dbConn.SendBatch(jobCtx, batch)
+			for i := 0; i < batch.Len(); i++ {
+				if _, err := br.Exec(); err != nil {
+					_ = br.Close()
+					return
+				}
+			}
+			_ = br.Close()
+		}()
+	default:
+		// Queue is unavailable and all fallback slots are busy; drop non-critical history record to protect PostgreSQL pool
+	}
 }
 
 func getSubscriptionTemplate(ctx context.Context, dbConn *pgxpool.Pool, templateType string) ([]byte, error) {
@@ -1088,7 +1109,7 @@ func UpdateExternalSquad(ctx context.Context, dbConn *pgxpool.Pool, squadUUID st
 
 	if input.CustomRemarks != nil {
 		columns = append(columns, fmt.Sprintf("custom_remarks = $%d", idx))
-		if len(*input.CustomRemarks) == 0 || string(*input.CustomRemarks) == "null" {
+		if shared.IsJSONNull(*input.CustomRemarks) {
 			args = append(args, nil)
 		} else {
 			args = append(args, string(*input.CustomRemarks))
@@ -1097,8 +1118,7 @@ func UpdateExternalSquad(ctx context.Context, dbConn *pgxpool.Pool, squadUUID st
 	}
 
 	if len(input.HwidSettings) > 0 {
-		raw := strings.TrimSpace(string(input.HwidSettings))
-		if raw == "null" {
+		if shared.IsJSONNull(input.HwidSettings) {
 			columns = append(columns, fmt.Sprintf("hwid_settings = $%d", idx))
 			args = append(args, nil)
 			idx++

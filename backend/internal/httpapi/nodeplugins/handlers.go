@@ -202,7 +202,7 @@ func handleExecutor(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, cf
 		shared.SendError(w, http.StatusBadRequest, "invalid JSON body", err, cfg)
 		return
 	}
-	if len(req.Command.Raw) == 0 || string(req.Command.Raw) == "null" {
+	if shared.IsJSONNull(req.Command.Raw) {
 		shared.SendError(w, http.StatusBadRequest, "command is required", nil, cfg)
 		return
 	}

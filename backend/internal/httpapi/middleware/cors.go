@@ -51,22 +51,23 @@ func WithCORS(cfg *config.BackendConfig, next http.Handler) http.Handler {
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet, noimageindex")
 
 		// Content Security Policy.
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'self';"+
-				"script-src 'self' 'wasm-unsafe-eval';"+
-				"img-src 'self' data: https:;"+
-				"connect-src 'self' https://raw.githubusercontent.com https://ungh.cc;"+
-				"worker-src 'self' blob:;"+
-				"frame-src 'self' https://oauth.telegram.org;"+
-				"frame-ancestors 'self';"+
-				"base-uri 'self';"+
-				"font-src 'self' https: data:;"+
-				"form-action 'self';"+
-				"object-src 'none';"+
-				"script-src-attr 'none';"+
-				"style-src 'self' https: 'unsafe-inline';"+
-				"upgrade-insecure-requests",
-		)
+		csp := "default-src 'self';" +
+			"script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval';" +
+			"img-src 'self' data: https: blob:;" +
+			"connect-src 'self' https: http: ws: wss: data: blob: https://raw.githubusercontent.com https://ungh.cc;" +
+			"worker-src 'self' blob:;" +
+			"frame-src 'self' https://oauth.telegram.org;" +
+			"frame-ancestors 'self';" +
+			"base-uri 'self';" +
+			"font-src 'self' https: data:;" +
+			"form-action 'self';" +
+			"object-src 'none';" +
+			"script-src-attr 'none';" +
+			"style-src 'self' https: 'unsafe-inline';"
+		if cfg != nil && !cfg.Backend.AllowInsecureHTTP {
+			csp += "upgrade-insecure-requests;"
+		}
+		w.Header().Set("Content-Security-Policy", csp)
 
 		// Use CORS settings from config
 		allowedOrigins := cfg.CORS.AllowedOrigins

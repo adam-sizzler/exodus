@@ -22,9 +22,9 @@ const (
 	singboxUptimePrefix = "node_singbox_uptime:"
 	usersOnlinePrefix   = "node_users_online:"
 
-	systemInfoTTL    = 30 * time.Second
+	systemInfoTTL    = 24 * time.Hour
 	systemStatsTTL   = 30 * time.Second
-	versionsTTL      = 30 * time.Second
+	versionsTTL      = 24 * time.Hour
 	singboxUptimeTTL = 16 * time.Second
 	usersOnlineTTL   = 16 * time.Second
 )
@@ -44,6 +44,16 @@ type HotCache struct {
 	Versions      *NodeVersions
 	SingboxUptime int64
 	UsersOnline   int
+}
+
+type NodeRuntimeUpdate struct {
+	SystemInfo       json.RawMessage
+	SystemStats      json.RawMessage
+	SingboxVersion   string
+	NodeVersion      string
+	HasSingboxUptime bool
+	SingboxUptime    int64
+	UsersOnline      int
 }
 
 type Cache struct {
@@ -244,6 +254,52 @@ func (c *Cache) SetUsersOnline(ctx context.Context, uuid string, count int) erro
 	redisKey := key(usersOnlinePrefix, uuid)
 	err := c.client.Set(ctx, redisKey, strconv.Itoa(count), usersOnlineTTL).Err()
 	c.logWriteError("SetUsersOnline", redisKey, err)
+	return err
+}
+
+// SetNodeRuntimeState updates all runtime metrics for a node in a single Redis pipeline call,
+// avoiding multiple round-trips over the network or unix socket.
+func (c *Cache) SetNodeRuntimeState(ctx context.Context, uuid string, state NodeRuntimeUpdate) error {
+	if c == nil || c.client == nil || strings.TrimSpace(uuid) == "" {
+		return nil
+	}
+
+	pipe := c.client.Pipeline()
+	var hasCommands bool
+
+	if len(state.SystemInfo) > 0 {
+		pipe.Set(ctx, key(systemInfoPrefix, uuid), []byte(state.SystemInfo), systemInfoTTL)
+		hasCommands = true
+	}
+	if len(state.SystemStats) > 0 {
+		pipe.Set(ctx, key(systemStatsPrefix, uuid), []byte(state.SystemStats), systemStatsTTL)
+		hasCommands = true
+	}
+	if state.SingboxVersion != "" || state.NodeVersion != "" {
+		payload, err := json.Marshal(NodeVersions{
+			Singbox: strings.TrimSpace(state.SingboxVersion),
+			Node:    strings.TrimSpace(state.NodeVersion),
+		})
+		if err == nil {
+			pipe.Set(ctx, key(versionsPrefix, uuid), payload, versionsTTL)
+			hasCommands = true
+		}
+	}
+	if state.HasSingboxUptime {
+		pipe.Set(ctx, key(singboxUptimePrefix, uuid), strconv.FormatInt(state.SingboxUptime, 10), singboxUptimeTTL)
+		hasCommands = true
+	}
+	if state.UsersOnline >= 0 {
+		pipe.Set(ctx, key(usersOnlinePrefix, uuid), strconv.Itoa(state.UsersOnline), usersOnlineTTL)
+		hasCommands = true
+	}
+
+	if !hasCommands {
+		return nil
+	}
+
+	_, err := pipe.Exec(ctx)
+	c.logWriteError("SetNodeRuntimeState", uuid, err)
 	return err
 }
 

@@ -290,4 +290,126 @@ func TestCloseNodeStateThreadSafety(t *testing.T) {
 	}
 }
 
+func TestHandleDisconnect_CleansMetricsAndStaticState(t *testing.T) {
+	nm := NewNodeMonitor(nil, nil)
+	const testUUID = "test-uuid-42"
 
+	nm.metricsLock.Lock()
+	nm.metricsByNodeUUID[testUUID] = &NodeMetricsSnapshot{
+		NodeUUID:    testUUID,
+		UsersOnline: 15,
+	}
+	nm.metricsLock.Unlock()
+
+	state := &nodeState{
+		nodeUUID:          testUUID,
+		nodeName:          "test-node",
+		isConnected:       true,
+		hasSentStaticInfo: true,
+		lastSingboxVer:    "1.13.3",
+		lastNodeVer:       "1.0.0",
+	}
+
+	nm.handleDisconnect(state, "Stream closed")
+
+	state.mutex.RLock()
+	if state.isConnected {
+		t.Errorf("expected isConnected to be false after disconnect")
+	}
+	if state.hasSentStaticInfo {
+		t.Errorf("expected hasSentStaticInfo to be false after disconnect")
+	}
+	if state.lastSingboxVer != "" || state.lastNodeVer != "" {
+		t.Errorf("expected cached versions to be cleared after disconnect")
+	}
+	state.mutex.RUnlock()
+
+	nm.metricsLock.RLock()
+	snap := nm.metricsByNodeUUID[testUUID]
+	if snap == nil || snap.UsersOnline != 0 {
+		t.Errorf("expected snapshot UsersOnline to be reset to 0, got %v", snap)
+	}
+	nm.metricsLock.RUnlock()
+}
+
+func TestCloseNodeState_ResetsStaticTracking(t *testing.T) {
+	nm := NewNodeMonitor(nil, nil)
+	state := &nodeState{
+		nodeUUID:          "test-uuid-99",
+		nodeName:          "node-99",
+		isConnected:       true,
+		hasSentStaticInfo: true,
+		lastSingboxVer:    "1.13.0",
+		lastNodeVer:       "2.0.0",
+	}
+
+	nm.closeNodeState(state)
+
+	state.mutex.RLock()
+	defer state.mutex.RUnlock()
+	if state.isConnected {
+		t.Errorf("expected isConnected to be false")
+	}
+	if state.hasSentStaticInfo {
+		t.Errorf("expected hasSentStaticInfo to be false")
+	}
+}
+
+func TestFormatNodeConnectionError(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{
+			err:  fmt.Errorf("dial tcp 192.168.1.1:8443: connect: connection refused"),
+			want: "connection refused (node agent is not running on target port)",
+		},
+		{
+			err:  fmt.Errorf("rpc error: code = Unavailable desc = connection error: desc = \"transport: Error while dialing: dial tcp 10.0.0.1:443: connect: connection refused\""),
+			want: "connection refused (node agent is not running on target port)",
+		},
+		{
+			err:  fmt.Errorf("rpc error: code = Unavailable desc = transport: authentication handshake failed: EOF"),
+			want: "remote host closed connection (host unreachable or node agent not running)",
+		},
+		{
+			err:  fmt.Errorf("dial tcp: i/o timeout"),
+			want: "connection timed out (host unreachable)",
+		},
+		{
+			err:  fmt.Errorf("no such host: example.invalid"),
+			want: "DNS resolution failed (host does not exist)",
+		},
+	}
+
+	for _, tt := range tests {
+		got := formatNodeConnectionError(tt.err)
+		if got != tt.want {
+			t.Errorf("formatNodeConnectionError(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestDisconnectedNodeStateClientNil(t *testing.T) {
+	nm := NewNodeMonitor(nil, nil)
+	state := &nodeState{
+		nodeUUID:    "test-uuid-client",
+		nodeName:    "node-client",
+		isConnected: true,
+		client:      &mockDeployNodeServiceClient{},
+	}
+
+	nm.handleDisconnect(state, "connection refused (node agent is not running on target port)")
+
+	state.mutex.RLock()
+	defer state.mutex.RUnlock()
+	if state.isConnected {
+		t.Errorf("expected isConnected = false")
+	}
+	if state.client != nil {
+		t.Errorf("expected client = nil after disconnect")
+	}
+	if state.lastError != "connection refused (node agent is not running on target port)" {
+		t.Errorf("expected lastError = connection refused..., got %q", state.lastError)
+	}
+}

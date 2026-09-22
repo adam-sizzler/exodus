@@ -90,7 +90,7 @@ var defaultPluginConfig = json.RawMessage(`{"ingressFilter":{"enabled":false,"bl
 const haproxyAllInboundTags = "*"
 
 func normalizePluginConfig(raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if shared.IsJSONNull(raw) {
 		return append(json.RawMessage(nil), defaultPluginConfig...), nil
 	}
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"exodus/internal/httpapi/shared"
 	"exodus/internal/util"
 
 	"gopkg.in/yaml.v3"
@@ -103,8 +104,7 @@ func normalizeJSONField(raw *json.RawMessage, emptyObjectAsNull bool) (bool, []b
 	if raw == nil {
 		return false, nil, nil
 	}
-	trimmed := strings.TrimSpace(string(*raw))
-	if trimmed == "" || trimmed == "null" {
+	if shared.IsJSONNull(*raw) {
 		return true, nil, nil
 	}
 	if !json.Valid(*raw) {

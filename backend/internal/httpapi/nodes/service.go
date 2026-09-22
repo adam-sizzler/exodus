@@ -201,6 +201,8 @@ func (s *NodeService) DeleteNode(ctx context.Context, nodeUUID string) error {
 		return err
 	}
 
+	_ = nodehotcache.Default(s.cfg).DeleteTransient(ctx, nodeUUID)
+
 	monitor.RequestNodeSync()
 	monitor.RequestNodeDeploy(true, nodeUUID)
 

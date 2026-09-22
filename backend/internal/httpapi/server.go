@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,8 +39,17 @@ func StartWebServer(ctx context.Context, pools *db.Pools, cfg *config.BackendCon
 		cfg.Logger.Warn("Panel UI index not found; static UI disabled", "path", indexPath, "error", err)
 	}
 
+	if cfg.Backend.EnablePprof {
+		registerPprofHandlers(mux, panelBasePathNoTrailing, cfg)
+	}
+
 	mux.Handle("/", panelRequestHandler(panelBasePath, panelBasePathNoTrailing, uiDir, staticFS, apiHandler))
 
+	// Architectural note on timeouts:
+	// ReadHeaderTimeout (5s) protects against Slowloris attacks.
+	// IdleTimeout (120s) cleans up unused keep-alive connections.
+	// WriteTimeout is intentionally omitted to support long-lived streaming connections
+	// (SSE telemetry, live streaming logs, and WebSockets) without premature connection termination.
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           middleware.WithCORS(cfg, middleware.WithBodyLimit(cfg, middleware.WithClientIP(cfg, middleware.WithRequestLogging(cfg, "web", mux)))),
@@ -120,3 +130,25 @@ func panelRequestHandler(panelBasePath, panelBasePathNoTrailing, uiDir string, s
 		static.ServePanelIndex(w, indexPath, panelBasePath, panelBasePathNoTrailing)
 	})
 }
+
+func registerPprofHandlers(mux *http.ServeMux, basePath string, cfg *config.BackendConfig) {
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	cleanBase := strings.TrimRight(basePath, "/")
+	if cleanBase != "" && cleanBase != "/" {
+		mux.HandleFunc(cleanBase+"/debug/pprof/", pprof.Index)
+		mux.HandleFunc(cleanBase+"/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc(cleanBase+"/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc(cleanBase+"/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc(cleanBase+"/debug/pprof/trace", pprof.Trace)
+	}
+
+	if cfg != nil && cfg.Logger != nil {
+		cfg.Logger.Warn("Profiling endpoints enabled (/debug/pprof/) via EXODUS_ENABLE_PPROF=true")
+	}
+}
+

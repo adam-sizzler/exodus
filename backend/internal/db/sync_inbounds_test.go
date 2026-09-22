@@ -223,6 +223,10 @@ func (r *recordingMockDBTX) QueryRow(ctx context.Context, sql string, args ...an
 	return nil
 }
 
+func (r *recordingMockDBTX) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
+	return nil
+}
+
 // mockEmptyRows satisfies pgx.Rows for zero rows returned
 type mockEmptyRows struct{}
 

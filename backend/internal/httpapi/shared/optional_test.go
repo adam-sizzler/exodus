@@ -208,3 +208,40 @@ func assertInt64Ptr(t *testing.T, got *int64, want *int64) {
 		t.Fatalf("value = %d, want %d", *got, *want)
 	}
 }
+
+func TestIsJSONNull(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{name: "nil slice", data: nil, want: true},
+		{name: "empty slice", data: []byte{}, want: true},
+		{name: "whitespace only", data: []byte("  \t\n\r  "), want: true},
+		{name: "exact null", data: []byte("null"), want: true},
+		{name: "padded null", data: []byte("  null \n"), want: true},
+		{name: "quoted null string", data: []byte(`"null"`), want: false},
+		{name: "empty object", data: []byte("{}"), want: false},
+		{name: "empty array", data: []byte("[]"), want: false},
+		{name: "boolean false", data: []byte("false"), want: false},
+		{name: "number zero", data: []byte("0"), want: false},
+		{name: "arbitrary string", data: []byte(`"hello"`), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsJSONNull(tt.data); got != tt.want {
+				t.Fatalf("IsJSONNull(%q) = %v, want %v", string(tt.data), got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkIsJSONNull(b *testing.B) {
+	data := []byte("   null   ")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = IsJSONNull(data)
+	}
+}

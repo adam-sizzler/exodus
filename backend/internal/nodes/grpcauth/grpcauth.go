@@ -56,8 +56,9 @@ func LoadKeygenMTLSConfig(ctx context.Context, dbConn db.DBTX) (*tls.Config, err
 }
 
 func PathPrefixUnaryInterceptor(prefix, authToken string) grpc.UnaryClientInterceptor {
+	token := strings.TrimSpace(authToken)
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		if token := strings.TrimSpace(authToken); token != "" {
+		if token != "" {
 			ctx = metadata.AppendToOutgoingContext(ctx, "x-exodus-grpc-token", token)
 		}
 		return invoker(ctx, prefix+method, req, reply, cc, opts...)
@@ -65,8 +66,9 @@ func PathPrefixUnaryInterceptor(prefix, authToken string) grpc.UnaryClientInterc
 }
 
 func PathPrefixStreamInterceptor(prefix, authToken string) grpc.StreamClientInterceptor {
+	token := strings.TrimSpace(authToken)
 	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-		if token := strings.TrimSpace(authToken); token != "" {
+		if token != "" {
 			ctx = metadata.AppendToOutgoingContext(ctx, "x-exodus-grpc-token", token)
 		}
 		return streamer(ctx, desc, cc, prefix+method, opts...)

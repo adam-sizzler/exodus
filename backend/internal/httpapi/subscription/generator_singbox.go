@@ -17,19 +17,61 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/iancoleman/orderedmap"
 	"golang.org/x/crypto/curve25519"
 	"gopkg.in/yaml.v3"
 )
 
-func generateSingboxConfig(templateJSON []byte, hosts []SubscriptionHost, user SubscriptionUser) (string, error) {
-	baseConfig := orderedmap.New()
-	if len(templateJSON) > 0 {
-		if err := baseConfig.UnmarshalJSON(templateJSON); err != nil {
-			baseConfig = orderedmap.New()
-		}
+var singboxTemplateCache sync.Map // map[string]*orderedmap.OrderedMap
+
+func cloneOrderedMap(src *orderedmap.OrderedMap) *orderedmap.OrderedMap {
+	if src == nil {
+		return nil
 	}
+	dst := orderedmap.New()
+	for _, key := range src.Keys() {
+		val, _ := src.Get(key)
+		dst.Set(key, cloneOrderedMapValue(val))
+	}
+	return dst
+}
+
+func cloneOrderedMapValue(val interface{}) interface{} {
+	switch v := val.(type) {
+	case *orderedmap.OrderedMap:
+		return cloneOrderedMap(v)
+	case []interface{}:
+		cp := make([]interface{}, len(v))
+		for i, item := range v {
+			cp[i] = cloneOrderedMapValue(item)
+		}
+		return cp
+	default:
+		return v
+	}
+}
+
+func getOrParseSingboxTemplate(templateJSON []byte) *orderedmap.OrderedMap {
+	if len(templateJSON) == 0 {
+		return orderedmap.New()
+	}
+	key := string(templateJSON)
+	if val, ok := singboxTemplateCache.Load(key); ok {
+		cached := val.(*orderedmap.OrderedMap)
+		return cloneOrderedMap(cached)
+	}
+	baseConfig := orderedmap.New()
+	if err := baseConfig.UnmarshalJSON(templateJSON); err != nil {
+		baseConfig = orderedmap.New()
+	}
+	singboxTemplateCache.Store(key, cloneOrderedMap(baseConfig))
+	return baseConfig
+}
+
+func generateSingboxConfig(templateJSON []byte, hosts []SubscriptionHost, user SubscriptionUser) (string, error) {
+	baseConfig := getOrParseSingboxTemplate(templateJSON)
 	var outbounds []interface{}
 	if existing, ok := baseConfig.Get("outbounds"); ok {
 		if items, ok := existing.([]interface{}); ok {
@@ -352,15 +394,22 @@ func resolveVlessFlow(host SubscriptionHost, defaults singboxInboundDefaults) st
 	return ""
 }
 
+var inboundRawCache sync.Map // map[string]map[string]interface{}
+
 func parseInboundRaw(raw json.RawMessage) map[string]interface{} {
 	if len(raw) == 0 {
 		return map[string]interface{}{}
 	}
+	key := string(raw)
+	if cached, ok := inboundRawCache.Load(key); ok {
+		return cloneShallowMap(cached.(map[string]interface{}))
+	}
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(raw, &parsed); err != nil || parsed == nil {
-		return map[string]interface{}{}
+		parsed = map[string]interface{}{}
 	}
-	return parsed
+	inboundRawCache.Store(key, parsed)
+	return cloneShallowMap(parsed)
 }
 
 func readMap(src map[string]interface{}, key string) map[string]interface{} {

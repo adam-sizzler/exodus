@@ -335,55 +335,54 @@ func (nm *NodeMonitor) registerNodeState(name string, dbNode db.DBNode) nodeStar
 	return nodeStartupTask{name: name, state: state}
 }
 
-// launchNodes marks each task's node as connecting in the DB and starts its
-// monitor goroutine. It must be called without nm.nodesLock held: it does
-// one blocking SQL round-trip per node (updateConnectionStatus), and this
-// bounds that work to nodeStartupConcurrency at a time instead of the
-// caller's previous behavior of doing it once per node, one at a time,
-// while still holding the process-wide node registry lock — which meant a
-// large sync blocked every other reader of nm.nodes (deploy, geocheck,
-// IsNodeConnected, ...) for as long as the whole batch took.
+// launchNodes marks tasks' nodes as connecting in the DB in a single batch query
+// and starts their monitor goroutines. It is called without nm.nodesLock held.
 func (nm *NodeMonitor) launchNodes(tasks []nodeStartupTask) {
 	if len(tasks) == 0 {
 		return
 	}
 
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, nodeStartupConcurrency)
-
+	names := make([]string, 0, len(tasks))
 	for _, task := range tasks {
-		wg.Add(1)
-		sem <- struct{}{}
-
-		go func(task nodeStartupTask) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			if task.state == nil || (task.state.ctx != nil && task.state.ctx.Err() != nil) {
-				return
-			}
-
-			// Mark as connecting in DB
-			nm.updateConnectionStatus(task.name, false, true, "")
-
-			if task.state.ctx != nil && task.state.ctx.Err() != nil {
-				return
-			}
-
-			go nm.monitorNode(task.state)
-
-			nm.cfg.Logger.Debug(
-				"Started monitoring node",
-				"node", task.name,
-				"address", task.state.address,
-				"port", task.state.port,
-				"schema", task.state.apiSchema,
-				"path", task.state.apiPath,
-			)
-		}(task)
+		if task.name != "" {
+			names = append(names, task.name)
+		}
 	}
 
-	wg.Wait()
+	if len(names) > 0 && nm.db != nil {
+		ctx := nm.globalCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		_, err := nm.db.Exec(ctx, `
+			UPDATE nodes
+			SET is_connected = false,
+			    is_connecting = true,
+			    last_status_message = NULL,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE name = ANY($1)
+		`, names)
+		if err != nil {
+			nm.cfg.Logger.Warn("Failed to batch update nodes connecting status", "error", err, "nodes_count", len(names))
+		}
+	}
+
+	for _, task := range tasks {
+		if task.state == nil || (task.state.ctx != nil && task.state.ctx.Err() != nil) {
+			continue
+		}
+
+		go nm.monitorNode(task.state)
+
+		nm.cfg.Logger.Debug(
+			"Started monitoring node",
+			"node", task.name,
+			"address", task.state.address,
+			"port", task.state.port,
+			"schema", task.state.apiSchema,
+			"path", task.state.apiPath,
+		)
+	}
 }
 
 func (nm *NodeMonitor) Stop() {

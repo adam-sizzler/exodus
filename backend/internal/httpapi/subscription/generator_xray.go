@@ -12,12 +12,17 @@ CROSS-CUTTING RULES / НЕЯВНЫЕ ЗАВИСИМОСТИ:
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
+)
+
+var (
+	jsonMapStringCache sync.Map // map[string]map[string]interface{}
+	ssMethodCache      sync.Map // map[string]string
 )
 
 func buildRawHost(host SubscriptionHost) RawHost {
@@ -311,8 +316,18 @@ func buildShadowsocksLink(host SubscriptionHost, user SubscriptionUser) string {
 		ApplyBase64Mapper(&link, host.Mapper.Base64, host)
 	}
 
-	creds := fmt.Sprintf("%s:%s", link.Method, link.Password)
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(creds))
+	credsLen := len(link.Method) + 1 + len(link.Password)
+	var credsBuf [128]byte
+	var credsBytes []byte
+	if credsLen <= len(credsBuf) {
+		credsBytes = credsBuf[:0]
+	} else {
+		credsBytes = make([]byte, 0, credsLen)
+	}
+	credsBytes = append(credsBytes, link.Method...)
+	credsBytes = append(credsBytes, ':')
+	credsBytes = append(credsBytes, link.Password...)
+	encoded := base64.RawURLEncoding.EncodeToString(credsBytes)
 	return formatShadowsocksURL(encoded, link.Address, link.Port, link.Remark)
 }
 
@@ -514,19 +529,40 @@ func extractShadowsocksMethod(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
+	key := string(raw)
+	if val, ok := ssMethodCache.Load(key); ok {
+		return val.(string)
+	}
 	var obj map[string]interface{}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return ""
 	}
+	method := ""
 	if settings, ok := obj["settings"].(map[string]interface{}); ok {
-		if method, ok := settings["method"].(string); ok {
-			return method
+		if m, ok := settings["method"].(string); ok {
+			method = m
 		}
 	}
-	if method, ok := obj["method"].(string); ok {
-		return method
+	if method == "" {
+		if m, ok := obj["method"].(string); ok {
+			method = m
+		}
 	}
-	return ""
+	if method != "" {
+		ssMethodCache.Store(key, method)
+	}
+	return method
+}
+
+func cloneShallowMap(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func parseJSONMapString(raw *string) map[string]interface{} {
@@ -537,10 +573,14 @@ func parseJSONMapString(raw *string) map[string]interface{} {
 	if trimmed == "" || trimmed == "null" {
 		return nil
 	}
+	if val, ok := jsonMapStringCache.Load(trimmed); ok {
+		return cloneShallowMap(val.(map[string]interface{}))
+	}
 	var parsed map[string]interface{}
 	if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
 		if len(parsed) > 0 {
-			return parsed
+			jsonMapStringCache.Store(trimmed, parsed)
+			return cloneShallowMap(parsed)
 		}
 		return nil
 	}
@@ -559,7 +599,8 @@ func parseJSONMapString(raw *string) map[string]interface{} {
 	if len(yamlParsed) == 0 {
 		return nil
 	}
-	return yamlParsed
+	jsonMapStringCache.Store(trimmed, yamlParsed)
+	return cloneShallowMap(yamlParsed)
 }
 
 // hostExcludesResponseType reports whether host.ExcludeFromSubscriptionTypes

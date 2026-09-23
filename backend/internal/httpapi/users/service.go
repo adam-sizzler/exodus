@@ -48,31 +48,15 @@ func (s *UserService) DisableUser(ctx context.Context, identifier string) (userR
 }
 
 func (s *UserService) ResetUserTraffic(ctx context.Context, identifier string) (userRecord, error) {
-	idNum, isID := parseNumericID(identifier)
-	var targetUUID string
-	if isID {
-		record, err := s.repo.getUserRecordByID(ctx, idNum)
-		if err != nil {
-			return userRecord{}, err
-		}
-		targetUUID = record.UUID
-	} else {
-		targetUUID = identifier
-	}
-
-	affected, nodeUUIDs, reactivatedUUIDs, err := s.repo.resetUsersTrafficByUUIDs(ctx, []string{targetUUID})
+	record, nodeUUIDs, reactivated, err := s.repo.resetUserTraffic(ctx, identifier)
 	if err != nil {
 		return userRecord{}, err
 	}
 	if len(nodeUUIDs) > 0 {
 		monitor.RequestNodeDeploy(true, nodeUUIDs...)
 	}
-	record, loadErr := s.repo.getUserRecordByUUID(ctx, targetUUID)
-	if loadErr != nil {
-		return userRecord{}, loadErr
-	}
 	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserTrafficReset, record, nil)
-	if len(reactivatedUUIDs) > 0 && affected > 0 {
+	if reactivated {
 		emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserEnabled, record, nil)
 	}
 	return record, nil

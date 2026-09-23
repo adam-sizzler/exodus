@@ -135,6 +135,19 @@ func TestApplyHostMapperCopyFromRawInbound(t *testing.T) {
 	}
 }
 
+func TestParseHostMapperCaching(t *testing.T) {
+	raw := []byte(`{"xrayJson":[{"op":"set","to":"packet_encoding","value":"xudp"}]}`)
+	m1 := ParseHostMapper(raw)
+	if len(m1.XrayJson) != 1 || m1.XrayJson[0].To != "packet_encoding" {
+		t.Fatalf("unexpected m1: %+v", m1)
+	}
+
+	m2 := ParseHostMapper(raw)
+	if len(m2.XrayJson) != 1 || m2.XrayJson[0].To != "packet_encoding" {
+		t.Fatalf("unexpected m2 from cache: %+v", m2)
+	}
+}
+
 func BenchmarkParseHostMapper(b *testing.B) {
 	emptyPayload := []byte("{}")
 	b.ReportAllocs()
@@ -143,3 +156,13 @@ func BenchmarkParseHostMapper(b *testing.B) {
 		_ = ParseHostMapper(emptyPayload)
 	}
 }
+
+func BenchmarkParseHostMapperWithPayload(b *testing.B) {
+	payload := []byte(`{"xrayJson":[{"op":"set","to":"packet_encoding","value":"xudp"}]}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ParseHostMapper(payload)
+	}
+}
+

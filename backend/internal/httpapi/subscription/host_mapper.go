@@ -7,9 +7,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/iancoleman/orderedmap"
 )
+
+var hostMapperCache sync.Map // map[string]HostMapper
 
 // HostMapperOperation represents a single mapper operation.
 type HostMapperOperation struct {
@@ -27,7 +30,7 @@ type HostMapper struct {
 	Singbox  []HostMapperOperation `json:"singbox,omitempty"`
 }
 
-// ParseHostMapper parses a JSON/JSONB value into HostMapper.
+// ParseHostMapper parses a JSON/JSONB value into HostMapper with in-memory caching.
 func ParseHostMapper(raw []byte) HostMapper {
 	var m HostMapper
 	trimmed := bytes.TrimSpace(raw)
@@ -36,7 +39,13 @@ func ParseHostMapper(raw []byte) HostMapper {
 		(len(trimmed) == 4 && trimmed[0] == 'n' && trimmed[1] == 'u' && trimmed[2] == 'l' && trimmed[3] == 'l') {
 		return m
 	}
-	_ = json.Unmarshal(trimmed, &m)
+	key := string(trimmed)
+	if cached, ok := hostMapperCache.Load(key); ok {
+		return cached.(HostMapper)
+	}
+	if err := json.Unmarshal(trimmed, &m); err == nil {
+		hostMapperCache.Store(key, m)
+	}
 	return m
 }
 

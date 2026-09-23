@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,8 +94,8 @@ func (nm *NodeMonitor) loadSharedLists(ctx context.Context) resolvedSharedLists 
 		extName := "ext:" + trimmedName
 
 		var genericParsed struct {
-			Type  string          `json:"type"`
-			Items json.RawMessage `json:"items"`
+			Type  string `json:"type"`
+			Items []any  `json:"items"`
 		}
 		if err := json.Unmarshal([]byte(*rawConfig), &genericParsed); err != nil {
 			continue
@@ -102,37 +103,37 @@ func (nm *NodeMonitor) loadSharedLists(ctx context.Context) resolvedSharedLists 
 
 		switch strings.TrimSpace(genericParsed.Type) {
 		case "ipList":
-			var items []string
-			if err := json.Unmarshal(genericParsed.Items, &items); err == nil {
-				res.IPLists[cleanName] = items
-				res.IPLists[trimmedName] = items
-				res.IPLists[extName] = items
+			items := make([]string, 0, len(genericParsed.Items))
+			for _, elem := range genericParsed.Items {
+				if s, ok := elem.(string); ok && strings.TrimSpace(s) != "" {
+					items = append(items, s)
+				}
 			}
+			res.IPLists[cleanName] = items
+			res.IPLists[trimmedName] = items
+			res.IPLists[extName] = items
 		case "asList":
-			var rawItems []any
-			if err := json.Unmarshal(genericParsed.Items, &rawItems); err == nil {
-				var asnItems []int
-				for _, elem := range rawItems {
-					switch v := elem.(type) {
-					case float64:
-						if int(v) > 0 {
-							asnItems = append(asnItems, int(v))
-						}
-					case int:
-						if v > 0 {
-							asnItems = append(asnItems, v)
-						}
-					case string:
-						s := strings.TrimPrefix(strings.TrimSpace(strings.ToUpper(v)), "AS")
-						if n, err := strconv.Atoi(s); err == nil && n > 0 {
-							asnItems = append(asnItems, n)
-						}
+			asnItems := make([]int, 0, len(genericParsed.Items))
+			for _, elem := range genericParsed.Items {
+				switch v := elem.(type) {
+				case float64:
+					if int(v) > 0 {
+						asnItems = append(asnItems, int(v))
+					}
+				case int:
+					if v > 0 {
+						asnItems = append(asnItems, v)
+					}
+				case string:
+					s := strings.TrimPrefix(strings.TrimSpace(strings.ToUpper(v)), "AS")
+					if n, err := strconv.Atoi(s); err == nil && n > 0 {
+						asnItems = append(asnItems, n)
 					}
 				}
-				res.ASNLists[cleanName] = asnItems
-				res.ASNLists[trimmedName] = asnItems
-				res.ASNLists[extName] = asnItems
 			}
+			res.ASNLists[cleanName] = asnItems
+			res.ASNLists[trimmedName] = asnItems
+			res.ASNLists[extName] = asnItems
 		}
 	}
 	_ = rows.Err()
@@ -314,9 +315,11 @@ func (nm *NodeMonitor) loadNodeHaproxyUsers(ctx context.Context, nodeUUID string
 }
 
 type preparedProfileData struct {
-	profileUUID string
-	baseParsed  *orderedmap.OrderedMap
-	inbounds    []preparedInbound
+	profileUUID         string
+	baseParsed          *orderedmap.OrderedMap
+	baseWithoutInbounds *orderedmap.OrderedMap
+	inbounds            []preparedInbound
+	emptyConfigCache    sync.Map
 }
 
 type preparedInbound struct {
@@ -564,10 +567,21 @@ func (nm *NodeMonitor) buildPreparedProfileData(
 		})
 	}
 
+	baseWithoutInbounds := orderedmap.New()
+	for _, key := range parsed.Keys() {
+		if key == "inbounds" {
+			continue
+		}
+		if val, ok := parsed.Get(key); ok {
+			baseWithoutInbounds.Set(key, val)
+		}
+	}
+
 	return &preparedProfileData{
-		profileUUID: profileUUID,
-		baseParsed:  parsed,
-		inbounds:    preparedInbounds,
+		profileUUID:         profileUUID,
+		baseParsed:          parsed,
+		baseWithoutInbounds: baseWithoutInbounds,
+		inbounds:            preparedInbounds,
 	}, nil
 }
 
@@ -675,20 +689,32 @@ func (nm *NodeMonitor) renderNodeConfigFromPrepared(
 	}
 
 	nodeParsed := orderedmap.New()
-	for _, key := range prep.baseParsed.Keys() {
-		if key == "inbounds" {
-			continue
-		}
-		if val, ok := prep.baseParsed.Get(key); ok {
-			nodeParsed.Set(key, val)
+	baseMap := prep.baseWithoutInbounds
+	if baseMap == nil {
+		baseMap = prep.baseParsed
+	}
+	if baseMap != nil {
+		for _, key := range baseMap.Keys() {
+			if key == "inbounds" {
+				continue
+			}
+			if val, ok := baseMap.Get(key); ok {
+				nodeParsed.Set(key, val)
+			}
 		}
 	}
 
-	nodeParsed.Set("inbounds", emptyInbounds)
-	emptyJSON, err := json.Marshal(nodeParsed)
-	emptyConfigHash := ""
-	if err == nil {
-		emptyConfigHash = sha256Hex(emptyJSON)
+	tagsKey := strings.Join(sortedTagKeys(activeTags), ",")
+	var emptyConfigHash string
+	if cached, ok := prep.emptyConfigCache.Load(tagsKey); ok {
+		emptyConfigHash = cached.(string)
+	} else {
+		nodeParsed.Set("inbounds", emptyInbounds)
+		emptyJSON, err := json.Marshal(nodeParsed)
+		if err == nil {
+			emptyConfigHash = sha256Hex(emptyJSON)
+			prep.emptyConfigCache.Store(tagsKey, emptyConfigHash)
+		}
 	}
 
 	nodeParsed.Set("inbounds", filteredInbounds)
@@ -704,6 +730,15 @@ func (nm *NodeMonitor) renderNodeConfigFromPrepared(
 		},
 	}
 	return finalConfig, internals, prep.profileUUID, len(filteredInbounds), nil
+}
+
+func sortedTagKeys(m map[string]struct{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (nm *NodeMonitor) buildNodeConfigForDeploy(

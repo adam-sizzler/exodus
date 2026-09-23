@@ -40,6 +40,54 @@ type Notifier struct {
 	telegramURL    string
 }
 
+var (
+	defaultHTTPTransport = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	defaultHTTPClient = &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: defaultHTTPTransport,
+	}
+
+	telegramClientsMu sync.RWMutex
+	telegramClients   = make(map[string]*http.Client)
+)
+
+func getTelegramHTTPClient(proxyURL string) *http.Client {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return defaultHTTPClient
+	}
+
+	telegramClientsMu.RLock()
+	client, ok := telegramClients[proxyURL]
+	telegramClientsMu.RUnlock()
+	if ok {
+		return client
+	}
+
+	telegramClientsMu.Lock()
+	defer telegramClientsMu.Unlock()
+	if client, ok := telegramClients[proxyURL]; ok {
+		return client
+	}
+
+	client = newTelegramHTTPClient(proxyURL)
+	telegramClients[proxyURL] = client
+	return client
+}
+
 func New(cfg *config.BackendConfig) *Notifier {
 	var telegramProxy string
 	var telegramURL string
@@ -50,31 +98,34 @@ func New(cfg *config.BackendConfig) *Notifier {
 		}
 	}
 	return &Notifier{
-		cfg: cfg,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		telegramClient: newTelegramHTTPClient(telegramProxy),
+		cfg:            cfg,
+		client:         defaultHTTPClient,
+		telegramClient: getTelegramHTTPClient(telegramProxy),
 		telegramURL:    telegramURL,
 	}
 }
 
 // newTelegramHTTPClient builds an HTTP client for Telegram Bot API requests,
 // optionally routed through a proxy. Supports http(s) and socks5/socks5h
-// proxy URLs, mirroring exodus's TELEGRAM_BOT_PROXY behavior (ProxyAgent).
+// proxy URLs, mirroring reference behavior (ProxyAgent).
 // Format: protocol://user:password@host:port, e.g. socks5://proxy:1080
 func newTelegramHTTPClient(proxyURL string) *http.Client {
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL == "" {
-		return &http.Client{Timeout: 10 * time.Second}
+		return defaultHTTPClient
 	}
 
 	parsed, err := url.Parse(proxyURL)
 	if err != nil || parsed.Host == "" {
-		return &http.Client{Timeout: 10 * time.Second}
+		return defaultHTTPClient
 	}
 
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
 
 	switch strings.ToLower(parsed.Scheme) {
 	case "socks5", "socks5h":
@@ -85,7 +136,7 @@ func newTelegramHTTPClient(proxyURL string) *http.Client {
 		}
 		dialer, dialErr := proxy.SOCKS5("tcp", parsed.Host, auth, proxy.Direct)
 		if dialErr != nil {
-			return &http.Client{Timeout: 10 * time.Second}
+			return defaultHTTPClient
 		}
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.Dial(network, addr)
@@ -93,7 +144,7 @@ func newTelegramHTTPClient(proxyURL string) *http.Client {
 	case "http", "https":
 		transport.Proxy = http.ProxyURL(parsed)
 	default:
-		return &http.Client{Timeout: 10 * time.Second}
+		return defaultHTTPClient
 	}
 
 	return &http.Client{Timeout: 10 * time.Second, Transport: transport}

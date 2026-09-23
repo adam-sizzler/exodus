@@ -154,11 +154,19 @@ func UpdateExpiredUsersWithRecords(ctx context.Context, dbConn db.DBTX) (StatusU
 			  AND expire_at < CURRENT_TIMESTAMP
 			RETURNING id, uuid::text, username, short_uuid, status,
 			          traffic_limit_bytes, expire_at, last_triggered_threshold, created_at
+		),
+		affected_nodes AS (
+			SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
+			FROM affected_users au
+			JOIN internal_squad_members ism ON ism.user_id = au.id
+			JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
+			JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
 		)
 		SELECT
 			au.id, au.uuid, au.username, au.short_uuid, au.status,
 			au.traffic_limit_bytes, COALESCE(ut.used_traffic_bytes, 0),
-			au.expire_at, au.last_triggered_threshold, au.created_at
+			au.expire_at, au.last_triggered_threshold, au.created_at,
+			COALESCE((SELECT array_agg(node_uuid) FROM affected_nodes), '{}'::text[]) AS node_uuids
 		FROM affected_users au
 		LEFT JOIN user_traffic ut ON ut.id = au.id
 		ORDER BY au.created_at ASC
@@ -169,51 +177,32 @@ func UpdateExpiredUsersWithRecords(ctx context.Context, dbConn db.DBTX) (StatusU
 	defer rows.Close()
 
 	var users []userNotificationRecord
-	var userIDs []int64
+	var nodeUUIDs []string
 	for rows.Next() {
 		var u userNotificationRecord
+		var rowNodes []string
 		if err := rows.Scan(
 			&u.ID, &u.UUID, &u.Username, &u.ShortUUID, &u.Status,
 			&u.TrafficLimitBytes, &u.UsedTrafficBytes,
 			&u.ExpireAt, &u.LastTriggeredThreshold, &u.CreatedAt,
+			&rowNodes,
 		); err != nil {
 			return result, nil, err
 		}
 		users = append(users, u)
-		userIDs = append(userIDs, u.ID)
+		if len(nodeUUIDs) == 0 && len(rowNodes) > 0 {
+			nodeUUIDs = rowNodes
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return result, nil, err
 	}
-	rows.Close()
 
 	result.Users = int64(len(users))
-	if len(userIDs) == 0 {
-		return result, users, nil
+	if len(nodeUUIDs) > 0 {
+		result.NodeUUIDs = dedupeStrings(nodeUUIDs)
 	}
-
-	nodeRows, err := dbConn.Query(ctx, `
-		SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
-		FROM internal_squad_members ism
-		JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
-		JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
-		WHERE ism.user_id = ANY($1)
-	`, userIDs)
-	if err != nil {
-		return result, users, err
-	}
-	defer nodeRows.Close()
-
-	for nodeRows.Next() {
-		var nodeUUID *string
-		if err := nodeRows.Scan(&nodeUUID); err != nil {
-			return result, users, err
-		}
-		if nodeUUID != nil && strings.TrimSpace(*nodeUUID) != "" {
-			result.NodeUUIDs = append(result.NodeUUIDs, *nodeUUID)
-		}
-	}
-	return result, users, nodeRows.Err()
+	return result, users, nil
 }
 
 func UpdateExceededTrafficUsers(ctx context.Context, dbConn db.DBTX) (StatusUpdateResult, error) {
@@ -239,11 +228,19 @@ func UpdateExceededTrafficUsersWithRecords(ctx context.Context, dbConn db.DBTX) 
 			RETURNING u.id, u.uuid::text, u.username, u.short_uuid, u.status,
 			          u.traffic_limit_bytes, u.expire_at, u.last_triggered_threshold, u.created_at,
 			          ut.used_traffic_bytes
+		),
+		affected_nodes AS (
+			SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
+			FROM affected_users au
+			JOIN internal_squad_members ism ON ism.user_id = au.id
+			JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
+			JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
 		)
 		SELECT
 			id, uuid, username, short_uuid, status,
 			traffic_limit_bytes, used_traffic_bytes,
-			expire_at, last_triggered_threshold, created_at
+			expire_at, last_triggered_threshold, created_at,
+			COALESCE((SELECT array_agg(node_uuid) FROM affected_nodes), '{}'::text[]) AS node_uuids
 		FROM affected_users
 		ORDER BY created_at ASC
 	`)
@@ -253,51 +250,32 @@ func UpdateExceededTrafficUsersWithRecords(ctx context.Context, dbConn db.DBTX) 
 	defer rows.Close()
 
 	var users []userNotificationRecord
-	var userIDs []int64
+	var nodeUUIDs []string
 	for rows.Next() {
 		var u userNotificationRecord
+		var rowNodes []string
 		if err := rows.Scan(
 			&u.ID, &u.UUID, &u.Username, &u.ShortUUID, &u.Status,
 			&u.TrafficLimitBytes, &u.UsedTrafficBytes,
 			&u.ExpireAt, &u.LastTriggeredThreshold, &u.CreatedAt,
+			&rowNodes,
 		); err != nil {
 			return result, nil, err
 		}
 		users = append(users, u)
-		userIDs = append(userIDs, u.ID)
+		if len(nodeUUIDs) == 0 && len(rowNodes) > 0 {
+			nodeUUIDs = rowNodes
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return result, nil, err
 	}
-	rows.Close()
 
 	result.Users = int64(len(users))
-	if len(userIDs) == 0 {
-		return result, users, nil
+	if len(nodeUUIDs) > 0 {
+		result.NodeUUIDs = dedupeStrings(nodeUUIDs)
 	}
-
-	nodeRows, err := dbConn.Query(ctx, `
-		SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
-		FROM internal_squad_members ism
-		JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
-		JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
-		WHERE ism.user_id = ANY($1)
-	`, userIDs)
-	if err != nil {
-		return result, users, err
-	}
-	defer nodeRows.Close()
-
-	for nodeRows.Next() {
-		var nodeUUID *string
-		if err := nodeRows.Scan(&nodeUUID); err != nil {
-			return result, users, err
-		}
-		if nodeUUID != nil && strings.TrimSpace(*nodeUUID) != "" {
-			result.NodeUUIDs = append(result.NodeUUIDs, *nodeUUID)
-		}
-	}
-	return result, users, nodeRows.Err()
+	return result, users, nil
 }
 
 func ResetTrafficByStrategy(ctx context.Context, pool *pgxpool.Pool, strategy string) (StatusUpdateResult, error) {

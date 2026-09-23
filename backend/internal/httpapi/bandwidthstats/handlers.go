@@ -190,7 +190,7 @@ SELECT COALESCE(dt.bytes, 0) AS value
 FROM unnest($3::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date
 ORDER BY d.ord
-	`, startDate, endDate, pgDateArrayLiteral(dates))
+	`, startDate, endDate, dates)
 
 	batch.Queue(`
 WITH daily_usage AS (
@@ -216,7 +216,7 @@ CROSS JOIN unnest($3::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_usage du ON du.uuid = nt.uuid AND du.date = d.date
 GROUP BY nt.uuid, nt.name, nt.country_code, nt.total_bytes
 ORDER BY nt.total_bytes DESC
-	`, startDate, endDate, pgDateArrayLiteral(dates))
+	`, startDate, endDate, dates)
 
 	batch.Queue(`
 SELECT n.uuid, n.name, n.country_code, COALESCE(SUM(h.total_bytes), 0) AS total
@@ -339,7 +339,7 @@ SELECT COALESCE(dt.bytes, 0) AS value
 FROM unnest($4::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date::date
 ORDER BY d.ord
-	`, nodeID, startDate, endDate, pgDateArrayLiteral(dates))
+	`, nodeID, startDate, endDate, dates)
 
 	batch.Queue(`
 SELECT u.uuid, u.username, COALESCE(SUM(nuh.total_bytes), 0) AS total
@@ -466,7 +466,7 @@ SELECT COALESCE(dt.bytes, 0) AS value
 FROM unnest($4::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date::date
 ORDER BY d.ord
-	`, nodeIDs, startDate, endDate, pgDateArrayLiteral(dates))
+	`, nodeIDs, startDate, endDate, dates)
 
 	batch.Queue(`
 SELECT u.uuid, u.username, COALESCE(SUM(nuh.total_bytes), 0) AS total
@@ -568,7 +568,7 @@ SELECT COALESCE(dt.bytes, 0) AS value
 FROM unnest($4::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date::date
 ORDER BY d.ord
-	`, userID, startDate, endDate, pgDateArrayLiteral(dates))
+	`, userID, startDate, endDate, dates)
 
 	batch.Queue(`
 WITH daily_usage AS (
@@ -594,7 +594,7 @@ CROSS JOIN unnest($4::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_usage du ON du.uuid = nt.uuid AND du.date = d.date::date
 GROUP BY nt.uuid, nt.name, nt.country_code, nt.total_bytes
 ORDER BY nt.total_bytes DESC
-	`, userID, startDate, endDate, pgDateArrayLiteral(dates))
+	`, userID, startDate, endDate, dates)
 
 	batch.Queue(`
 SELECT n.uuid, n.name, n.country_code, COALESCE(SUM(nuh.total_bytes), 0) AS total

@@ -18,9 +18,43 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
+
+var yamlTemplateCache sync.Map // map[string]*yaml.Node
+
+func cloneYAMLNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	cp := *n
+	if len(n.Content) > 0 {
+		cp.Content = make([]*yaml.Node, len(n.Content))
+		for i, child := range n.Content {
+			cp.Content[i] = cloneYAMLNode(child)
+		}
+	}
+	return &cp
+}
+
+func getOrParseYAMLTemplate(templateYAML []byte) yaml.Node {
+	if len(templateYAML) == 0 {
+		return yaml.Node{}
+	}
+	key := string(templateYAML)
+	if val, ok := yamlTemplateCache.Load(key); ok {
+		cachedNode := val.(*yaml.Node)
+		return *cloneYAMLNode(cachedNode)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(templateYAML, &root); err != nil {
+		return yaml.Node{}
+	}
+	yamlTemplateCache.Store(key, cloneYAMLNode(&root))
+	return root
+}
 
 func generateYAMLConfig(templateYAML []byte, hosts []SubscriptionHost, user SubscriptionUser) (string, error) {
 	return generateYAMLConfigExt(templateYAML, hosts, user, false, responseTypeMihomo)
@@ -38,12 +72,7 @@ func generateYAMLConfigExt(templateYAML []byte, hosts []SubscriptionHost, user S
 	if isStash {
 		isExtendedClient = false
 	}
-	var root yaml.Node
-	if len(templateYAML) > 0 {
-		if err := yaml.Unmarshal(templateYAML, &root); err != nil {
-			root = yaml.Node{}
-		}
-	}
+	root := getOrParseYAMLTemplate(templateYAML)
 	topLevelSpacing := extractYAMLTopLevelSpacing(templateYAML)
 	config := ensureYAMLDocumentMappingNode(&root)
 
@@ -701,20 +730,18 @@ func parseHysteria2FinalMask(host SubscriptionHost) map[string]any {
 		}
 	}
 	if len(host.InboundRaw) > 0 {
-		var raw map[string]any
-		if err := json.Unmarshal(host.InboundRaw, &raw); err == nil {
-			if fm, ok := raw["finalMask"].(map[string]any); ok {
-				return fm
-			}
-			if fm, ok := raw["final_mask"].(map[string]any); ok {
-				return fm
-			}
-			if _, hasUDP := raw["udp"]; hasUDP {
-				return raw
-			}
-			if _, hasQuic := raw["quicParams"]; hasQuic {
-				return raw
-			}
+		raw := parseInboundRaw(host.InboundRaw)
+		if fm, ok := raw["finalMask"].(map[string]any); ok {
+			return fm
+		}
+		if fm, ok := raw["final_mask"].(map[string]any); ok {
+			return fm
+		}
+		if _, hasUDP := raw["udp"]; hasUDP {
+			return raw
+		}
+		if _, hasQuic := raw["quicParams"]; hasQuic {
+			return raw
 		}
 	}
 	return nil
@@ -878,10 +905,7 @@ func extractMihomoNativeSNI(inboundRaw []byte) string {
 	if len(inboundRaw) == 0 {
 		return ""
 	}
-	var raw map[string]interface{}
-	if err := json.Unmarshal(inboundRaw, &raw); err != nil {
-		return ""
-	}
+	raw := parseInboundRaw(inboundRaw)
 	streamSettings, _ := raw["streamSettings"].(map[string]interface{})
 	if streamSettings == nil {
 		return ""
@@ -908,14 +932,23 @@ func extractMihomoNativeSNI(inboundRaw []byte) string {
 	return ""
 }
 
+var mihomoMuxCache sync.Map // map[string]map[string]interface{}
+
 func parseMihomoMuxParams(rawStr string) map[string]interface{} {
 	rawStr = strings.TrimSpace(rawStr)
 	if rawStr == "" {
 		return nil
 	}
+	if cached, ok := mihomoMuxCache.Load(rawStr); ok {
+		if cached == nil {
+			return nil
+		}
+		return cloneShallowMap(cached.(map[string]interface{}))
+	}
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(rawStr), &result); err != nil || result == nil {
 		if err := yaml.Unmarshal([]byte(rawStr), &result); err != nil || result == nil {
+			mihomoMuxCache.Store(rawStr, (map[string]interface{})(nil))
 			return nil
 		}
 	}
@@ -923,9 +956,12 @@ func parseMihomoMuxParams(rawStr string) map[string]interface{} {
 		result = smux
 	}
 	if enabled, ok := result["enabled"].(bool); !ok || !enabled {
+		mihomoMuxCache.Store(rawStr, (map[string]interface{})(nil))
 		return nil
 	}
-	return normalizeMihomoMuxKeys(result)
+	normalized := normalizeMihomoMuxKeys(result)
+	mihomoMuxCache.Store(rawStr, normalized)
+	return cloneShallowMap(normalized)
 }
 
 func normalizeMihomoMuxKeys(mux map[string]interface{}) map[string]interface{} {

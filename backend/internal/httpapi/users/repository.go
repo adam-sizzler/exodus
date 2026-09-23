@@ -36,15 +36,17 @@ func (r *UserRepository) getUsersTableRecords(ctx context.Context, whereSQL, ord
 	}
 
 	baseFrom := `FROM users u LEFT JOIN user_traffic ut ON ut.id = u.id ` + whereSQL
-
-	var total int64
-	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseFrom, whereArgs...).Scan(&total); err != nil {
-		return nil, 0, err
+	countFrom := "FROM users u "
+	if strings.Contains(whereSQL, "ut.") {
+		countFrom = "FROM users u LEFT JOIN user_traffic ut ON ut.id = u.id "
 	}
+	countQuery := "SELECT COUNT(*) " + countFrom + whereSQL
 
 	limitIdx := len(whereArgs) + 1
 	offsetIdx := len(whereArgs) + 2
-	args := append(append([]any{}, whereArgs...), size, start)
+	args := make([]any, 0, len(whereArgs)+2)
+	args = append(args, whereArgs...)
+	args = append(args, size, start)
 
 	query := fmt.Sprintf(`
 		SELECT
@@ -61,7 +63,19 @@ func (r *UserRepository) getUsersTableRecords(ctx context.Context, whereSQL, ord
 		LIMIT $%d OFFSET $%d
 	`, baseFrom, orderSQL, limitIdx, offsetIdx)
 
-	rows, err := r.db.Query(ctx, query, args...)
+	batch := &pgx.Batch{}
+	batch.Queue(countQuery, whereArgs...)
+	batch.Queue(query, args...)
+
+	br := r.db.SendBatch(ctx, batch)
+	defer br.Close()
+
+	var total int64
+	if err := br.QueryRow().Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := br.Query()
 	if err != nil {
 		return nil, 0, err
 	}

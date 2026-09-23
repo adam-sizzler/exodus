@@ -27,12 +27,7 @@ func (g *ClashGenerator) Generate(templateYAML []byte, user SubscriptionUser, ho
 }
 
 func generateClashYAMLConfig(templateYAML []byte, hosts []SubscriptionHost, user SubscriptionUser) (string, error) {
-	var root yaml.Node
-	if len(templateYAML) > 0 {
-		if err := yaml.Unmarshal(templateYAML, &root); err != nil {
-			root = yaml.Node{}
-		}
-	}
+	root := getOrParseYAMLTemplate(templateYAML)
 	topLevelSpacing := extractYAMLTopLevelSpacing(templateYAML)
 	cfgMapping := ensureYAMLDocumentMappingNode(&root)
 	proxiesNode := ensureYAMLMappingSequenceValue(cfgMapping, "proxies")

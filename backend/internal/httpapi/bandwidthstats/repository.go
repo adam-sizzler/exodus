@@ -110,37 +110,12 @@ func dateRange(start, end time.Time) []string {
 	return out
 }
 
-func pgDateArrayLiteral(dates []string) string {
-	return "{" + strings.Join(dates, ",") + "}"
-}
-
 func parsePositiveIntWithDefault(raw string, fallback int) int {
 	v, err := strconv.Atoi(raw)
 	if err != nil || v < 1 {
 		return fallback
 	}
 	return v
-}
-
-func parsePgBigintArray(v string) []int64 {
-	raw := strings.TrimSpace(v)
-	raw = strings.TrimPrefix(raw, "{")
-	raw = strings.TrimSuffix(raw, "}")
-	if raw == "" {
-		return []int64{}
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]int64, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(strings.Trim(p, `"`))
-		n, err := strconv.ParseInt(p, 10, 64)
-		if err != nil {
-			out = append(out, 0)
-			continue
-		}
-		out = append(out, n)
-	}
-	return out
 }
 
 func colorFromUUID(id string) string {

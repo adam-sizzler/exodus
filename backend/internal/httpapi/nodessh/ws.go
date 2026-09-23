@@ -405,9 +405,11 @@ func NodeSSHWSHandler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerF
 
 func runSshSession(hub *sessionHub, db *pgxpool.Pool, ticketInfo TicketInfo) {
 	var openMsg SshClientMsg
+	openTimer := time.NewTimer(15 * time.Second)
+	defer openTimer.Stop()
 	select {
 	case openMsg = <-hub.openCh:
-	case <-time.After(15 * time.Second):
+	case <-openTimer.C:
 		if hub.log != nil {
 			hub.log.Warn("Open message timeout")
 		}
@@ -543,6 +545,8 @@ func runSshSession(hub *sessionHub, db *pgxpool.Pool, ticketInfo TicketInfo) {
 			return nil, err
 		}
 
+		idTimer := time.NewTimer(30 * time.Second)
+		defer idTimer.Stop()
 		select {
 		case keys := <-idCh:
 			var signers []ssh.Signer
@@ -559,7 +563,7 @@ func runSshSession(hub *sessionHub, db *pgxpool.Pool, ticketInfo TicketInfo) {
 			return signers, nil
 		case errMsg := <-errCh:
 			return nil, errors.New(errMsg)
-		case <-time.After(30 * time.Second):
+		case <-idTimer.C:
 			return nil, errors.New("agent identities timeout")
 		case <-hub.ctx.Done():
 			return nil, errors.New("session closed")
@@ -596,13 +600,15 @@ func runSshSession(hub *sessionHub, db *pgxpool.Pool, ticketInfo TicketInfo) {
 				return err
 			}
 
+			hostTimer := time.NewTimer(30 * time.Second)
+			defer hostTimer.Stop()
 			select {
 			case accept := <-hostCh:
 				if !accept {
 					return errors.New("host key rejected by user")
 				}
 				return nil
-			case <-time.After(30 * time.Second):
+			case <-hostTimer.C:
 				return errors.New("host key prompt timeout")
 			case <-hub.ctx.Done():
 				return errors.New("session closed")
@@ -874,6 +880,8 @@ func (s *browserSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error
 		return nil, err
 	}
 
+	signTimer := time.NewTimer(30 * time.Second)
+	defer signTimer.Stop()
 	select {
 	case sigB64 := <-sigCh:
 		sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
@@ -886,7 +894,7 @@ func (s *browserSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error
 		}, nil
 	case errMsg := <-errCh:
 		return nil, errors.New(errMsg)
-	case <-time.After(30 * time.Second):
+	case <-signTimer.C:
 		return nil, errors.New("agent sign timeout")
 	case <-s.hub.ctx.Done():
 		return nil, errors.New("session closed")
@@ -925,6 +933,8 @@ func (s *browserSigner) SignWithAlgorithm(rand io.Reader, data []byte, algorithm
 		return nil, err
 	}
 
+	signTimer := time.NewTimer(30 * time.Second)
+	defer signTimer.Stop()
 	select {
 	case sigB64 := <-sigCh:
 		sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
@@ -937,7 +947,7 @@ func (s *browserSigner) SignWithAlgorithm(rand io.Reader, data []byte, algorithm
 		}, nil
 	case errMsg := <-errCh:
 		return nil, errors.New(errMsg)
-	case <-time.After(30 * time.Second):
+	case <-signTimer.C:
 		return nil, errors.New("agent sign timeout")
 	case <-s.hub.ctx.Done():
 		return nil, errors.New("session closed")

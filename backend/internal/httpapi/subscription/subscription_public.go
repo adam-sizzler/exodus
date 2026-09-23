@@ -177,7 +177,7 @@ func handlePublicOutlineSubscription(w http.ResponseWriter, r *http.Request, db,
 	}
 
 	content, contentType, headers, err := renderService.RenderUserSubscription(
-		ctx, user, r.UserAgent(), reqType, middleware.GetClientIP(r, cfg), ExtractHwidHeaders(r),
+		ctx, user, r.UserAgent(), reqType, middleware.GetClientIP(r, cfg), ExtractHwidHeaders(r), settings,
 	)
 	if err != nil {
 		if err == ErrBlocked {
@@ -222,25 +222,16 @@ func handlePublicSubscription(w http.ResponseWriter, r *http.Request, db, backgr
 
 	renderService := NewRenderService(db, backgroundDB, cfg)
 
-	requestHeaders := make(map[string]string)
-	for k, v := range r.Header {
-		if len(v) > 0 {
-			requestHeaders[k] = v[0]
-		}
+	settings, err := renderService.LoadSubscriptionSettings(ctx)
+	if err != nil {
+		shared.SendAPIError(w, shared.ErrGetSubscriptionSettingsFailed.WithCause(err), cfg)
+		return
 	}
-
-	subpageConfigUUID, webpageAllowed, _ := getSubpageConfigForUser(ctx, db, cfg, shortUUID, requestHeaders)
-
-	if webpageAllowed {
-		_ = subpageConfigUUID
-	}
-
-	settings, _ := renderService.LoadSubscriptionSettings(ctx)
 	requestIP := middleware.GetClientIP(r, cfg)
 	hwidHeaders := ResolveHwidHeaders(r, user.UUID, requestIP, settings.HwidSettings)
 
 	content, contentType, headers, err := renderService.RenderUserSubscription(
-		ctx, user, r.UserAgent(), clientType, requestIP, hwidHeaders,
+		ctx, user, r.UserAgent(), clientType, requestIP, hwidHeaders, settings,
 	)
 	if err != nil {
 		if err == ErrBlocked {

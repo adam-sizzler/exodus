@@ -417,10 +417,8 @@ func renderPrometheusMetrics(ctx context.Context, db *pgxpool.Pool, cfg *config.
 		sort.Strings(inboundTags)
 		for _, tag := range inboundTags {
 			item := snapshot.Inbounds[tag]
-			tagLabels := copyLabels(labels)
-			tagLabels["tag"] = tag
-			writePrometheusMetricLine(&builder, metricNodeInboundUpload, tagLabels, strconv.FormatInt(maxInt64(item.UploadBytes, 0), 10))
-			writePrometheusMetricLine(&builder, metricNodeInboundDownload, tagLabels, strconv.FormatInt(maxInt64(item.DownloadBytes, 0), 10))
+			writePrometheusMetricLineWithExtra(&builder, metricNodeInboundUpload, labels, "tag", tag, strconv.FormatInt(maxInt64(item.UploadBytes, 0), 10))
+			writePrometheusMetricLineWithExtra(&builder, metricNodeInboundDownload, labels, "tag", tag, strconv.FormatInt(maxInt64(item.DownloadBytes, 0), 10))
 		}
 
 		outboundTags := make([]string, 0, len(snapshot.Outbounds))
@@ -430,10 +428,8 @@ func renderPrometheusMetrics(ctx context.Context, db *pgxpool.Pool, cfg *config.
 		sort.Strings(outboundTags)
 		for _, tag := range outboundTags {
 			item := snapshot.Outbounds[tag]
-			tagLabels := copyLabels(labels)
-			tagLabels["tag"] = tag
-			writePrometheusMetricLine(&builder, metricNodeOutboundUpload, tagLabels, strconv.FormatInt(maxInt64(item.UploadBytes, 0), 10))
-			writePrometheusMetricLine(&builder, metricNodeOutboundDownload, tagLabels, strconv.FormatInt(maxInt64(item.DownloadBytes, 0), 10))
+			writePrometheusMetricLineWithExtra(&builder, metricNodeOutboundUpload, labels, "tag", tag, strconv.FormatInt(maxInt64(item.UploadBytes, 0), 10))
+			writePrometheusMetricLineWithExtra(&builder, metricNodeOutboundDownload, labels, "tag", tag, strconv.FormatInt(maxInt64(item.DownloadBytes, 0), 10))
 		}
 	}
 
@@ -649,6 +645,45 @@ func writePrometheusMetricLine(builder *strings.Builder, metricName string, labe
 	builder.WriteByte('\n')
 }
 
+func writePrometheusMetricLineWithExtra(builder *strings.Builder, metricName string, labels map[string]string, extraKey, extraValue, value string) {
+	builder.WriteString(metricName)
+	builder.WriteByte('{')
+	appendPrometheusLabelsWithExtra(builder, labels, extraKey, extraValue)
+	builder.WriteString("} ")
+	builder.WriteString(value)
+	builder.WriteByte('\n')
+}
+
+func appendPrometheusLabelsWithExtra(builder *strings.Builder, labels map[string]string, extraKey, extraValue string) {
+	var keysBuf [8]string
+	var keys []string
+	totalCount := len(labels) + 1
+	if totalCount <= len(keysBuf) {
+		keys = keysBuf[:0]
+	} else {
+		keys = make([]string, 0, totalCount)
+	}
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	keys = append(keys, extraKey)
+	sort.Strings(keys)
+
+	for i, key := range keys {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(key)
+		builder.WriteString(`="`)
+		if key == extraKey {
+			writeEscapedPrometheusLabelValue(builder, extraValue)
+		} else {
+			writeEscapedPrometheusLabelValue(builder, labels[key])
+		}
+		builder.WriteByte('"')
+	}
+}
+
 func appendPrometheusLabels(builder *strings.Builder, labels map[string]string) {
 	if len(labels) == 0 {
 		return
@@ -708,16 +743,7 @@ func escapePrometheusLabelValue(value string) string {
 	return escaped
 }
 
-func copyLabels(source map[string]string) map[string]string {
-	if len(source) == 0 {
-		return map[string]string{}
-	}
-	result := make(map[string]string, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
-	return result
-}
+
 
 func sortedTags(values map[string]metricTrafficPair) []string {
 	result := make([]string, 0, len(values))

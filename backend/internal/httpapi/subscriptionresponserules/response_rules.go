@@ -4,7 +4,22 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 )
+
+var regexCache sync.Map // map[string]*regexp.Regexp
+
+func getCompiledRegex(pattern string) (*regexp.Regexp, error) {
+	if val, ok := regexCache.Load(pattern); ok {
+		return val.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	regexCache.Store(pattern, re)
+	return re, nil
+}
 
 type Config struct {
 	Version  string    `json:"version"`
@@ -136,16 +151,14 @@ func evalCondition(cond Condition, headers map[string]string) bool {
 	switch operator {
 	case "EQUALS":
 		if !cond.CaseSensitive {
-			checkValue = strings.ToLower(checkValue)
-			checkTarget = strings.ToLower(checkTarget)
+			return strings.EqualFold(value, cond.Value)
 		}
-		return checkValue == checkTarget
+		return value == cond.Value
 	case "NOT_EQUALS":
 		if !cond.CaseSensitive {
-			checkValue = strings.ToLower(checkValue)
-			checkTarget = strings.ToLower(checkTarget)
+			return !strings.EqualFold(value, cond.Value)
 		}
-		return checkValue != checkTarget
+		return value != cond.Value
 	case "CONTAINS":
 		if !cond.CaseSensitive {
 			checkValue = strings.ToLower(checkValue)
@@ -187,7 +200,7 @@ func evalCondition(cond Condition, headers map[string]string) bool {
 		if !cond.CaseSensitive {
 			pattern = "(?i)" + pattern
 		}
-		re, err := regexp.Compile(pattern)
+		re, err := getCompiledRegex(pattern)
 		if err != nil {
 			return false
 		}
@@ -197,7 +210,7 @@ func evalCondition(cond Condition, headers map[string]string) bool {
 		if !cond.CaseSensitive {
 			pattern = "(?i)" + pattern
 		}
-		re, err := regexp.Compile(pattern)
+		re, err := getCompiledRegex(pattern)
 		if err != nil {
 			return false
 		}

@@ -258,16 +258,16 @@ func (r *HostRepository) replaceHostNodesTx(ctx context.Context, tx pgx.Tx, host
 	if _, err := tx.Exec(ctx, `DELETE FROM hosts_to_nodes WHERE host_uuid = $1`, hostUUID); err != nil {
 		return err
 	}
-	if len(nodeUUIDs) == 0 {
+	cleanNodes := uniqueNonEmptyStrings(nodeUUIDs)
+	if len(cleanNodes) == 0 {
 		return nil
 	}
 
-	for _, nodeUUID := range uniqueNonEmptyStrings(nodeUUIDs) {
-		if _, err := tx.Exec(ctx, `INSERT INTO hosts_to_nodes (host_uuid, node_uuid) VALUES ($1, $2)`, hostUUID, nodeUUID); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := tx.Exec(ctx, `
+		INSERT INTO hosts_to_nodes (host_uuid, node_uuid)
+		SELECT $1::uuid, unnest($2::uuid[])
+	`, hostUUID, cleanNodes)
+	return err
 }
 
 func (r *HostRepository) replaceHostsInternalSquadsTx(ctx context.Context, tx pgx.Tx, hostUUIDs []string, squadUUIDs []string) error {
@@ -303,16 +303,16 @@ func (r *HostRepository) replaceHostInternalSquadsTx(ctx context.Context, tx pgx
 	if _, err := tx.Exec(ctx, `DELETE FROM internal_squad_host_links WHERE host_uuid = $1`, hostUUID); err != nil {
 		return err
 	}
-	if len(squadUUIDs) == 0 {
+	cleanSquads := uniqueNonEmptyStrings(squadUUIDs)
+	if len(cleanSquads) == 0 {
 		return nil
 	}
 
-	for _, squadUUID := range uniqueNonEmptyStrings(squadUUIDs) {
-		if _, err := tx.Exec(ctx, `INSERT INTO internal_squad_host_links (host_uuid, squad_uuid) VALUES ($1, $2)`, hostUUID, squadUUID); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := tx.Exec(ctx, `
+		INSERT INTO internal_squad_host_links (host_uuid, squad_uuid)
+		SELECT $1::uuid, unnest($2::uuid[])
+	`, hostUUID, cleanSquads)
+	return err
 }
 
 func (r *HostRepository) getHostTags(ctx context.Context) ([]string, error) {

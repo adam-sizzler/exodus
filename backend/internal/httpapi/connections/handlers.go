@@ -19,6 +19,8 @@ import (
 
 const geocheckJobTTL = 15 * time.Minute
 
+var geocheckSem = make(chan struct{}, 4)
+
 type GeocheckImage struct {
 	Format    string `json:"format"`
 	MediaType string `json:"media_type"`
@@ -122,7 +124,11 @@ func Handler(db *pgxpool.Pool, cfg *config.BackendConfig) http.HandlerFunc {
 				jobs[jobID] = job
 				jobsMu.Unlock()
 
-				go runGeocheckJob(job, body.IP, body.Interface, cfg)
+				go func() {
+					geocheckSem <- struct{}{}
+					defer func() { <-geocheckSem }()
+					runGeocheckJob(job, body.IP, body.Interface, cfg)
+				}()
 
 				shared.WriteJSON(w, http.StatusCreated, map[string]any{
 					"response": map[string]any{

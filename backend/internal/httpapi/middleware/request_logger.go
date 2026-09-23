@@ -58,6 +58,10 @@ func WithRequestLogging(cfg *config.BackendConfig, component string, next http.H
 		return next
 	}
 
+	apiLogger := cfg.Logger.RoleService(logger.RoleAPI, logger.ServiceHTTP)
+	schedulerLogger := cfg.Logger.RoleService(logger.RoleScheduler, logger.ServiceHTTP)
+	isMetrics := strings.EqualFold(component, "metrics")
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		lrw := &loggingResponseWriter{ResponseWriter: w}
@@ -78,14 +82,13 @@ func WithRequestLogging(cfg *config.BackendConfig, component string, next http.H
 			return
 		}
 
-		role := logger.RoleAPI
+		serviceLogger := apiLogger
 		comp := component
-		if strings.EqualFold(component, "metrics") {
-			role = logger.RoleScheduler
+		if isMetrics {
+			serviceLogger = schedulerLogger
 		} else if strings.Contains(r.URL.Path, "/api/") {
 			comp = "api"
 		}
-		serviceLogger := cfg.Logger.RoleService(role, logger.ServiceHTTP)
 
 		var msgBuf [128]byte
 		msg := formatRequestLogMessage(msgBuf[:0], r.Method, r.URL.Path, statusCode, durationMs)

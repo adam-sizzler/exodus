@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -649,16 +648,15 @@ func createHwidDeviceWithAdvisoryLock(ctx context.Context, dbConn *pgxpool.Pool,
 			return fmt.Errorf("acquire hwid advisory lock: %w", err)
 		}
 
-		var exists bool
-		err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM hwid_user_devices WHERE hwid = $1 AND user_id = $2)`, hwid.Hwid, userID).Scan(&exists)
-		if err != nil {
-			return fmt.Errorf("check hwid device exists: %w", err)
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM hwid_user_devices WHERE user_id = $1`, userID).Scan(&count); err != nil {
+			return fmt.Errorf("count hwid devices: %w", err)
 		}
 
 		platform := lowerStringPtr(hwid.Platform)
 
-		if exists {
-			if _, err := tx.Exec(ctx, `
+		if count >= deviceLimit {
+			res, err := tx.Exec(ctx, `
 				UPDATE hwid_user_devices SET
 					platform = COALESCE($3, platform),
 					os_version = COALESCE($4, os_version),
@@ -667,19 +665,14 @@ func createHwidDeviceWithAdvisoryLock(ctx context.Context, dbConn *pgxpool.Pool,
 					request_ip = COALESCE($7, request_ip),
 					updated_at = now()
 				WHERE hwid = $1 AND user_id = $2
-			`, hwid.Hwid, userID, platform, hwid.OsVersion, hwid.DeviceModel, hwid.UserAgent, hwid.RequestIP); err != nil {
+			`, hwid.Hwid, userID, platform, hwid.OsVersion, hwid.DeviceModel, hwid.UserAgent, hwid.RequestIP)
+			if err != nil {
 				return fmt.Errorf("update hwid device: %w", err)
 			}
-			allowed = true
-			return nil
-		}
-
-		var count int
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM hwid_user_devices WHERE user_id = $1`, userID).Scan(&count); err != nil {
-			return fmt.Errorf("count hwid devices: %w", err)
-		}
-
-		if count >= deviceLimit {
+			if res.RowsAffected() > 0 {
+				allowed = true
+				return nil
+			}
 			allowed = false
 			return nil
 		}
@@ -687,6 +680,13 @@ func createHwidDeviceWithAdvisoryLock(ctx context.Context, dbConn *pgxpool.Pool,
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO hwid_user_devices (hwid, user_id, platform, os_version, device_model, user_agent, request_ip)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (hwid, user_id) DO UPDATE SET
+				platform = COALESCE(EXCLUDED.platform, hwid_user_devices.platform),
+				os_version = COALESCE(EXCLUDED.os_version, hwid_user_devices.os_version),
+				device_model = COALESCE(EXCLUDED.device_model, hwid_user_devices.device_model),
+				user_agent = COALESCE(EXCLUDED.user_agent, hwid_user_devices.user_agent),
+				request_ip = COALESCE(EXCLUDED.request_ip, hwid_user_devices.request_ip),
+				updated_at = now()
 		`, hwid.Hwid, userID, platform, hwid.OsVersion, hwid.DeviceModel, hwid.UserAgent, hwid.RequestIP); err != nil {
 			return fmt.Errorf("insert hwid device: %w", err)
 		}
@@ -760,10 +760,6 @@ func updateSubscriptionRequest(ctx context.Context, dbConn *pgxpool.Pool, userUU
 		ruleVal = &trimmed
 	}
 
-	updateQueued, updateErr := jobqueue.EnqueueUpdateUserSubscription(ctx, jobqueue.UpdateUserSubscriptionPayload{
-		UserUUID:  userUUID,
-		UserAgent: userAgent,
-	})
 	recordQueued, recordErr := jobqueue.EnqueueAddSubscriptionRequestRecord(ctx, jobqueue.AddSubscriptionRequestRecordPayload{
 		UserID:          userID,
 		RequestIP:       requestIP,
@@ -771,7 +767,7 @@ func updateSubscriptionRequest(ctx context.Context, dbConn *pgxpool.Pool, userUU
 		SRRResponseType: responseType,
 		SRRRuleName:     ruleVal,
 	})
-	if updateErr == nil && recordErr == nil && updateQueued && recordQueued {
+	if recordErr == nil && recordQueued {
 		return
 	}
 
@@ -1320,13 +1316,7 @@ func buildResponseHeaders(user SubscriptionUser, settings SubscriptionSettingsPa
 	}
 	headers["content-disposition"] = fmt.Sprintf("attachment; filename=%s", user.Username)
 
-	userInfo := getSubscriptionUserInfo(user)
-	parts := []string{}
-	for key, val := range userInfo {
-		parts = append(parts, fmt.Sprintf("%s=%d", key, val))
-	}
-	sort.Strings(parts)
-	headers["subscription-userinfo"] = strings.Join(parts, "; ")
+	headers["subscription-userinfo"] = formatSubscriptionUserInfo(user)
 
 	if refillDate := getSubscriptionRefillDate(user.TrafficLimitStrategy, user.CreatedAt); refillDate != "" {
 		headers["subscription-refill-date"] = refillDate
@@ -1419,21 +1409,9 @@ func formatTemplateTrafficBytes(bytes int64) string {
 	return util.FormatBytes(bytes)
 }
 
-var dayjsBracketRegex = regexp.MustCompile(`\[([^\]]*)\]`)
-
-func convertDayjsToGoFormat(layout string) string {
-	if layout == "" {
-		return "02.01.2006"
-	}
-
-	var escapes []string
-	layout = dayjsBracketRegex.ReplaceAllStringFunc(layout, func(m string) string {
-		content := m[1 : len(m)-1]
-		escapes = append(escapes, content)
-		return fmt.Sprintf("\x00%d\x00", len(escapes)-1)
-	})
-
-	r := strings.NewReplacer(
+var (
+	dayjsBracketRegex    = regexp.MustCompile(`\[([^\]]*)\]`)
+	dayjsFormatReplacer  = strings.NewReplacer(
 		"YYYY", "2006",
 		"YY", "06",
 		"MMMM", "January",
@@ -1458,7 +1436,21 @@ func convertDayjsToGoFormat(layout string) string {
 		"ZZ", "-0700",
 		"Z", "-07:00",
 	)
-	res := r.Replace(layout)
+)
+
+func convertDayjsToGoFormat(layout string) string {
+	if layout == "" {
+		return "02.01.2006"
+	}
+
+	var escapes []string
+	layout = dayjsBracketRegex.ReplaceAllStringFunc(layout, func(m string) string {
+		content := m[1 : len(m)-1]
+		escapes = append(escapes, content)
+		return fmt.Sprintf("\x00%d\x00", len(escapes)-1)
+	})
+
+	res := dayjsFormatReplacer.Replace(layout)
 
 	for i, esc := range escapes {
 		res = strings.ReplaceAll(res, fmt.Sprintf("\x00%d\x00", i), esc)
@@ -1542,6 +1534,9 @@ func getNextTrafficResetAt(strategy string, createdAt time.Time) *time.Time {
 }
 
 func resolveTemplateVariables(value string, user SubscriptionUser, settings SubscriptionSettingsParsed, subscriptionURL string) string {
+	if !strings.Contains(value, "{{") {
+		return value
+	}
 	trafficLeft := int64(0)
 	if user.TrafficLimitBytes > 0 {
 		if user.TrafficLimitBytes > user.UsedTrafficBytes {
@@ -1711,6 +1706,23 @@ func deduplicateRemark(remark string, knownRemarks map[string]int) string {
 	return fmt.Sprintf("%s ^~%d~^", remark, suffix)
 }
 
+func formatSubscriptionUserInfo(user SubscriptionUser) string {
+	expire := user.ExpireAt.Unix()
+	if user.ExpireAt.IsZero() || user.ExpireAt.Year() <= 1 || user.ExpireAt.Year() == 2099 {
+		expire = 0
+	}
+
+	var buf [128]byte
+	b := append(buf[:0], "download="...)
+	b = strconv.AppendInt(b, user.UsedTrafficBytes, 10)
+	b = append(b, "; expire="...)
+	b = strconv.AppendInt(b, expire, 10)
+	b = append(b, "; total="...)
+	b = strconv.AppendInt(b, user.TrafficLimitBytes, 10)
+	b = append(b, "; upload=0"...)
+	return string(b)
+}
+
 func getSubscriptionUserInfo(user SubscriptionUser) map[string]int64 {
 	expire := user.ExpireAt.Unix()
 	if user.ExpireAt.IsZero() || user.ExpireAt.Year() <= 1 || user.ExpireAt.Year() == 2099 {
@@ -1730,5 +1742,5 @@ func getSubscriptionRefillDate(strategy string, createdAt time.Time) string {
 	if next == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d", next.Unix())
+	return strconv.FormatInt(next.Unix(), 10)
 }

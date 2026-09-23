@@ -58,29 +58,39 @@ func (s *Scheduler) resetNodeTraffic(ctx context.Context) error {
 		return nil
 	}
 
+	validUUIDs := make([]string, 0, len(targets))
+	validBytes := make([]int64, 0, len(targets))
+	for _, target := range targets {
+		trimmed := strings.TrimSpace(target.UUID)
+		if trimmed == "" {
+			continue
+		}
+		validUUIDs = append(validUUIDs, trimmed)
+		validBytes = append(validBytes, target.Bytes)
+	}
+	if len(validUUIDs) == 0 {
+		return nil
+	}
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	for _, target := range targets {
-		if strings.TrimSpace(target.UUID) == "" {
-			continue
-		}
-		if _, execErr := tx.Exec(ctx, `
-			INSERT INTO nodes_traffic_usage_history (node_uuid, traffic_bytes, reset_at)
-			VALUES ($1, $2, CURRENT_TIMESTAMP)
-		`, target.UUID, target.Bytes); execErr != nil {
-			return execErr
-		}
-		if _, execErr := tx.Exec(ctx, `
-			UPDATE nodes
-			SET traffic_used_bytes = 0, updated_at = CURRENT_TIMESTAMP
-			WHERE uuid = $1
-		`, target.UUID); execErr != nil {
-			return execErr
-		}
+	if _, execErr := tx.Exec(ctx, `
+		INSERT INTO nodes_traffic_usage_history (node_uuid, traffic_bytes, reset_at)
+		SELECT unnest($1::uuid[]), unnest($2::bigint[]), CURRENT_TIMESTAMP
+	`, validUUIDs, validBytes); execErr != nil {
+		return execErr
+	}
+
+	if _, execErr := tx.Exec(ctx, `
+		UPDATE nodes
+		SET traffic_used_bytes = 0, updated_at = CURRENT_TIMESTAMP
+		WHERE uuid = ANY($1::uuid[])
+	`, validUUIDs); execErr != nil {
+		return execErr
 	}
 
 	if err := tx.Commit(ctx); err != nil {

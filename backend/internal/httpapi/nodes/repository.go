@@ -246,11 +246,12 @@ func (r *NodeRepository) replaceNodeInboundsTx(ctx context.Context, tx pgx.Tx, n
 	if _, err := tx.Exec(ctx, `DELETE FROM config_profile_inbounds_to_nodes WHERE node_uuid = $1`, nodeUUID); err != nil {
 		return err
 	}
-	for _, inboundUUID := range dedupeStrings(inboundUUIDs) {
+	deduped := dedupeStrings(inboundUUIDs)
+	if len(deduped) > 0 {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO config_profile_inbounds_to_nodes (config_profile_inbound_uuid, node_uuid)
-			VALUES ($1, $2)
-		`, inboundUUID, nodeUUID); err != nil {
+			SELECT unnest($1::uuid[]), $2::uuid
+		`, deduped, nodeUUID); err != nil {
 			return err
 		}
 	}
@@ -545,10 +546,13 @@ func (r *NodeRepository) disableNodeRecord(ctx context.Context, nodeUUID string,
 
 func (r *NodeRepository) bulkProfileModification(ctx context.Context, uuids []string, activeConfigProfileUUID string, activeInbounds []string) error {
 	return exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
+		if len(uuids) == 0 {
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `UPDATE nodes SET active_config_profile_uuid = $1, updated_at = CURRENT_TIMESTAMP WHERE uuid = ANY($2)`, activeConfigProfileUUID, uuids); err != nil {
+			return err
+		}
 		for _, nodeUUID := range uuids {
-			if _, err := tx.Exec(ctx, `UPDATE nodes SET active_config_profile_uuid = $1, updated_at = CURRENT_TIMESTAMP WHERE uuid = $2`, activeConfigProfileUUID, nodeUUID); err != nil {
-				return err
-			}
 			if err := r.replaceNodeInboundsTx(ctx, tx, nodeUUID, activeInbounds); err != nil {
 				return err
 			}

@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -36,12 +37,17 @@ type Notifier struct {
 	cfg            *config.BackendConfig
 	client         *http.Client
 	telegramClient *http.Client
+	telegramURL    string
 }
 
 func New(cfg *config.BackendConfig) *Notifier {
 	var telegramProxy string
+	var telegramURL string
 	if cfg != nil {
 		telegramProxy = cfg.Notifications.TelegramBotProxy
+		if token := strings.TrimSpace(cfg.Notifications.TelegramBotToken); token != "" {
+			telegramURL = "https://api.telegram.org/bot" + token + "/sendMessage"
+		}
 	}
 	return &Notifier{
 		cfg: cfg,
@@ -49,6 +55,7 @@ func New(cfg *config.BackendConfig) *Notifier {
 			Timeout: 10 * time.Second,
 		},
 		telegramClient: newTelegramHTTPClient(telegramProxy),
+		telegramURL:    telegramURL,
 	}
 }
 
@@ -209,12 +216,21 @@ func (n *Notifier) sendWebhook(ctx context.Context, event Event) error {
 		return nil
 	}
 
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var lastErr error
-	for _, url := range targetURLs {
-		if err := n.postWebhookWithRetry(ctx, url, payload, signature, timestamp); err != nil {
-			lastErr = err
-		}
+	for _, targetURL := range targetURLs {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			if err := n.postWebhookWithRetry(ctx, url, payload, signature, timestamp); err != nil {
+				mu.Lock()
+				lastErr = err
+				mu.Unlock()
+			}
+		}(targetURL)
 	}
+	wg.Wait()
 	return lastErr
 }
 
@@ -230,10 +246,12 @@ func (n *Notifier) postWebhookWithRetry(ctx context.Context, url string, payload
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
+			timer := time.NewTimer(retryDelay)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return ctx.Err()
-			case <-time.After(retryDelay):
+			case <-timer.C:
 			}
 		}
 		if err := n.postWebhookOnce(ctx, url, payload, signature, timestamp); err != nil {
@@ -293,8 +311,14 @@ func (n *Notifier) sendTelegram(ctx context.Context, event Event) error {
 	if err != nil {
 		return err
 	}
-	url := "https://api.telegram.org/bot" + strings.TrimSpace(n.cfg.Notifications.TelegramBotToken) + "/sendMessage"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	reqURL := n.telegramURL
+	if reqURL == "" {
+		if n.cfg == nil || strings.TrimSpace(n.cfg.Notifications.TelegramBotToken) == "" {
+			return nil
+		}
+		reqURL = "https://api.telegram.org/bot" + strings.TrimSpace(n.cfg.Notifications.TelegramBotToken) + "/sendMessage"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

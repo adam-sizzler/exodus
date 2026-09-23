@@ -19,6 +19,17 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const nodeHeartbeatThrottleInterval = 5 * time.Minute
+
+func (nm *NodeMonitor) shouldUpdateIdleHeartbeat(nodeName string, now time.Time) bool {
+	if val, ok := nm.lastIdleHeartbeatUpdate.Load(nodeName); ok {
+		if lastTime, ok := val.(time.Time); ok && now.Sub(lastTime) < nodeHeartbeatThrottleInterval {
+			return false
+		}
+	}
+	return true
+}
+
 // receiveStream receives and processes stream data.
 func (nm *NodeMonitor) receiveStream(state *nodeState) {
 	for {
@@ -256,34 +267,35 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(state *nodeState, stats []*pro
 		totalBytes := trafficDelta.TotalUploadBytes + trafficDelta.TotalDownloadBytes
 		nodeUsageBytes := applyConsumptionMultiplier(totalBytes, nodeConsumptionMultiplier)
 		if _, execErr := nm.db.Exec(streamDBContext, `
-			INSERT INTO nodes_usage_history (node_uuid, download_bytes, upload_bytes, total_bytes)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (node_uuid, created_at)
-			DO UPDATE SET
-				download_bytes = nodes_usage_history.download_bytes + EXCLUDED.download_bytes,
-				upload_bytes = nodes_usage_history.upload_bytes + EXCLUDED.upload_bytes,
-				total_bytes = nodes_usage_history.total_bytes + EXCLUDED.total_bytes,
-				updated_at = now()
-		`, nodeUUID, trafficDelta.TotalDownloadBytes, trafficDelta.TotalUploadBytes, totalBytes); execErr != nil {
-			nm.cfg.Logger.Warn("Failed to insert node usage history", "node", nodeName, "error", execErr)
-			return
-		}
-
-		if _, execErr := nm.db.Exec(streamDBContext, `
+			WITH ins AS (
+				INSERT INTO nodes_usage_history (node_uuid, download_bytes, upload_bytes, total_bytes)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (node_uuid, created_at)
+				DO UPDATE SET
+					download_bytes = nodes_usage_history.download_bytes + EXCLUDED.download_bytes,
+					upload_bytes = nodes_usage_history.upload_bytes + EXCLUDED.upload_bytes,
+					total_bytes = nodes_usage_history.total_bytes + EXCLUDED.total_bytes,
+					updated_at = now()
+			)
 			UPDATE nodes
-			SET traffic_used_bytes = COALESCE(traffic_used_bytes, 0) + $1, updated_at = CURRENT_TIMESTAMP
-			WHERE uuid = $2
-		`, nodeUsageBytes, nodeUUID); execErr != nil {
-			nm.cfg.Logger.Warn("Failed to update node traffic used bytes", "node", nodeName, "error", execErr)
+			SET traffic_used_bytes = COALESCE(traffic_used_bytes, 0) + $5, updated_at = CURRENT_TIMESTAMP
+			WHERE uuid = $1
+		`, nodeUUID, trafficDelta.TotalDownloadBytes, trafficDelta.TotalUploadBytes, totalBytes, nodeUsageBytes); execErr != nil {
+			nm.cfg.Logger.Warn("Failed to record node usage and traffic", "node", nodeName, "error", execErr)
 			return
 		}
+		nm.lastIdleHeartbeatUpdate.Store(nodeName, time.Now())
 	} else {
-		if _, execErr := nm.db.Exec(streamDBContext, `
-			UPDATE nodes
-			SET updated_at = CURRENT_TIMESTAMP
-			WHERE name = $1`, nodeName); execErr != nil {
-			nm.cfg.Logger.Warn("Failed to update node updated_at", "node", nodeName, "error", execErr)
-			return
+		now := time.Now()
+		if nm.shouldUpdateIdleHeartbeat(nodeName, now) {
+			if _, execErr := nm.db.Exec(streamDBContext, `
+				UPDATE nodes
+				SET updated_at = CURRENT_TIMESTAMP
+				WHERE name = $1`, nodeName); execErr != nil {
+				nm.cfg.Logger.Warn("Failed to update node updated_at", "node", nodeName, "error", execErr)
+				return
+			}
+			nm.lastIdleHeartbeatUpdate.Store(nodeName, now)
 		}
 	}
 

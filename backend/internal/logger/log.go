@@ -178,6 +178,11 @@ func (l *Logger) withContext(role, service string) *Logger {
 	if l == nil {
 		return nil
 	}
+	cleanR := cleanContext(role, l.role)
+	cleanS := cleanContext(service, l.service)
+	if cleanR == l.role && cleanS == l.service {
+		return l
+	}
 	l.mu.Lock()
 	clone := Logger{
 		base:     l.base,
@@ -185,16 +190,10 @@ func (l *Logger) withContext(role, service string) *Logger {
 		level:    l.level,
 		format:   l.format,
 		timezone: l.timezone,
-		role:     l.role,
-		service:  l.service,
+		role:     cleanR,
+		service:  cleanS,
 	}
 	l.mu.Unlock()
-	if strings.TrimSpace(role) != "" {
-		clone.role = cleanContext(role, l.role)
-	}
-	if strings.TrimSpace(service) != "" {
-		clone.service = cleanContext(service, l.service)
-	}
 	return &clone
 }
 

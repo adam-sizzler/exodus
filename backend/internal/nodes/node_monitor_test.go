@@ -413,3 +413,33 @@ func TestDisconnectedNodeStateClientNil(t *testing.T) {
 		t.Errorf("expected lastError = connection refused..., got %q", state.lastError)
 	}
 }
+
+func TestShouldUpdateIdleHeartbeat(t *testing.T) {
+	nm := NewNodeMonitor(nil, nil)
+	nodeName := "test-node-1"
+	now := time.Now()
+
+	// Initial call should allow update
+	if !nm.shouldUpdateIdleHeartbeat(nodeName, now) {
+		t.Fatalf("expected first idle heartbeat update to be allowed")
+	}
+
+	// Record update
+	nm.lastIdleHeartbeatUpdate.Store(nodeName, now)
+
+	// Call 1 minute later: should be throttled
+	if nm.shouldUpdateIdleHeartbeat(nodeName, now.Add(1*time.Minute)) {
+		t.Fatalf("expected idle heartbeat update at +1m to be throttled")
+	}
+
+	// Call 4 minutes 59 seconds later: should be throttled
+	if nm.shouldUpdateIdleHeartbeat(nodeName, now.Add(4*time.Minute+59*time.Second)) {
+		t.Fatalf("expected idle heartbeat update at +4m59s to be throttled")
+	}
+
+	// Call 5 minutes later: should be allowed
+	if !nm.shouldUpdateIdleHeartbeat(nodeName, now.Add(5*time.Minute)) {
+		t.Fatalf("expected idle heartbeat update at +5m to be allowed")
+	}
+}
+

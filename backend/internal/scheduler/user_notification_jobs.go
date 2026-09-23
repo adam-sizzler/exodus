@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"exodus/internal/notifications"
@@ -163,15 +162,8 @@ func (s *Scheduler) triggerThresholdNotifications(ctx context.Context, threshold
 		return nil, nil
 	}
 
-	values := make([]string, 0, len(thresholds))
-	args := make([]any, 0, len(thresholds))
-	for i, threshold := range thresholds {
-		values = append(values, fmt.Sprintf("($%d::int)", i+1))
-		args = append(args, threshold)
-	}
-
-	query := fmt.Sprintf(`
-		WITH thresholds(pct) AS (VALUES %s),
+	const query = `
+		WITH thresholds(pct) AS (SELECT unnest($1::int[])),
 		candidates AS (
 			SELECT
 				u.id,
@@ -205,9 +197,9 @@ func (s *Scheduler) triggerThresholdNotifications(ctx context.Context, threshold
 			u.expire_at,
 			u.last_triggered_threshold,
 			u.created_at
-	`, strings.Join(values, ","))
+	`
 
-	rows, err := s.db.Query(ctx, query, args...)
+	rows, err := s.db.Query(ctx, query, thresholds)
 	if err != nil {
 		return nil, err
 	}

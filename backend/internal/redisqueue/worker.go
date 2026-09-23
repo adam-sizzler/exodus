@@ -37,10 +37,6 @@ type Worker struct {
 	usageTTL  time.Duration
 }
 
-type nodeUsageEntry struct {
-	UserID     int64
-	TotalBytes int64
-}
 
 type recordUserUsagePayload struct {
 	RedisKey string `json:"redisKey"`
@@ -212,7 +208,7 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 		return err
 	}
 
-	entries := make([]nodeUsageEntry, 0, len(data))
+	entries := make([]streamexport.UserUsageEntry, 0, len(data))
 	for userIDStr, totalBytesStr := range data {
 		userID, err := strconv.ParseInt(userIDStr, 10, 64)
 		if err != nil || userID <= 0 {
@@ -222,7 +218,7 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 		if err != nil || totalBytes <= 0 {
 			continue
 		}
-		entries = append(entries, nodeUsageEntry{
+		entries = append(entries, streamexport.UserUsageEntry{
 			UserID:     userID,
 			TotalBytes: totalBytes,
 		})
@@ -246,14 +242,7 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 			return err
 		}
 		if w.cfg != nil && w.cfg.Redis.ExportToStreamEnabled {
-			streamEntries := make([]streamexport.UserUsageEntry, len(entries[start:end]))
-			for i, e := range entries[start:end] {
-				streamEntries[i] = streamexport.UserUsageEntry{
-					UserID:     e.UserID,
-					TotalBytes: e.TotalBytes,
-				}
-			}
-			if err := streamexport.ExportUserUsageBatch(ctx, w.client, true, w.cfg.Redis.ExportToStreamMaxLen, nodeID, streamEntries); err != nil && w.cfg.Logger != nil {
+			if err := streamexport.ExportUserUsageBatch(ctx, w.client, true, w.cfg.Redis.ExportToStreamMaxLen, nodeID, entries[start:end]); err != nil && w.cfg.Logger != nil {
 				w.cfg.Logger.RoleService(logger.RoleWorkers, logger.ServiceRedis).Warn("Failed to export user usage batch to Redis stream", "error", err)
 			}
 		}
@@ -262,12 +251,13 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 	return nil
 }
 
-func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, entries []nodeUsageEntry) error {
+func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, entries []streamexport.UserUsageEntry) error {
 	if nodeID <= 0 || len(entries) == 0 {
 		return nil
 	}
 
 	var query strings.Builder
+	query.Grow(len(entries)*45 + 350)
 	args := make([]any, 0, len(entries)*3)
 	query.WriteString(`
 		INSERT INTO nodes_user_usage_history (
@@ -290,7 +280,7 @@ func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID 
 		if i > 0 {
 			query.WriteString(", ")
 		}
-		query.WriteString(fmt.Sprintf("($%d::bigint, $%d::bigint, $%d::bigint)", idx, idx+1, idx+2))
+		writePlaceholder3(&query, idx)
 		args = append(args, nodeID, entry.UserID, entry.TotalBytes)
 		idx += 3
 	}
@@ -305,6 +295,16 @@ func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID 
 
 	_, err := dbConn.Exec(ctx, query.String(), args...)
 	return err
+}
+
+func writePlaceholder3(b *strings.Builder, idx int) {
+	b.WriteString("($")
+	b.WriteString(strconv.Itoa(idx))
+	b.WriteString("::bigint, $")
+	b.WriteString(strconv.Itoa(idx + 1))
+	b.WriteString("::bigint, $")
+	b.WriteString(strconv.Itoa(idx + 2))
+	b.WriteString("::bigint)")
 }
 
 func nodeUserUsageRedisKey(nodeID int64) string {

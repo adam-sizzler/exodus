@@ -23,49 +23,59 @@ func NewUserService(repo *UserRepository, cfg *config.BackendConfig) *UserServic
 	}
 }
 
-func (s *UserService) EnableUser(ctx context.Context, userUUID string) error {
-	nodeUUIDs, err := s.repo.updateUserStatus(ctx, userUUID, "ACTIVE")
+func (s *UserService) EnableUser(ctx context.Context, identifier string) (userRecord, error) {
+	record, nodeUUIDs, err := s.repo.updateUserStatus(ctx, identifier, "ACTIVE")
 	if err != nil {
-		return err
+		return userRecord{}, err
 	}
 	if len(nodeUUIDs) > 0 {
 		monitor.RequestNodeDeploy(true, nodeUUIDs...)
 	}
-	if record, loadErr := s.repo.getUserRecordByUUID(ctx, userUUID); loadErr == nil {
+	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserEnabled, record, nil)
+	return record, nil
+}
+
+func (s *UserService) DisableUser(ctx context.Context, identifier string) (userRecord, error) {
+	record, nodeUUIDs, err := s.repo.updateUserStatus(ctx, identifier, "DISABLED")
+	if err != nil {
+		return userRecord{}, err
+	}
+	if len(nodeUUIDs) > 0 {
+		monitor.RequestNodeDeploy(true, nodeUUIDs...)
+	}
+	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserDisabled, record, nil)
+	return record, nil
+}
+
+func (s *UserService) ResetUserTraffic(ctx context.Context, identifier string) (userRecord, error) {
+	idNum, isID := parseNumericID(identifier)
+	var targetUUID string
+	if isID {
+		record, err := s.repo.getUserRecordByID(ctx, idNum)
+		if err != nil {
+			return userRecord{}, err
+		}
+		targetUUID = record.UUID
+	} else {
+		targetUUID = identifier
+	}
+
+	affected, nodeUUIDs, reactivatedUUIDs, err := s.repo.resetUsersTrafficByUUIDs(ctx, []string{targetUUID})
+	if err != nil {
+		return userRecord{}, err
+	}
+	if len(nodeUUIDs) > 0 {
+		monitor.RequestNodeDeploy(true, nodeUUIDs...)
+	}
+	record, loadErr := s.repo.getUserRecordByUUID(ctx, targetUUID)
+	if loadErr != nil {
+		return userRecord{}, loadErr
+	}
+	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserTrafficReset, record, nil)
+	if len(reactivatedUUIDs) > 0 && affected > 0 {
 		emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserEnabled, record, nil)
 	}
-	return nil
-}
-
-func (s *UserService) DisableUser(ctx context.Context, userUUID string) error {
-	nodeUUIDs, err := s.repo.updateUserStatus(ctx, userUUID, "DISABLED")
-	if err != nil {
-		return err
-	}
-	if len(nodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, nodeUUIDs...)
-	}
-	if record, loadErr := s.repo.getUserRecordByUUID(ctx, userUUID); loadErr == nil {
-		emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserDisabled, record, nil)
-	}
-	return nil
-}
-
-func (s *UserService) ResetUserTraffic(ctx context.Context, userUUID string) error {
-	affected, nodeUUIDs, reactivatedUUIDs, err := s.repo.resetUsersTrafficByUUIDs(ctx, []string{userUUID})
-	if err != nil {
-		return err
-	}
-	if len(nodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, nodeUUIDs...)
-	}
-	if record, loadErr := s.repo.getUserRecordByUUID(ctx, userUUID); loadErr == nil {
-		emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserTrafficReset, record, nil)
-		if len(reactivatedUUIDs) > 0 && affected > 0 {
-			emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserEnabled, record, nil)
-		}
-	}
-	return nil
+	return record, nil
 }
 
 func (s *UserService) RevokeUserSubscription(ctx context.Context, userUUID string, req revokeUserSubscriptionRequest) error {

@@ -102,12 +102,8 @@ func (s *RenderService) RenderUserSubscription(
 	requestedType string,
 	requestIP string,
 	hwid *HwidHeaders,
+	settings SubscriptionSettingsParsed,
 ) ([]byte, string, map[string]string, error) {
-	settings, err := loadSubscriptionSettings(ctx, s.db, s.cfg)
-	if err != nil {
-		return nil, "", nil, err
-	}
-
 	squadOverrides, _ := loadExternalSquadOverrides(ctx, s.db, ptrString(user.ExternalSquadUUID), s.cfg)
 	settings = applyExternalSquadOverrides(settings, squadOverrides)
 

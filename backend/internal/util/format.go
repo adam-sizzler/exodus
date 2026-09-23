@@ -6,8 +6,8 @@
 package util
 
 import (
-	"fmt"
 	"math/big"
+	"strconv"
 )
 
 var byteUnits = [...]string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
@@ -20,10 +20,10 @@ func FormatBytes(bytes int64) string {
 		return "0 B"
 	}
 
-	sign := ""
+	negative := false
 	value := float64(bytes)
 	if value < 0 {
-		sign = "-"
+		negative = true
 		value = -value
 	}
 
@@ -34,10 +34,19 @@ func FormatBytes(bytes int64) string {
 		unit++
 	}
 
-	if unit == 0 {
-		return fmt.Sprintf("%s%d %s", sign, int64(value), byteUnits[unit])
+	var buf [32]byte
+	b := buf[:0]
+	if negative {
+		b = append(b, '-')
 	}
-	return fmt.Sprintf("%s%.2f %s", sign, value, byteUnits[unit])
+	if unit == 0 {
+		b = strconv.AppendInt(b, int64(value), 10)
+	} else {
+		b = strconv.AppendFloat(b, value, 'f', 2, 64)
+	}
+	b = append(b, ' ')
+	b = append(b, byteUnits[unit]...)
+	return string(b)
 }
 
 // FormatBigBytes is the *big.Int counterpart of FormatBytes, for aggregate
@@ -47,10 +56,10 @@ func FormatBigBytes(value *big.Int) string {
 		return "0 B"
 	}
 
-	sign := ""
+	negative := false
 	abs := new(big.Int).Set(value)
 	if abs.Sign() < 0 {
-		sign = "-"
+		negative = true
 		abs.Abs(abs)
 	}
 
@@ -63,7 +72,15 @@ func FormatBigBytes(value *big.Int) string {
 		unit++
 	}
 
-	return fmt.Sprintf("%s%.2f %s", sign, floatValue, byteUnits[unit])
+	var buf [32]byte
+	b := buf[:0]
+	if negative {
+		b = append(b, '-')
+	}
+	b = strconv.AppendFloat(b, floatValue, 'f', 2, 64)
+	b = append(b, ' ')
+	b = append(b, byteUnits[unit]...)
+	return string(b)
 }
 
 var bitrateUnits = [...]string{"bps", "Kbps", "Mbps", "Gbps", "Tbps"}
@@ -76,10 +93,10 @@ func FormatBitrate(bitsPerSecond float64) string {
 		return "0 bps"
 	}
 
-	sign := ""
+	negative := false
 	value := bitsPerSecond
 	if value < 0 {
-		sign = "-"
+		negative = true
 		value = -value
 	}
 
@@ -90,8 +107,17 @@ func FormatBitrate(bitsPerSecond float64) string {
 		unit++
 	}
 
-	if unit == 0 {
-		return fmt.Sprintf("%s%.0f %s", sign, value, bitrateUnits[unit])
+	var buf [32]byte
+	b := buf[:0]
+	if negative {
+		b = append(b, '-')
 	}
-	return fmt.Sprintf("%s%.2f %s", sign, value, bitrateUnits[unit])
+	if unit == 0 {
+		b = strconv.AppendFloat(b, value, 'f', 0, 64)
+	} else {
+		b = strconv.AppendFloat(b, value, 'f', 2, 64)
+	}
+	b = append(b, ' ')
+	b = append(b, bitrateUnits[unit]...)
+	return string(b)
 }

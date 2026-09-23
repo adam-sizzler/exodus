@@ -83,11 +83,7 @@ func StartSubscriptionQueuesWithClient(ctx context.Context, wg *sync.WaitGroup, 
 		Retention:         12 * 3600,
 	}, map[string]Handler{
 		jobUpdateUserSubscription: func(ctx context.Context, job Job) error {
-			var payload UpdateUserSubscriptionPayload
-			if err := json.Unmarshal(job.Payload, &payload); err != nil {
-				return err
-			}
-			return updateUserSubscription(ctx, dbConn, payload)
+			return nil
 		},
 		jobAddSubscriptionRecord: func(ctx context.Context, job Job) error {
 			var payload AddSubscriptionRequestRecordPayload
@@ -127,12 +123,9 @@ func StartSubscriptionQueuesWithClient(ctx context.Context, wg *sync.WaitGroup, 
 	return processor, nil
 }
 
-func EnqueueUpdateUserSubscription(ctx context.Context, payload UpdateUserSubscriptionPayload) (bool, error) {
-	return enqueueSubscriptionJob(ctx, jobUpdateUserSubscription, payload, JobOptions{
-		ID:       fmt.Sprintf("%s:USS", payload.UserUUID),
-		DedupeID: fmt.Sprintf("%s:USS", payload.UserUUID),
-		Attempts: 3,
-	})
+// EnqueueUpdateUserSubscription is a no-op deprecated in Phase 2 optimization.
+func EnqueueUpdateUserSubscription(_ context.Context, _ UpdateUserSubscriptionPayload) (bool, error) {
+	return true, nil
 }
 
 func EnqueueAddSubscriptionRequestRecord(ctx context.Context, payload AddSubscriptionRequestRecordPayload) (bool, error) {

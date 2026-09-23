@@ -230,15 +230,22 @@ func buildUsersTableQuery(filters []usersTableFilter, filterModes map[string]str
 func buildGenericUsersFilterClause(col string, rawValue any, mode string, numeric bool, argOffset int) (string, []any, bool, error) {
 	if mode == "equals" {
 		if arr, ok := rawValue.([]any); ok && len(arr) > 0 {
-			vals := make([]any, len(arr))
+			if numeric {
+				vals := make([]int64, 0, len(arr))
+				for _, item := range arr {
+					n, err := strconv.ParseInt(strings.TrimSpace(fmt.Sprint(item)), 10, 64)
+					if err != nil {
+						return "", nil, false, fmt.Errorf("invalid numeric filter value %q for %s: %w", fmt.Sprint(item), col, err)
+					}
+					vals = append(vals, n)
+				}
+				return fmt.Sprintf("%s = ANY($%d)", col, argOffset+1), []any{vals}, true, nil
+			}
+			vals := make([]string, len(arr))
 			for i, item := range arr {
 				vals[i] = fmt.Sprint(item)
 			}
-			placeholders := make([]string, len(vals))
-			for i := range vals {
-				placeholders[i] = fmt.Sprintf("$%d", argOffset+i+1)
-			}
-			return fmt.Sprintf("%s IN (%s)", col, strings.Join(placeholders, ", ")), vals, true, nil
+			return fmt.Sprintf("%s = ANY($%d)", col, argOffset+1), []any{vals}, true, nil
 		}
 	}
 

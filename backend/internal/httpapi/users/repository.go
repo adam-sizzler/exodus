@@ -691,35 +691,62 @@ func (r *UserRepository) deleteUserRecord(ctx context.Context, userUUID string) 
 	return nodeUUIDs, nil
 }
 
-func (r *UserRepository) updateUserStatus(ctx context.Context, userUUID string, status string) ([]string, error) {
+func (r *UserRepository) updateUserStatus(ctx context.Context, identifier string, status string) (userRecord, []string, error) {
 	var nodeUUIDs []string
+	var record userRecord
 
 	err := exodusdb.WithRetryTx(ctx, r.db, func(tx pgx.Tx) error {
-		resolvedNodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{userUUID})
+		idNum, isID := parseNumericID(identifier)
+
+		query := `
+			UPDATE users u
+			SET status = $1, updated_at = CURRENT_TIMESTAMP
+			WHERE (u.id = $2 OR u.uuid::text = $3)
+			RETURNING
+				u.id, u.uuid, u.short_uuid, u.username, u.status, u.traffic_limit_bytes,
+				u.traffic_limit_strategy, u.expire_at, u.last_traffic_reset_at,
+				u.sub_revoked_at, u.trojan_password, u.vless_uuid, u.ss_password,
+				u.naive_password, u.shadowtls_password, u.hysteria2_password, u.anytls_password,
+				u.description, u.tag, u.telegram_id, u.email, u.hwid_device_limit, u.external_squad_uuid,
+				u.last_triggered_threshold, u.created_at, u.updated_at,
+				COALESCE((SELECT ut.used_traffic_bytes FROM user_traffic ut WHERE ut.id = u.id), 0),
+				COALESCE((SELECT ut.lifetime_used_traffic_bytes FROM user_traffic ut WHERE ut.id = u.id), 0),
+				(SELECT ut.online_at FROM user_traffic ut WHERE ut.id = u.id),
+				(SELECT ut.last_connected_node_uuid FROM user_traffic ut WHERE ut.id = u.id),
+				(SELECT ut.first_connected_at FROM user_traffic ut WHERE ut.id = u.id)
+		`
+		var searchID int64
+		if isID {
+			searchID = idNum
+		}
+		row := tx.QueryRow(ctx, query, status, searchID, identifier)
+		rec, scanErr := scanUserRecord(row)
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return errUserNotFound
+		}
+		if scanErr != nil {
+			return scanErr
+		}
+		record = rec
+
+		resolvedNodeUUIDs, nodeTargetsErr := r.resolveNodeUUIDsForUserUUIDsTx(ctx, tx, []string{record.UUID})
 		if nodeTargetsErr != nil {
 			return nodeTargetsErr
 		}
 		nodeUUIDs = resolvedNodeUUIDs
 
-		tag, err := tx.Exec(ctx, `
-			UPDATE users
-			SET status = $1, updated_at = CURRENT_TIMESTAMP
-			WHERE uuid = $2
-		`, status, userUUID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return errUserNotFound
-		}
-
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return userRecord{}, nil, err
 	}
 
-	return nodeUUIDs, nil
+	return record, nodeUUIDs, nil
+}
+
+func parseNumericID(s string) (int64, bool) {
+	id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	return id, err == nil && id > 0
 }
 
 func (r *UserRepository) deleteUsersRecord(ctx context.Context, uuids []string) ([]string, error) {

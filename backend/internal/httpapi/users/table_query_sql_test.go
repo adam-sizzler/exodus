@@ -99,10 +99,10 @@ func TestBuildUsersTableQuery_Filters(t *testing.T) {
 	if !strings.Contains(whereSQL, "u.username ILIKE $1") {
 		t.Errorf("whereSQL missing username clause: %s", whereSQL)
 	}
-	if !strings.Contains(whereSQL, "u.status IN ($2, $3)") {
-		t.Errorf("whereSQL missing status IN clause: %s", whereSQL)
+	if !strings.Contains(whereSQL, "u.status = ANY($2)") {
+		t.Errorf("whereSQL missing status ANY clause: %s", whereSQL)
 	}
-	if len(args) != 3 {
-		t.Fatalf("expected 3 args, got %d", len(args))
+	if len(args) != 2 {
+		t.Fatalf("expected 2 args, got %d", len(args))
 	}
 }

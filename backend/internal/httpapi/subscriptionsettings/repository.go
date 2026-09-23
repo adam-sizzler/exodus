@@ -11,6 +11,8 @@ import (
 	"exodus/internal/httpapi/shared"
 )
 
+var validHeaderNameRegex = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+
 type SubscriptionSettings struct {
 	UUID                        string    `json:"uuid"`
 	ProfileTitle                string    `json:"profile_title"`
@@ -281,12 +283,11 @@ func parseOptionalHeaders(raw *json.RawMessage) (bool, string, error) {
 		return false, "", fmt.Errorf("must be a valid JSON object mapping string keys to string values")
 	}
 
-	validHeaderName := regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 	clean := make(map[string]string, len(obj))
 	for k, v := range obj {
 		key := strings.TrimSpace(k)
 		val := strings.TrimSpace(v)
-		if key == "" || !validHeaderName.MatchString(key) {
+		if key == "" || !validHeaderNameRegex.MatchString(key) {
 			return false, "", fmt.Errorf("invalid header name: %s", k)
 		}
 		if val == "" {

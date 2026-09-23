@@ -36,9 +36,10 @@ type NodeMonitor struct {
 	metricsLock       sync.RWMutex
 
 	usageRecorder NodeUserUsageRecorder
-	hotCache      *nodehotcache.Cache
-	statusLock    sync.Mutex
-	nodeMetaCache sync.Map
+	hotCache                *nodehotcache.Cache
+	statusLock              sync.Mutex
+	nodeMetaCache           sync.Map
+	lastIdleHeartbeatUpdate sync.Map
 }
 
 type nodeMetadata struct {

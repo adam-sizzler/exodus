@@ -45,16 +45,12 @@ func resolveActionUserUUID(w http.ResponseWriter, r *http.Request, service *User
 // @Failure      500     {object}  shared.ErrorResponse
 // @Router       /users/{userId}/actions/enable [post]
 func handleEnableUser(w http.ResponseWriter, r *http.Request, service *UserService, userUUID string) {
-	resolvedUUID, ok := resolveActionUserUUID(w, r, service, userUUID)
-	if !ok {
-		return
-	}
-	err := service.EnableUser(r.Context(), resolvedUUID)
+	record, err := service.EnableUser(r.Context(), userUUID)
 	if err != nil {
 		handleUserActionError(w, err, service.cfg, "failed to enable user")
 		return
 	}
-	sendUpdatedUserResponse(w, r, service, resolvedUUID)
+	sendUserRecordResponse(w, r, service, record)
 }
 
 // handleDisableUser godoc
@@ -70,16 +66,12 @@ func handleEnableUser(w http.ResponseWriter, r *http.Request, service *UserServi
 // @Failure      500     {object}  shared.ErrorResponse
 // @Router       /users/{userId}/actions/disable [post]
 func handleDisableUser(w http.ResponseWriter, r *http.Request, service *UserService, userUUID string) {
-	resolvedUUID, ok := resolveActionUserUUID(w, r, service, userUUID)
-	if !ok {
-		return
-	}
-	err := service.DisableUser(r.Context(), resolvedUUID)
+	record, err := service.DisableUser(r.Context(), userUUID)
 	if err != nil {
 		handleUserActionError(w, err, service.cfg, "failed to disable user")
 		return
 	}
-	sendUpdatedUserResponse(w, r, service, resolvedUUID)
+	sendUserRecordResponse(w, r, service, record)
 }
 
 // handleResetUserTraffic godoc
@@ -95,16 +87,12 @@ func handleDisableUser(w http.ResponseWriter, r *http.Request, service *UserServ
 // @Failure      500     {object}  shared.ErrorResponse
 // @Router       /users/{userId}/actions/reset-traffic [post]
 func handleResetUserTraffic(w http.ResponseWriter, r *http.Request, service *UserService, userUUID string) {
-	resolvedUUID, ok := resolveActionUserUUID(w, r, service, userUUID)
-	if !ok {
-		return
-	}
-	err := service.ResetUserTraffic(r.Context(), resolvedUUID)
+	record, err := service.ResetUserTraffic(r.Context(), userUUID)
 	if err != nil {
 		handleUserActionError(w, err, service.cfg, "failed to reset user traffic")
 		return
 	}
-	sendUpdatedUserResponse(w, r, service, resolvedUUID)
+	sendUserRecordResponse(w, r, service, record)
 }
 
 // handleRevokeUserSubscription godoc
@@ -152,6 +140,10 @@ func sendUpdatedUserResponse(w http.ResponseWriter, r *http.Request, service *Us
 		shared.SendAPIError(w, shared.ErrFetchUpdatedUserFailed.WithCause(err), service.cfg)
 		return
 	}
+	sendUserRecordResponse(w, r, service, record)
+}
+
+func sendUserRecordResponse(w http.ResponseWriter, r *http.Request, service *UserService, record userRecord) {
 	response, err := buildUserResponses(r.Context(), service.repo, []userRecord{record}, resolveUsersSubscriptionBase(r.Context(), service.repo.db, r, service.cfg))
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrFetchUpdatedUserFailed.WithCause(err), service.cfg)

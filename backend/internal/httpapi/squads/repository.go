@@ -489,11 +489,25 @@ func (r *SquadRepository) setInboundAssignments(ctx context.Context, nodeUUID st
 			return err
 		}
 
+		cleaned := make([]string, 0, len(inboundUUIDs))
+		seen := make(map[string]struct{}, len(inboundUUIDs))
 		for _, inboundUUID := range inboundUUIDs {
-			_, err := tx.Exec(ctx, `
+			trimmed := strings.TrimSpace(inboundUUID)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			cleaned = append(cleaned, trimmed)
+		}
+
+		if len(cleaned) > 0 {
+			if _, err := tx.Exec(ctx, `
 				INSERT INTO config_profile_inbounds_to_nodes (config_profile_inbound_uuid, node_uuid)
-				VALUES ($1, $2)`, inboundUUID, nodeUUID)
-			if err != nil {
+				SELECT unnest($1::uuid[]), $2::uuid
+			`, cleaned, nodeUUID); err != nil {
 				return err
 			}
 		}

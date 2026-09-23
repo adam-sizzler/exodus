@@ -164,11 +164,16 @@ func ExternalSquadsReorderHandler(db *pgxpool.Pool, cfg *config.BackendConfig) h
 			return
 		}
 
-		for _, item := range req.Squads {
-			if _, err := uuid.Parse(item.UUID); err != nil {
+		uuids := make([]uuid.UUID, len(req.Squads))
+		positions := make([]int32, len(req.Squads))
+		for i, item := range req.Squads {
+			parsed, err := uuid.Parse(item.UUID)
+			if err != nil {
 				shared.SendError(w, http.StatusBadRequest, "invalid UUID format", nil, cfg)
 				return
 			}
+			uuids[i] = parsed
+			positions[i] = int32(item.ViewPosition)
 		}
 
 		tx, err := db.Begin(r.Context())
@@ -178,13 +183,16 @@ func ExternalSquadsReorderHandler(db *pgxpool.Pool, cfg *config.BackendConfig) h
 		}
 		defer func() { _ = tx.Rollback(r.Context()) }()
 
-		for _, item := range req.Squads {
-			if _, err := tx.Exec(r.Context(),
-				`UPDATE external_squads SET view_position = $1 WHERE uuid = $2`,
-				item.ViewPosition, item.UUID); err != nil {
-				shared.SendAPIError(w, shared.ErrReorderExternalSquadsFailed.WithCause(err), cfg)
-				return
-			}
+		if _, err := tx.Exec(r.Context(), `
+			UPDATE external_squads AS s
+			SET view_position = v.view_position
+			FROM (
+				SELECT unnest($1::uuid[]) AS uuid, unnest($2::int[]) AS view_position
+			) AS v
+			WHERE s.uuid = v.uuid
+		`, uuids, positions); err != nil {
+			shared.SendAPIError(w, shared.ErrReorderExternalSquadsFailed.WithCause(err), cfg)
+			return
 		}
 
 		if err := tx.Commit(r.Context()); err != nil {
@@ -503,11 +511,22 @@ func handleUpdateExternalSquad(w http.ResponseWriter, r *http.Request, db *pgxpo
 			return
 		}
 
-		for _, t := range *req.Templates {
+		if len(*req.Templates) > 0 {
+			tplUUIDs := make([]uuid.UUID, 0, len(*req.Templates))
+			tplTypes := make([]string, 0, len(*req.Templates))
+			for _, t := range *req.Templates {
+				parsedTplUUID, parseErr := uuid.Parse(t.TemplateUUID)
+				if parseErr != nil {
+					shared.SendAPIError(w, shared.ErrUpdateExternalSquadFailed.WithCause(parseErr), cfg)
+					return
+				}
+				tplUUIDs = append(tplUUIDs, parsedTplUUID)
+				tplTypes = append(tplTypes, t.TemplateType)
+			}
 			_, err = tx.Exec(r.Context(), `
 				INSERT INTO external_squads_templates (external_squad_uuid, template_uuid, template_type)
-				VALUES ($1, $2, $3)
-			`, req.UUID, t.TemplateUUID, t.TemplateType)
+				SELECT $1::uuid, unnest($2::uuid[]), unnest($3::text[])
+			`, req.UUID, tplUUIDs, tplTypes)
 			if err != nil {
 				shared.SendAPIError(w, shared.ErrUpdateExternalSquadFailed.WithCause(err), cfg)
 				return

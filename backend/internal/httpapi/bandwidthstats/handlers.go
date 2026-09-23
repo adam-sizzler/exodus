@@ -178,7 +178,8 @@ func handleGetNodesUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Poo
 	}
 	topLimit := parsePositiveIntWithDefault(r.URL.Query().Get("topNodesLimit"), 20)
 
-	sparkRows, err := db.Query(r.Context(), `
+	batch := &pgx.Batch{}
+	batch.Queue(`
 WITH daily_traffic AS (
 	SELECT DATE_TRUNC('day', created_at AT TIME ZONE 'UTC')::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_usage_history
@@ -190,27 +191,8 @@ FROM unnest($3::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date
 ORDER BY d.ord
 	`, startDate, endDate, pgDateArrayLiteral(dates))
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodesSparklineFailed.WithCause(err), cfg)
-		return
-	}
-	defer sparkRows.Close()
 
-	sparkline := make([]int64, 0, len(dates))
-	for sparkRows.Next() {
-		var v int64
-		if scanErr := sparkRows.Scan(&v); scanErr != nil {
-			shared.SendAPIError(w, shared.ErrGetNodesSparklineFailed.WithCause(scanErr), cfg)
-			return
-		}
-		sparkline = append(sparkline, v)
-	}
-	if err := sparkRows.Err(); err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodesSparklineFailed.WithCause(err), cfg)
-		return
-	}
-
-	seriesRows, err := db.Query(r.Context(), `
+	batch.Queue(`
 WITH daily_usage AS (
 	SELECT
 		n.uuid, n.name, n.country_code,
@@ -235,28 +217,8 @@ LEFT JOIN daily_usage du ON du.uuid = nt.uuid AND du.date = d.date
 GROUP BY nt.uuid, nt.name, nt.country_code, nt.total_bytes
 ORDER BY nt.total_bytes DESC
 	`, startDate, endDate, pgDateArrayLiteral(dates))
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
-		return
-	}
-	defer seriesRows.Close()
 
-	series := make([]usageSeries, 0)
-	for seriesRows.Next() {
-		var s usageSeries
-		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &s.Data); scanErr != nil {
-			shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(scanErr), cfg)
-			return
-		}
-		s.Color = colorFromUUID(s.UUID)
-		series = append(series, s)
-	}
-	if err := seriesRows.Err(); err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
-		return
-	}
-
-	topRows, err := db.Query(r.Context(), `
+	batch.Queue(`
 SELECT n.uuid, n.name, n.country_code, COALESCE(SUM(h.total_bytes), 0) AS total
 FROM nodes n
 INNER JOIN nodes_usage_history h ON h.node_uuid = n.uuid
@@ -265,16 +227,65 @@ GROUP BY n.uuid, n.name, n.country_code
 ORDER BY total DESC
 LIMIT $3
 	`, startDate, endDate, topLimit)
+
+	br := db.SendBatch(r.Context(), batch)
+	defer br.Close()
+
+	sparkRows, err := br.Query()
+	if err != nil {
+		shared.SendAPIError(w, shared.ErrGetNodesSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkline := make([]int64, 0, len(dates))
+	for sparkRows.Next() {
+		var v int64
+		if scanErr := sparkRows.Scan(&v); scanErr != nil {
+			sparkRows.Close()
+			shared.SendAPIError(w, shared.ErrGetNodesSparklineFailed.WithCause(scanErr), cfg)
+			return
+		}
+		sparkline = append(sparkline, v)
+	}
+	if err := sparkRows.Err(); err != nil {
+		sparkRows.Close()
+		shared.SendAPIError(w, shared.ErrGetNodesSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkRows.Close()
+
+	seriesRows, err := br.Query()
+	if err != nil {
+		shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
+		return
+	}
+	series := make([]usageSeries, 0)
+	for seriesRows.Next() {
+		var s usageSeries
+		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &s.Data); scanErr != nil {
+			seriesRows.Close()
+			shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(scanErr), cfg)
+			return
+		}
+		s.Color = colorFromUUID(s.UUID)
+		series = append(series, s)
+	}
+	if err := seriesRows.Err(); err != nil {
+		seriesRows.Close()
+		shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
+		return
+	}
+	seriesRows.Close()
+
+	topRows, err := br.Query()
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetTopNodesFailed.WithCause(err), cfg)
 		return
 	}
-	defer topRows.Close()
-
 	topNodes := make([]topNode, 0)
 	for topRows.Next() {
 		var t topNode
 		if scanErr := topRows.Scan(&t.UUID, &t.Name, &t.CountryCode, &t.Total); scanErr != nil {
+			topRows.Close()
 			shared.SendAPIError(w, shared.ErrGetTopNodesFailed.WithCause(scanErr), cfg)
 			return
 		}
@@ -282,9 +293,11 @@ LIMIT $3
 		topNodes = append(topNodes, t)
 	}
 	if err := topRows.Err(); err != nil {
+		topRows.Close()
 		shared.SendAPIError(w, shared.ErrGetTopNodesFailed.WithCause(err), cfg)
 		return
 	}
+	topRows.Close()
 
 	shared.WriteJSON(w, http.StatusOK, map[string]any{
 		"response": map[string]any{
@@ -314,7 +327,8 @@ func handleGetNodeUsersUsage(w http.ResponseWriter, r *http.Request, db *pgxpool
 		return
 	}
 
-	sparkRows, err := db.Query(r.Context(), `
+	batch := &pgx.Batch{}
+	batch.Queue(`
 WITH daily_traffic AS (
 	SELECT created_at::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_user_usage_history
@@ -326,27 +340,8 @@ FROM unnest($4::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date::date
 ORDER BY d.ord
 	`, nodeID, startDate, endDate, pgDateArrayLiteral(dates))
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
-		return
-	}
-	defer sparkRows.Close()
 
-	sparkline := make([]int64, 0, len(dates))
-	for sparkRows.Next() {
-		var v int64
-		if scanErr := sparkRows.Scan(&v); scanErr != nil {
-			shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(scanErr), cfg)
-			return
-		}
-		sparkline = append(sparkline, v)
-	}
-	if err := sparkRows.Err(); err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
-		return
-	}
-
-	topRows, err := db.Query(r.Context(), `
+	batch.Queue(`
 SELECT u.uuid, u.username, COALESCE(SUM(nuh.total_bytes), 0) AS total
 FROM users u
 INNER JOIN nodes_user_usage_history nuh ON nuh.user_id = u.id
@@ -355,17 +350,43 @@ GROUP BY u.uuid, u.username
 ORDER BY total DESC
 LIMIT $4
 	`, nodeID, startDate, endDate, topLimit)
+
+	br := db.SendBatch(r.Context(), batch)
+	defer br.Close()
+
+	sparkRows, err := br.Query()
+	if err != nil {
+		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkline := make([]int64, 0, len(dates))
+	for sparkRows.Next() {
+		var v int64
+		if scanErr := sparkRows.Scan(&v); scanErr != nil {
+			sparkRows.Close()
+			shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(scanErr), cfg)
+			return
+		}
+		sparkline = append(sparkline, v)
+	}
+	if err := sparkRows.Err(); err != nil {
+		sparkRows.Close()
+		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkRows.Close()
+
+	topRows, err := br.Query()
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetTopUsersFailed.WithCause(err), cfg)
 		return
 	}
-	defer topRows.Close()
-
 	topUsers := make([]topUser, 0)
 	for topRows.Next() {
 		var userUUID, username string
 		var total int64
 		if scanErr := topRows.Scan(&userUUID, &username, &total); scanErr != nil {
+			topRows.Close()
 			shared.SendAPIError(w, shared.ErrGetTopUsersFailed.WithCause(scanErr), cfg)
 			return
 		}
@@ -376,9 +397,11 @@ LIMIT $4
 		})
 	}
 	if err := topRows.Err(); err != nil {
+		topRows.Close()
 		shared.SendAPIError(w, shared.ErrGetTopUsersFailed.WithCause(err), cfg)
 		return
 	}
+	topRows.Close()
 
 	shared.WriteJSON(w, http.StatusOK, map[string]any{
 		"response": map[string]any{
@@ -431,7 +454,8 @@ func handleGetNodesUsersUsage(w http.ResponseWriter, r *http.Request, db *pgxpoo
 		return
 	}
 
-	sparkRows, err := db.Query(r.Context(), `
+	batch := &pgx.Batch{}
+	batch.Queue(`
 WITH daily_traffic AS (
 	SELECT created_at::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_user_usage_history
@@ -443,27 +467,8 @@ FROM unnest($4::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date::date
 ORDER BY d.ord
 	`, nodeIDs, startDate, endDate, pgDateArrayLiteral(dates))
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
-		return
-	}
-	defer sparkRows.Close()
 
-	sparkline := make([]int64, 0, len(dates))
-	for sparkRows.Next() {
-		var v int64
-		if scanErr := sparkRows.Scan(&v); scanErr != nil {
-			shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(scanErr), cfg)
-			return
-		}
-		sparkline = append(sparkline, v)
-	}
-	if err := sparkRows.Err(); err != nil {
-		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
-		return
-	}
-
-	topRows, err := db.Query(r.Context(), `
+	batch.Queue(`
 SELECT u.uuid, u.username, COALESCE(SUM(nuh.total_bytes), 0) AS total
 FROM users u
 INNER JOIN nodes_user_usage_history nuh ON nuh.user_id = u.id
@@ -472,17 +477,43 @@ GROUP BY u.uuid, u.username
 ORDER BY total DESC
 LIMIT $4
 	`, nodeIDs, startDate, endDate, topLimit)
+
+	br := db.SendBatch(r.Context(), batch)
+	defer br.Close()
+
+	sparkRows, err := br.Query()
+	if err != nil {
+		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkline := make([]int64, 0, len(dates))
+	for sparkRows.Next() {
+		var v int64
+		if scanErr := sparkRows.Scan(&v); scanErr != nil {
+			sparkRows.Close()
+			shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(scanErr), cfg)
+			return
+		}
+		sparkline = append(sparkline, v)
+	}
+	if err := sparkRows.Err(); err != nil {
+		sparkRows.Close()
+		shared.SendAPIError(w, shared.ErrGetNodeUsersSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkRows.Close()
+
+	topRows, err := br.Query()
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetTopUsersFailed.WithCause(err), cfg)
 		return
 	}
-	defer topRows.Close()
-
 	topUsers := make([]topUser, 0)
 	for topRows.Next() {
 		var userUUID, username string
 		var total int64
 		if scanErr := topRows.Scan(&userUUID, &username, &total); scanErr != nil {
+			topRows.Close()
 			shared.SendAPIError(w, shared.ErrGetTopUsersFailed.WithCause(scanErr), cfg)
 			return
 		}
@@ -493,9 +524,11 @@ LIMIT $4
 		})
 	}
 	if err := topRows.Err(); err != nil {
+		topRows.Close()
 		shared.SendAPIError(w, shared.ErrGetTopUsersFailed.WithCause(err), cfg)
 		return
 	}
+	topRows.Close()
 
 	shared.WriteJSON(w, http.StatusOK, map[string]any{
 		"response": map[string]any{
@@ -523,7 +556,8 @@ func handleGetUserUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool
 		return
 	}
 
-	sparkRows, err := db.Query(r.Context(), `
+	batch := &pgx.Batch{}
+	batch.Queue(`
 WITH daily_traffic AS (
 	SELECT created_at::date AS date, SUM(total_bytes) AS bytes
 	FROM nodes_user_usage_history
@@ -535,27 +569,8 @@ FROM unnest($4::date[]) WITH ORDINALITY AS d(date, ord)
 LEFT JOIN daily_traffic dt ON dt.date = d.date::date
 ORDER BY d.ord
 	`, userID, startDate, endDate, pgDateArrayLiteral(dates))
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrGetUserSparklineFailed.WithCause(err), cfg)
-		return
-	}
-	defer sparkRows.Close()
 
-	sparkline := make([]int64, 0, len(dates))
-	for sparkRows.Next() {
-		var v int64
-		if scanErr := sparkRows.Scan(&v); scanErr != nil {
-			shared.SendAPIError(w, shared.ErrGetUserSparklineFailed.WithCause(scanErr), cfg)
-			return
-		}
-		sparkline = append(sparkline, v)
-	}
-	if err := sparkRows.Err(); err != nil {
-		shared.SendAPIError(w, shared.ErrGetUserSparklineFailed.WithCause(err), cfg)
-		return
-	}
-
-	seriesRows, err := db.Query(r.Context(), `
+	batch.Queue(`
 WITH daily_usage AS (
 	SELECT
 		n.uuid, n.name, n.country_code,
@@ -580,28 +595,8 @@ LEFT JOIN daily_usage du ON du.uuid = nt.uuid AND du.date = d.date::date
 GROUP BY nt.uuid, nt.name, nt.country_code, nt.total_bytes
 ORDER BY nt.total_bytes DESC
 	`, userID, startDate, endDate, pgDateArrayLiteral(dates))
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrGetUserNodesSeriesFailed.WithCause(err), cfg)
-		return
-	}
-	defer seriesRows.Close()
 
-	series := make([]usageSeries, 0)
-	for seriesRows.Next() {
-		var s usageSeries
-		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &s.Data); scanErr != nil {
-			shared.SendAPIError(w, shared.ErrGetUserNodesSeriesFailed.WithCause(scanErr), cfg)
-			return
-		}
-		s.Color = colorFromUUID(s.UUID)
-		series = append(series, s)
-	}
-	if err := seriesRows.Err(); err != nil {
-		shared.SendAPIError(w, shared.ErrGetUserNodesSeriesFailed.WithCause(err), cfg)
-		return
-	}
-
-	topRows, err := db.Query(r.Context(), `
+	batch.Queue(`
 SELECT n.uuid, n.name, n.country_code, COALESCE(SUM(nuh.total_bytes), 0) AS total
 FROM nodes n
 INNER JOIN nodes_user_usage_history nuh ON nuh.node_id = n.id
@@ -610,16 +605,65 @@ GROUP BY n.uuid, n.name, n.country_code
 ORDER BY total DESC
 LIMIT $4
 	`, userID, startDate, endDate, topLimit)
+
+	br := db.SendBatch(r.Context(), batch)
+	defer br.Close()
+
+	sparkRows, err := br.Query()
+	if err != nil {
+		shared.SendAPIError(w, shared.ErrGetUserSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkline := make([]int64, 0, len(dates))
+	for sparkRows.Next() {
+		var v int64
+		if scanErr := sparkRows.Scan(&v); scanErr != nil {
+			sparkRows.Close()
+			shared.SendAPIError(w, shared.ErrGetUserSparklineFailed.WithCause(scanErr), cfg)
+			return
+		}
+		sparkline = append(sparkline, v)
+	}
+	if err := sparkRows.Err(); err != nil {
+		sparkRows.Close()
+		shared.SendAPIError(w, shared.ErrGetUserSparklineFailed.WithCause(err), cfg)
+		return
+	}
+	sparkRows.Close()
+
+	seriesRows, err := br.Query()
+	if err != nil {
+		shared.SendAPIError(w, shared.ErrGetUserNodesSeriesFailed.WithCause(err), cfg)
+		return
+	}
+	series := make([]usageSeries, 0)
+	for seriesRows.Next() {
+		var s usageSeries
+		if scanErr := seriesRows.Scan(&s.UUID, &s.Name, &s.CountryCode, &s.Total, &s.Data); scanErr != nil {
+			seriesRows.Close()
+			shared.SendAPIError(w, shared.ErrGetUserNodesSeriesFailed.WithCause(scanErr), cfg)
+			return
+		}
+		s.Color = colorFromUUID(s.UUID)
+		series = append(series, s)
+	}
+	if err := seriesRows.Err(); err != nil {
+		seriesRows.Close()
+		shared.SendAPIError(w, shared.ErrGetUserNodesSeriesFailed.WithCause(err), cfg)
+		return
+	}
+	seriesRows.Close()
+
+	topRows, err := br.Query()
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetUserTopNodesFailed.WithCause(err), cfg)
 		return
 	}
-	defer topRows.Close()
-
 	topNodes := make([]topNode, 0)
 	for topRows.Next() {
 		var t topNode
 		if scanErr := topRows.Scan(&t.UUID, &t.Name, &t.CountryCode, &t.Total); scanErr != nil {
+			topRows.Close()
 			shared.SendAPIError(w, shared.ErrGetUserTopNodesFailed.WithCause(scanErr), cfg)
 			return
 		}
@@ -627,9 +671,11 @@ LIMIT $4
 		topNodes = append(topNodes, t)
 	}
 	if err := topRows.Err(); err != nil {
+		topRows.Close()
 		shared.SendAPIError(w, shared.ErrGetUserTopNodesFailed.WithCause(err), cfg)
 		return
 	}
+	topRows.Close()
 
 	shared.WriteJSON(w, http.StatusOK, map[string]any{
 		"response": map[string]any{
@@ -666,14 +712,6 @@ func handlePostNodesUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Po
 		return
 	}
 
-	nodeRows, err := db.Query(r.Context(), `
-		SELECT id, uuid FROM nodes WHERE uuid = ANY($1)
-	`, req.NodesUUIDs)
-	if err != nil {
-		shared.SendAPIError(w, shared.ErrGetAllNodesFailed.WithCause(err), cfg)
-		return
-	}
-
 	type nodeUsageUser struct {
 		ID         int64 `json:"id"`
 		TotalBytes int64 `json:"totalBytes"`
@@ -683,63 +721,42 @@ func handlePostNodesUsage(w http.ResponseWriter, r *http.Request, db *pgxpool.Po
 		Users []nodeUsageUser `json:"users"`
 	}
 
-	nodeUUIDByID := make(map[int64]string)
-	nodeIDs := make([]int64, 0)
-	for nodeRows.Next() {
-		var id int64
-		var nodeUUID string
-		if scanErr := nodeRows.Scan(&id, &nodeUUID); scanErr != nil {
-			nodeRows.Close()
-			shared.SendAPIError(w, shared.ErrGetAllNodesFailed.WithCause(scanErr), cfg)
-			return
-		}
-		nodeUUIDByID[id] = nodeUUID
-		nodeIDs = append(nodeIDs, id)
-	}
-	nodeRows.Close()
-	if err := nodeRows.Err(); err != nil {
-		shared.SendAPIError(w, shared.ErrGetAllNodesFailed.WithCause(err), cfg)
-		return
-	}
-
-	nodesByUUID := make(map[string]*nodeUsageItem, len(nodeIDs))
-	orderedUUIDs := make([]string, 0, len(nodeIDs))
-	for _, id := range nodeIDs {
-		nodeUUID := nodeUUIDByID[id]
-		nodesByUUID[nodeUUID] = &nodeUsageItem{UUID: nodeUUID, Users: []nodeUsageUser{}}
-		orderedUUIDs = append(orderedUUIDs, nodeUUID)
-	}
-
-	if len(nodeIDs) == 0 {
-		shared.WriteJSON(w, http.StatusOK, map[string]any{"response": map[string]any{"nodes": []any{}}})
-		return
-	}
-
 	rows, err := db.Query(r.Context(), `
-		SELECT nuh.node_id, nuh.user_id, COALESCE(SUM(nuh.total_bytes), 0) AS total_bytes
-		FROM nodes_user_usage_history nuh
-		WHERE nuh.node_id = ANY($1) AND nuh.created_at >= $2 AND nuh.created_at <= $3
-		GROUP BY nuh.node_id, nuh.user_id
-		HAVING COALESCE(SUM(nuh.total_bytes), 0) >= $4
-	`, nodeIDs, startDate, endDate, minTotalBytes)
+		SELECT n.uuid,
+		       nuh.user_id,
+		       CASE WHEN COALESCE(SUM(nuh.total_bytes), 0) >= $4 THEN COALESCE(SUM(nuh.total_bytes), 0) ELSE 0 END AS total_bytes,
+		       CASE WHEN nuh.user_id IS NOT NULL AND COALESCE(SUM(nuh.total_bytes), 0) >= $4 THEN true ELSE false END AS meets_threshold
+		FROM nodes n
+		LEFT JOIN nodes_user_usage_history nuh ON nuh.node_id = n.id AND nuh.created_at >= $2 AND nuh.created_at <= $3
+		WHERE n.uuid = ANY($1)
+		GROUP BY n.uuid, nuh.user_id
+	`, req.NodesUUIDs, startDate, endDate, minTotalBytes)
 	if err != nil {
 		shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)
 		return
 	}
 	defer rows.Close()
 
+	nodesByUUID := make(map[string]*nodeUsageItem)
+	orderedUUIDs := make([]string, 0)
 	for rows.Next() {
-		var nodeID, userID, totalBytes int64
-		if scanErr := rows.Scan(&nodeID, &userID, &totalBytes); scanErr != nil {
+		var nodeUUID string
+		var userID *int64
+		var totalBytes int64
+		var meetsThreshold bool
+		if scanErr := rows.Scan(&nodeUUID, &userID, &totalBytes, &meetsThreshold); scanErr != nil {
 			shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(scanErr), cfg)
 			return
 		}
-		nodeUUID, ok := nodeUUIDByID[nodeID]
-		if !ok {
-			continue
+		item, exists := nodesByUUID[nodeUUID]
+		if !exists {
+			item = &nodeUsageItem{UUID: nodeUUID, Users: make([]nodeUsageUser, 0)}
+			nodesByUUID[nodeUUID] = item
+			orderedUUIDs = append(orderedUUIDs, nodeUUID)
 		}
-		item := nodesByUUID[nodeUUID]
-		item.Users = append(item.Users, nodeUsageUser{ID: userID, TotalBytes: totalBytes})
+		if meetsThreshold && userID != nil {
+			item.Users = append(item.Users, nodeUsageUser{ID: *userID, TotalBytes: totalBytes})
+		}
 	}
 	if err := rows.Err(); err != nil {
 		shared.SendAPIError(w, shared.ErrGetNodesUsageFailed.WithCause(err), cfg)

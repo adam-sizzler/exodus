@@ -237,17 +237,16 @@ func CheckAndUpdateAvailability(ctx context.Context, dbConn db.DBTX, cfg *config
 	var wg sync.WaitGroup
 
 	for i, item := range items {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			results[i] = srsCheckResult{item: item, err: ctx.Err()}
+			continue
+		}
 		wg.Add(1)
 		go func(idx int, it Item) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				results[idx] = srsCheckResult{item: it, err: ctx.Err()}
-				return
-			}
-
+			defer func() { <-sem }()
 			results[idx] = srsCheckResult{item: it, err: CheckOneURL(ctx, it.URL)}
 		}(i, item)
 	}

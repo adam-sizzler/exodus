@@ -18,8 +18,41 @@ const (
 	defaultCORSHeadersHeader = "Content-Type, Authorization, X-API-Token, Cookie"
 )
 
+const baseCSP = "default-src 'self';" +
+	"script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval';" +
+	"img-src 'self' data: https: blob:;" +
+	"connect-src 'self' https: http: ws: wss: data: blob: https://raw.githubusercontent.com https://ungh.cc;" +
+	"worker-src 'self' blob:;" +
+	"frame-src 'self' https://oauth.telegram.org;" +
+	"frame-ancestors 'self';" +
+	"base-uri 'self';" +
+	"font-src 'self' https: data:;" +
+	"form-action 'self';" +
+	"object-src 'none';" +
+	"script-src-attr 'none';" +
+	"style-src 'self' https: 'unsafe-inline';"
+
+const upgradeInsecureCSP = baseCSP + "upgrade-insecure-requests;"
+
 // WithCORS adds CORS headers and Server header to all responses.
 func WithCORS(cfg *config.BackendConfig, next http.Handler) http.Handler {
+	csp := upgradeInsecureCSP
+	if cfg != nil && cfg.Backend.AllowInsecureHTTP {
+		csp = baseCSP
+	}
+
+	var allowedOriginsMap map[string]struct{}
+	allowAll := false
+	if cfg != nil && len(cfg.CORS.AllowedOrigins) > 0 {
+		allowedOriginsMap = make(map[string]struct{}, len(cfg.CORS.AllowedOrigins))
+		for _, o := range cfg.CORS.AllowedOrigins {
+			if o == "*" {
+				allowAll = true
+			}
+			allowedOriginsMap[o] = struct{}{}
+		}
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cfg != nil && !cfg.Backend.AllowInsecureHTTP && !IsSecureRequest(r, cfg) && !isHealthPath(r.URL.Path) {
 			w.Header().Set("Content-Type", "application/json")
@@ -50,41 +83,18 @@ func WithCORS(cfg *config.BackendConfig, next http.Handler) http.Handler {
 		// Block search engine indexing of the admin panel.
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet, noimageindex")
 
-		// Content Security Policy.
-		csp := "default-src 'self';" +
-			"script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval';" +
-			"img-src 'self' data: https: blob:;" +
-			"connect-src 'self' https: http: ws: wss: data: blob: https://raw.githubusercontent.com https://ungh.cc;" +
-			"worker-src 'self' blob:;" +
-			"frame-src 'self' https://oauth.telegram.org;" +
-			"frame-ancestors 'self';" +
-			"base-uri 'self';" +
-			"font-src 'self' https: data:;" +
-			"form-action 'self';" +
-			"object-src 'none';" +
-			"script-src-attr 'none';" +
-			"style-src 'self' https: 'unsafe-inline';"
-		if cfg != nil && !cfg.Backend.AllowInsecureHTTP {
-			csp += "upgrade-insecure-requests;"
-		}
+		// Content Security Policy (precomputed).
 		w.Header().Set("Content-Security-Policy", csp)
-
-		// Use CORS settings from config
-		allowedOrigins := cfg.CORS.AllowedOrigins
 
 		// If no allowed origins configured, do not emit CORS headers.
 		origin := r.Header.Get("Origin")
 		allowOrigin := ""
 
-		// Check if "*" is in the list (allow all)
-		for _, o := range allowedOrigins {
-			if o == "*" {
-				allowOrigin = "*"
-				break
-			}
-			if o == origin {
+		if allowAll {
+			allowOrigin = "*"
+		} else if origin != "" && allowedOriginsMap != nil {
+			if _, ok := allowedOriginsMap[origin]; ok {
 				allowOrigin = origin
-				break
 			}
 		}
 

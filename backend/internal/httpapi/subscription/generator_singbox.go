@@ -370,18 +370,20 @@ func resolveSingboxInboundDefaults(host SubscriptionHost) singboxInboundDefaults
 		}
 		defaults.spiderX = readString(realitySettings, "spiderX")
 	}
-	defaults.flow = resolveVlessFlow(host, defaults)
+	defaults.flow = resolveVlessFlow(host, defaults, raw)
 
 	defaults.sni = resolveFinalServerName(host, nativeSNI)
 
 	return defaults
 }
 
-func resolveVlessFlow(host SubscriptionHost, defaults singboxInboundDefaults) string {
+func resolveVlessFlow(host SubscriptionHost, defaults singboxInboundDefaults, raw map[string]interface{}) string {
 	if host.InboundType == nil || !strings.EqualFold(*host.InboundType, "vless") {
 		return ""
 	}
-	raw := parseInboundRaw(host.InboundRaw)
+	if raw == nil {
+		raw = parseInboundRaw(host.InboundRaw)
+	}
 	settings := readMap(raw, "settings")
 	flowFromSettings := strings.TrimSpace(readString(settings, "flow"))
 	if flowFromSettings == "xtls-rprx-vision" {
@@ -507,10 +509,15 @@ func firstNonEmpty(values ...string) string {
 
 
 
+var realityPubKeyCache sync.Map // map[string]string
+
 func deriveRealityPublicKey(privateKey string) string {
 	privateKey = strings.TrimSpace(privateKey)
 	if privateKey == "" {
 		return ""
+	}
+	if cached, ok := realityPubKeyCache.Load(privateKey); ok {
+		return cached.(string)
 	}
 	raw, ok := decodeBase64Any(privateKey)
 	if !ok || len(raw) != 32 {
@@ -520,7 +527,9 @@ func deriveRealityPublicKey(privateKey string) string {
 	copy(scalar[:], raw)
 	var public [32]byte
 	curve25519.ScalarBaseMult(&public, &scalar)
-	return base64.RawURLEncoding.EncodeToString(public[:])
+	result := base64.RawURLEncoding.EncodeToString(public[:])
+	realityPubKeyCache.Store(privateKey, result)
+	return result
 }
 
 func decodeBase64Any(value string) ([]byte, bool) {
@@ -551,12 +560,18 @@ func patchSingboxSelectors(baseConfig *orderedmap.OrderedMap, preferredHostNodeT
 	if !ok {
 		return
 	}
-	knownHostTags := appendUniqueStrings(append([]string(nil), preferredHostNodeTags...), regularHostNodeTags...)
-	knownHostSet := make(map[string]struct{}, len(knownHostTags))
-	for _, tag := range knownHostTags {
-		knownHostSet[tag] = struct{}{}
+	knownHostSet := make(map[string]struct{}, len(preferredHostNodeTags)+len(regularHostNodeTags))
+	for _, tag := range preferredHostNodeTags {
+		if tag != "" {
+			knownHostSet[tag] = struct{}{}
+		}
 	}
-	allNodeTags := make([]string, 0, len(knownHostTags))
+	for _, tag := range regularHostNodeTags {
+		if tag != "" {
+			knownHostSet[tag] = struct{}{}
+		}
+	}
+	allNodeTags := make([]string, 0, len(knownHostSet))
 	urltestTags := make([]string, 0, len(rawOutbounds))
 	for _, item := range rawOutbounds {
 		ob, ok := orderedMapValue(item)

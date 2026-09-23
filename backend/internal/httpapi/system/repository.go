@@ -141,10 +141,10 @@ func readTotalOnlineOnNodes(ctx context.Context, db *pgxpool.Pool, cfg *config.B
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	cache, _ := nodehotcache.Default(cfg).GetMany(ctx, uuids)
+	onlineMap, _ := nodehotcache.Default(cfg).GetUsersOnlineMany(ctx, uuids)
 	var total int64
-	for _, uuid := range uuids {
-		total += int64(cache[uuid].UsersOnline)
+	for _, count := range onlineMap {
+		total += int64(count)
 	}
 	return total, nil
 }

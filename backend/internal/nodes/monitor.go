@@ -146,9 +146,30 @@ func (nm *NodeMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// retryFailedNodes automatically re-attempts deploy for active nodes whose core failed to start or is disconnected.
+// retryFailedNodes automatically re-attempts deploy for active nodes whose core failed to start or is disconnected in DB.
 func (nm *NodeMonitor) retryFailedNodes() {
-	if nm == nil {
+	if nm == nil || nm.db == nil {
+		return
+	}
+
+	// Fast in-memory pre-check: only nodes with an active client connection can be redeployed.
+	candidates := make(map[string]string) // name -> uuid
+	nm.nodesLock.RLock()
+	for name, state := range nm.nodes {
+		if state == nil {
+			continue
+		}
+		state.mutex.RLock()
+		hasClient := state.client != nil && state.isConnected
+		uuid := state.nodeUUID
+		state.mutex.RUnlock()
+		if hasClient && uuid != "" {
+			candidates[name] = uuid
+		}
+	}
+	nm.nodesLock.RUnlock()
+
+	if len(candidates) == 0 {
 		return
 	}
 
@@ -157,43 +178,28 @@ func (nm *NodeMonitor) retryFailedNodes() {
 		ctx = context.Background()
 	}
 
-	rows, err := nm.db.Query(ctx, `SELECT uuid::text, name FROM nodes WHERE is_disabled = false AND is_connected = false`)
+	candidateNames := make([]string, 0, len(candidates))
+	for name := range candidates {
+		candidateNames = append(candidateNames, name)
+	}
+
+	rows, err := nm.db.Query(ctx, `SELECT uuid::text FROM nodes WHERE is_disabled = false AND is_connected = false AND name = ANY($1)`, candidateNames)
 	if err != nil {
 		nm.cfg.Logger.Debug("Failed to query disconnected nodes for watchdog retry", "error", err)
 		return
 	}
 	defer rows.Close()
 
-	failedNodes := make(map[string]string)
+	var failedTargets []string
 	for rows.Next() {
-		var uuid, name string
-		if scanErr := rows.Scan(&uuid, &name); scanErr == nil {
-			failedNodes[name] = uuid
+		var uuid string
+		if scanErr := rows.Scan(&uuid); scanErr == nil && uuid != "" {
+			failedTargets = append(failedTargets, uuid)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		nm.cfg.Logger.Debug("Error iterating disconnected nodes", "error", err)
 	}
-	if len(failedNodes) == 0 {
-		return
-	}
-
-	failedTargets := make([]string, 0, len(failedNodes))
-	nm.nodesLock.RLock()
-	for name, uuid := range failedNodes {
-		state, ok := nm.nodes[name]
-		if !ok || state == nil {
-			continue
-		}
-		state.mutex.RLock()
-		hasClient := state.client != nil && state.isConnected
-		state.mutex.RUnlock()
-
-		if hasClient {
-			failedTargets = append(failedTargets, uuid)
-		}
-	}
-	nm.nodesLock.RUnlock()
 
 	if len(failedTargets) > 0 {
 		nm.cfg.Logger.Debug("Node watchdog retrying deploy for active disconnected nodes", "count", len(failedTargets), "node_uuids", failedTargets)

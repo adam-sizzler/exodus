@@ -163,44 +163,15 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(state *nodeState, stats []*pro
 	}
 	nodeName := state.nodeName
 
-	var (
-		rawCoreStatus     string
-		rawCoreError      string
-		rawSingboxVersion string
-		rawNodeVersion    string
-		rawSingboxUptime  string
-		rawSystemInfo     string
-		rawSystemStats    string
-	)
+	rt, trafficDelta := parseNodeStatsStream(stats)
 
-	for _, stat := range stats {
-		if stat == nil {
-			continue
-		}
-		name := stat.GetName()
-		// Fast skip for user traffic, inbound, outbound: names containing '>>>'
-		if len(name) > 6 && (name[0] == 'u' || name[0] == 'i' || name[0] == 'o') && strings.Contains(name, ">>>") {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(name)) {
-		case "core_status":
-			rawCoreStatus = stat.GetValue()
-		case "core_error":
-			rawCoreError = stat.GetValue()
-		case "singbox_version":
-			rawSingboxVersion = stat.GetValue()
-		case "node_version":
-			rawNodeVersion = stat.GetValue()
-		case "singbox_uptime":
-			rawSingboxUptime = stat.GetValue()
-		case "system_info":
-			rawSystemInfo = stat.GetValue()
-		case "system_stats":
-			rawSystemStats = stat.GetValue()
-		}
-	}
-
-	trafficDelta := extractTrafficStatsDelta(stats)
+	rawCoreStatus := rt.rawCoreStatus
+	rawCoreError := rt.rawCoreError
+	rawSingboxVersion := rt.rawSingboxVersion
+	rawNodeVersion := rt.rawNodeVersion
+	rawSingboxUptime := rt.rawSingboxUptime
+	rawSystemInfo := rt.rawSystemInfo
+	rawSystemStats := rt.rawSystemStats
 
 	coreStatus := strings.ToLower(strings.TrimSpace(rawCoreStatus))
 	coreError := strings.TrimSpace(rawCoreError)
@@ -513,8 +484,21 @@ func parseOptionalJSONRaw(raw string) json.RawMessage {
 	return json.RawMessage(b)
 }
 
-func extractTrafficStatsDelta(stats []*proto.Stat) trafficStatsDelta {
-	var delta trafficStatsDelta
+type nodeRuntimeData struct {
+	rawCoreStatus     string
+	rawCoreError      string
+	rawSingboxVersion string
+	rawNodeVersion    string
+	rawSingboxUptime  string
+	rawSystemInfo     string
+	rawSystemStats    string
+}
+
+func parseNodeStatsStream(stats []*proto.Stat) (nodeRuntimeData, trafficStatsDelta) {
+	var (
+		rt    nodeRuntimeData
+		delta trafficStatsDelta
+	)
 	userCap := 0
 	if len(stats) > 16 {
 		userCap = len(stats) / 2
@@ -528,109 +512,176 @@ func extractTrafficStatsDelta(stats []*proto.Stat) trafficStatsDelta {
 			continue
 		}
 		rawKey := strings.TrimSpace(stat.GetName())
-		if rawKey == "" {
-			continue
-		}
-		valStr := strings.TrimSpace(stat.GetValue())
-		val, _ := strconv.ParseInt(valStr, 10, 64)
-
-		if strings.HasPrefix(rawKey, "user>>>") {
-			rest := rawKey[7:]
-			idx := strings.Index(rest, ">>>")
-			if idx > 0 && strings.HasPrefix(rest[idx+3:], "traffic>>>") {
-				username := rest[:idx]
-				if val > 0 {
-					delta.UserBytesByName[username] += val
-				}
-			}
+		if len(rawKey) == 0 {
 			continue
 		}
 
-		if strings.HasPrefix(rawKey, "inbound>>>") {
-			rest := rawKey[10:]
-			idx := strings.Index(rest, ">>>")
-			if idx > 0 && strings.HasPrefix(rest[idx+3:], "traffic>>>") {
-				tag := rest[:idx]
-				dir := rest[idx+3+10:]
-				counters := delta.InboundByTag[tag]
-				if strings.EqualFold(dir, "uplink") {
-					counters.UploadBytes += val
-				} else if strings.EqualFold(dir, "downlink") {
-					counters.DownloadBytes += val
+		switch rawKey[0] {
+		case 'u', 'U':
+			if strings.HasPrefix(rawKey, "user>>>") {
+				rest := rawKey[7:]
+				idx := strings.Index(rest, ">>>")
+				if idx > 0 && strings.HasPrefix(rest[idx+3:], "traffic>>>") {
+					username := rest[:idx]
+					val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+					if val > 0 {
+						delta.UserBytesByName[username] += val
+					}
 				}
-				delta.InboundByTag[tag] = counters
+				continue
+			}
+			key := strings.ToLower(rawKey)
+			if key == "users_online" {
+				val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+				if val >= 0 && val <= math.MaxInt {
+					delta.UsersOnline = int(val)
+				}
+				continue
+			}
+			if strings.HasPrefix(key, "user_") {
+				username := strings.TrimPrefix(key, "user_")
+				username = strings.TrimSuffix(username, "_bytes")
+				username = strings.TrimSpace(username)
+				if username != "" {
+					val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+					if val > 0 {
+						delta.UserBytesByName[username] += val
+					}
+				}
+				continue
+			}
+
+		case 'i', 'I':
+			if strings.HasPrefix(rawKey, "inbound>>>") {
+				rest := rawKey[10:]
+				idx := strings.Index(rest, ">>>")
+				if idx > 0 && strings.HasPrefix(rest[idx+3:], "traffic>>>") {
+					tag := rest[:idx]
+					dir := rest[idx+3+10:]
+					val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+					counters := delta.InboundByTag[tag]
+					if strings.EqualFold(dir, "uplink") {
+						counters.UploadBytes += val
+					} else if strings.EqualFold(dir, "downlink") {
+						counters.DownloadBytes += val
+					}
+					delta.InboundByTag[tag] = counters
+				}
+				continue
+			}
+			key := strings.ToLower(rawKey)
+			if strings.HasPrefix(key, "inbound_") {
+				parts := strings.Split(key, "_")
+				if len(parts) >= 3 {
+					direction := parts[len(parts)-1]
+					tag := strings.Join(parts[1:len(parts)-1], "_")
+					val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+					counters := delta.InboundByTag[tag]
+					switch direction {
+					case "down", "download":
+						counters.DownloadBytes += val
+					case "up", "upload":
+						counters.UploadBytes += val
+					}
+					delta.InboundByTag[tag] = counters
+				}
+				continue
+			}
+
+		case 'o', 'O':
+			if strings.HasPrefix(rawKey, "outbound>>>") {
+				rest := rawKey[11:]
+				idx := strings.Index(rest, ">>>")
+				if idx > 0 && strings.HasPrefix(rest[idx+3:], "traffic>>>") {
+					tag := rest[:idx]
+					dir := rest[idx+3+10:]
+					val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+					counters := delta.OutboundByTag[tag]
+					if strings.EqualFold(dir, "uplink") {
+						delta.TotalUploadBytes += val
+						counters.UploadBytes += val
+					} else if strings.EqualFold(dir, "downlink") {
+						delta.TotalDownloadBytes += val
+						counters.DownloadBytes += val
+					}
+					delta.OutboundByTag[tag] = counters
+				}
+				continue
+			}
+			key := strings.ToLower(rawKey)
+			if strings.HasPrefix(key, "outbound_") {
+				parts := strings.Split(key, "_")
+				if len(parts) >= 3 {
+					direction := parts[len(parts)-1]
+					tag := strings.Join(parts[1:len(parts)-1], "_")
+					val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+					counters := delta.OutboundByTag[tag]
+					switch direction {
+					case "down", "download":
+						counters.DownloadBytes += val
+					case "up", "upload":
+						counters.UploadBytes += val
+					}
+					delta.OutboundByTag[tag] = counters
+				}
+				continue
+			}
+
+		case 't', 'T':
+			key := strings.ToLower(rawKey)
+			if key == "total_download_bytes" {
+				val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+				delta.TotalDownloadBytes = val
+				continue
+			}
+			if key == "total_upload_bytes" {
+				val, _ := strconv.ParseInt(strings.TrimSpace(stat.GetValue()), 10, 64)
+				delta.TotalUploadBytes = val
+				continue
+			}
+
+		case 'c', 'C':
+			key := strings.ToLower(rawKey)
+			if key == "core_status" {
+				rt.rawCoreStatus = stat.GetValue()
+				continue
+			}
+			if key == "core_error" {
+				rt.rawCoreError = stat.GetValue()
+				continue
+			}
+
+		case 's', 'S':
+			key := strings.ToLower(rawKey)
+			switch key {
+			case "singbox_version":
+				rt.rawSingboxVersion = stat.GetValue()
+			case "singbox_uptime":
+				rt.rawSingboxUptime = stat.GetValue()
+			case "system_info":
+				rt.rawSystemInfo = stat.GetValue()
+			case "system_stats":
+				rt.rawSystemStats = stat.GetValue()
 			}
 			continue
-		}
 
-		if strings.HasPrefix(rawKey, "outbound>>>") {
-			rest := rawKey[11:]
-			idx := strings.Index(rest, ">>>")
-			if idx > 0 && strings.HasPrefix(rest[idx+3:], "traffic>>>") {
-				tag := rest[:idx]
-				dir := rest[idx+3+10:]
-				counters := delta.OutboundByTag[tag]
-				if strings.EqualFold(dir, "uplink") {
-					delta.TotalUploadBytes += val
-					counters.UploadBytes += val
-				} else if strings.EqualFold(dir, "downlink") {
-					delta.TotalDownloadBytes += val
-					counters.DownloadBytes += val
-				}
-				delta.OutboundByTag[tag] = counters
-			}
-			continue
-		}
-
-		key := strings.ToLower(rawKey)
-		switch {
-		case key == "total_download_bytes":
-			delta.TotalDownloadBytes = val
-		case key == "total_upload_bytes":
-			delta.TotalUploadBytes = val
-		case key == "users_online":
-			if val >= 0 && val <= math.MaxInt {
-				delta.UsersOnline = int(val)
-			}
-		case strings.HasPrefix(key, "user_"):
-			username := strings.TrimPrefix(key, "user_")
-			username = strings.TrimSuffix(username, "_bytes")
-			username = strings.TrimSpace(username)
-			if username != "" && val > 0 {
-				delta.UserBytesByName[username] += val
-			}
-		case strings.HasPrefix(key, "inbound_"):
-			parts := strings.Split(key, "_")
-			if len(parts) >= 3 {
-				direction := parts[len(parts)-1]
-				tag := strings.Join(parts[1:len(parts)-1], "_")
-				counters := delta.InboundByTag[tag]
-				switch direction {
-				case "down", "download":
-					counters.DownloadBytes += val
-				case "up", "upload":
-					counters.UploadBytes += val
-				}
-				delta.InboundByTag[tag] = counters
-			}
-		case strings.HasPrefix(key, "outbound_"):
-			parts := strings.Split(key, "_")
-			if len(parts) >= 3 {
-				direction := parts[len(parts)-1]
-				tag := strings.Join(parts[1:len(parts)-1], "_")
-				counters := delta.OutboundByTag[tag]
-				switch direction {
-				case "down", "download":
-					counters.DownloadBytes += val
-				case "up", "upload":
-					counters.UploadBytes += val
-				}
-				delta.OutboundByTag[tag] = counters
+		case 'n', 'N':
+			key := strings.ToLower(rawKey)
+			if key == "node_version" {
+				rt.rawNodeVersion = stat.GetValue()
+				continue
 			}
 		}
 	}
+
 	if delta.UsersOnline == 0 {
 		delta.UsersOnline = len(delta.UserBytesByName)
 	}
+
+	return rt, delta
+}
+
+func extractTrafficStatsDelta(stats []*proto.Stat) trafficStatsDelta {
+	_, delta := parseNodeStatsStream(stats)
 	return delta
 }

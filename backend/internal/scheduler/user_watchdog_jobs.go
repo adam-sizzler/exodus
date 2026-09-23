@@ -294,55 +294,52 @@ func ResetTrafficByStrategyAt(ctx context.Context, pool *pgxpool.Pool, strategy 
 		return result, nil
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return result, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	nodeUUIDs, err := queryLimitedUserNodeUUIDsByStrategyTx(ctx, tx, normalizedStrategy, boundary, now)
-	if err != nil {
-		return result, err
-	}
-
-	err = tx.QueryRow(ctx, `
+	var nodeUUIDs []string
+	err := pool.QueryRow(ctx, `
 		WITH affected_users AS (
 			UPDATE users
 			SET last_traffic_reset_at = CURRENT_TIMESTAMP,
 			    last_triggered_threshold = 0,
 			    status = CASE WHEN status = 'LIMITED' THEN 'ACTIVE' ELSE status END,
 			    updated_at = CURRENT_TIMESTAMP
-				WHERE traffic_limit_strategy = $1
-				  AND COALESCE(last_traffic_reset_at, created_at) < $2
-				  AND (
-				      $3 <> 'MONTH_ROLLING'
-				      OR (
-				          (created_at + interval '1 month')::date <= $4::date
-				          AND LEAST(
-				              EXTRACT(DAY FROM created_at),
-				              EXTRACT(DAY FROM date_trunc('month', $5::timestamp) + interval '1 month - 1 day')
-				          ) = EXTRACT(DAY FROM $6::timestamp)
-				      )
-				  )
-				RETURNING id
-			),
+			WHERE traffic_limit_strategy = $1
+			  AND COALESCE(last_traffic_reset_at, created_at) < $2
+			  AND (
+			      $3 <> 'MONTH_ROLLING'
+			      OR (
+			          (created_at + interval '1 month')::date <= $4::date
+			          AND LEAST(
+			              EXTRACT(DAY FROM created_at),
+			              EXTRACT(DAY FROM date_trunc('month', $5::timestamp) + interval '1 month - 1 day')
+			          ) = EXTRACT(DAY FROM $6::timestamp)
+			      )
+			  )
+			RETURNING id, (status = 'LIMITED') AS was_limited
+		),
 		reset_traffic AS (
 			INSERT INTO user_traffic (id, used_traffic_bytes, lifetime_used_traffic_bytes)
 			SELECT id, 0, 0 FROM affected_users
 			ON CONFLICT (id)
 			DO UPDATE SET used_traffic_bytes = 0
 			RETURNING id
+		),
+		affected_nodes AS (
+			SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
+			FROM affected_users au
+			JOIN internal_squad_members ism ON ism.user_id = au.id
+			JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
+			JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
+			WHERE au.was_limited = true
 		)
-		SELECT COUNT(*)::bigint FROM reset_traffic
-	`, normalizedStrategy, boundary, normalizedStrategy, now, now, now).Scan(&result.Users)
+		SELECT
+			(SELECT COUNT(*) FROM reset_traffic)::bigint AS users_count,
+			COALESCE((SELECT array_agg(node_uuid) FROM affected_nodes), '{}'::text[]) AS node_uuids
+	`, normalizedStrategy, boundary, normalizedStrategy, now, now, now).Scan(&result.Users, &nodeUUIDs)
 	if err != nil {
 		return result, err
 	}
 
-	result.NodeUUIDs = nodeUUIDs
-	if err := tx.Commit(ctx); err != nil {
-		return result, err
-	}
+	result.NodeUUIDs = dedupeStrings(nodeUUIDs)
 	return result, nil
 }
 
@@ -396,46 +393,6 @@ func updateUsersAndCollectNodes(ctx context.Context, dbConn db.DBTX, query strin
 	}
 	result.NodeUUIDs = dedupeStrings(nodeUUIDs)
 	return result, nil
-}
-
-func queryLimitedUserNodeUUIDsByStrategyTx(ctx context.Context, tx pgx.Tx, strategy string, boundary time.Time, now time.Time) ([]string, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT DISTINCT cpitn.node_uuid::text AS node_uuid
-		FROM users u
-		JOIN internal_squad_members ism ON ism.user_id = u.id
-		JOIN internal_squad_inbounds isi ON isi.internal_squad_uuid = ism.internal_squad_uuid
-		JOIN config_profile_inbounds_to_nodes cpitn ON cpitn.config_profile_inbound_uuid = isi.inbound_uuid
-		WHERE u.status = 'LIMITED'
-		  AND u.traffic_limit_strategy = $1
-		  AND COALESCE(u.last_traffic_reset_at, u.created_at) < $2
-		  AND (
-		      $3 <> 'MONTH_ROLLING'
-		      OR (
-		          (u.created_at + interval '1 month')::date <= $4::date
-		          AND LEAST(
-				              EXTRACT(DAY FROM u.created_at),
-				              EXTRACT(DAY FROM date_trunc('month', $5::timestamp) + interval '1 month - 1 day')
-				          ) = EXTRACT(DAY FROM $6::timestamp)
-		      )
-		  )
-	`, strategy, boundary, strategy, now, now, now)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	nodeUUIDs := make([]string, 0)
-	for rows.Next() {
-		var nodeUUID string
-		if err := rows.Scan(&nodeUUID); err != nil {
-			return nil, err
-		}
-		nodeUUIDs = append(nodeUUIDs, nodeUUID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return dedupeStrings(nodeUUIDs), nil
 }
 
 func dedupeStrings(values []string) []string {

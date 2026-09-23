@@ -353,10 +353,10 @@ func loadNodesMetricsMeta(ctx context.Context, db *pgxpool.Pool, cfg *config.Bac
 	for _, item := range result {
 		uuids = append(uuids, item.UUID)
 	}
-	cache, _ := nodehotcache.Default(cfg).GetMany(ctx, uuids)
+	onlineMap, _ := nodehotcache.Default(cfg).GetUsersOnlineMany(ctx, uuids)
 	for i := range result {
 		if result[i].IsConnected {
-			result[i].UsersOnline = cache[result[i].UUID].UsersOnline
+			result[i].UsersOnline = onlineMap[result[i].UUID]
 		}
 	}
 	return result, nil

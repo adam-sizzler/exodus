@@ -121,6 +121,31 @@ func (nm *NodeMonitor) recordNodeUserUsageHistory(ctx context.Context, dbConn db
 	return bulkUpsertNodeUserUsageHistory(ctx, dbConn, nodeID, usageDeltas)
 }
 
+const userTrafficUpsertQuery = `
+	INSERT INTO user_traffic (
+		id, used_traffic_bytes, lifetime_used_traffic_bytes,
+		online_at, last_connected_node_uuid, first_connected_at
+	)
+	SELECT
+		v.id,
+		v.total_bytes,
+		v.total_bytes,
+		now(),
+		$3::uuid,
+		now()
+	FROM (
+		SELECT unnest($1::bigint[]) AS id, unnest($2::bigint[]) AS total_bytes
+	) AS v
+	ON CONFLICT (id)
+	DO UPDATE SET
+		used_traffic_bytes = user_traffic.used_traffic_bytes + EXCLUDED.used_traffic_bytes,
+		lifetime_used_traffic_bytes = user_traffic.lifetime_used_traffic_bytes + EXCLUDED.lifetime_used_traffic_bytes,
+		online_at = now(),
+		last_connected_node_uuid = EXCLUDED.last_connected_node_uuid,
+		first_connected_at = COALESCE(user_traffic.first_connected_at, now())
+	RETURNING id, (user_traffic.first_connected_at IS NULL OR user_traffic.first_connected_at = user_traffic.online_at) AS is_first_connection
+`
+
 func bulkUpsertUserTraffic(ctx context.Context, dbConn db.DBTX, usageDeltas []userUsageDelta, nodeUUID string) ([]int64, error) {
 	const chunkSize = 1000
 	var firstConnectedIDs []int64
@@ -129,46 +154,14 @@ func bulkUpsertUserTraffic(ctx context.Context, dbConn db.DBTX, usageDeltas []us
 		end := min(start+chunkSize, len(usageDeltas))
 		chunk := usageDeltas[start:end]
 
-		var query strings.Builder
-		query.Grow(len(chunk)*48 + 512)
-		args := make([]any, 0, len(chunk)*3)
-
-		query.WriteString(`
-			INSERT INTO user_traffic (
-				id, used_traffic_bytes, lifetime_used_traffic_bytes,
-				online_at, last_connected_node_uuid, first_connected_at
-			)
-			SELECT
-				v.id,
-				v.total_bytes,
-				v.total_bytes,
-				now(),
-				v.last_connected_node_uuid,
-				now()
-			FROM (VALUES `)
-
-		idx := 1
+		userIDs := make([]int64, len(chunk))
+		totalBytes := make([]int64, len(chunk))
 		for i, delta := range chunk {
-			if i > 0 {
-				query.WriteString(", ")
-			}
-			writePlaceholder3(&query, idx, "uuid")
-			args = append(args, delta.UserID, delta.TotalBytes, nodeUUID)
-			idx += 3
+			userIDs[i] = delta.UserID
+			totalBytes[i] = delta.TotalBytes
 		}
 
-		query.WriteString(`) AS v(id, total_bytes, last_connected_node_uuid)
-			ON CONFLICT (id)
-			DO UPDATE SET
-				used_traffic_bytes = user_traffic.used_traffic_bytes + EXCLUDED.used_traffic_bytes,
-				lifetime_used_traffic_bytes = user_traffic.lifetime_used_traffic_bytes + EXCLUDED.lifetime_used_traffic_bytes,
-				online_at = now(),
-				last_connected_node_uuid = EXCLUDED.last_connected_node_uuid,
-				first_connected_at = COALESCE(user_traffic.first_connected_at, now())
-			RETURNING id, (user_traffic.first_connected_at IS NULL OR user_traffic.first_connected_at = user_traffic.online_at) AS is_first_connection
-		`)
-
-		rows, err := dbConn.Query(ctx, query.String(), args...)
+		rows, err := dbConn.Query(ctx, userTrafficUpsertQuery, userIDs, totalBytes, nodeUUID)
 		if err != nil {
 			return nil, err
 		}
@@ -188,6 +181,21 @@ func bulkUpsertUserTraffic(ctx context.Context, dbConn db.DBTX, usageDeltas []us
 	return firstConnectedIDs, nil
 }
 
+const nodeUserUsageHistoryUpsertQuery = `
+	INSERT INTO nodes_user_usage_history (node_id, user_id, total_bytes)
+	SELECT
+		$1::bigint,
+		v.user_id,
+		v.total_bytes
+	FROM (
+		SELECT unnest($2::bigint[]) AS user_id, unnest($3::bigint[]) AS total_bytes
+	) AS v
+	ON CONFLICT (node_id, created_at, user_id)
+	DO UPDATE SET
+		total_bytes = nodes_user_usage_history.total_bytes + EXCLUDED.total_bytes,
+		updated_at = now()
+`
+
 func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, usageDeltas []userUsageDelta) error {
 	const chunkSize = 1000
 
@@ -195,32 +203,14 @@ func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID 
 		end := min(start+chunkSize, len(usageDeltas))
 		chunk := usageDeltas[start:end]
 
-		var query strings.Builder
-		query.Grow(len(chunk)*48 + 256)
-		args := make([]any, 0, len(chunk)*3)
-
-		query.WriteString(`
-			INSERT INTO nodes_user_usage_history (node_id, user_id, total_bytes)
-			VALUES `)
-
-		idx := 1
+		userIDs := make([]int64, len(chunk))
+		historyBytes := make([]int64, len(chunk))
 		for i, delta := range chunk {
-			if i > 0 {
-				query.WriteString(", ")
-			}
-			writePlaceholder3(&query, idx, "bigint")
-			args = append(args, nodeID, delta.UserID, delta.HistoryBytes)
-			idx += 3
+			userIDs[i] = delta.UserID
+			historyBytes[i] = delta.HistoryBytes
 		}
 
-		query.WriteString(`
-			ON CONFLICT (node_id, created_at, user_id)
-			DO UPDATE SET
-				total_bytes = nodes_user_usage_history.total_bytes + EXCLUDED.total_bytes,
-				updated_at = now()
-		`)
-
-		if _, err := dbConn.Exec(ctx, query.String(), args...); err != nil {
+		if _, err := dbConn.Exec(ctx, nodeUserUsageHistoryUpsertQuery, nodeID, userIDs, historyBytes); err != nil {
 			return err
 		}
 	}

@@ -184,6 +184,36 @@ func (c *Cache) GetMany(ctx context.Context, uuids []string) (map[string]HotCach
 	return result, nil
 }
 
+func (c *Cache) GetUsersOnlineMany(ctx context.Context, uuids []string) (map[string]int, error) {
+	result := make(map[string]int, len(uuids))
+	for _, uuid := range uuids {
+		result[uuid] = 0
+	}
+	if c == nil || c.client == nil || len(uuids) == 0 {
+		return result, nil
+	}
+
+	keys := make([]string, len(uuids))
+	for i, uuid := range uuids {
+		keys[i] = key(usersOnlinePrefix, uuid)
+	}
+
+	values, err := c.client.MGet(ctx, keys...).Result()
+	if err != nil && err != redis.Nil {
+		if c.cfg != nil && c.cfg.Logger != nil {
+			c.cfg.Logger.Warn("Node hot cache GetUsersOnlineMany MGet failed", "error", err, "nodes", len(uuids))
+		}
+		return result, nil
+	}
+
+	for i, uuid := range uuids {
+		if i < len(values) {
+			result[uuid] = parseInt(mgetString(values[i]))
+		}
+	}
+	return result, nil
+}
+
 func mgetString(v any) string {
 	if v == nil {
 		return ""

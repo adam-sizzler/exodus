@@ -111,7 +111,7 @@ func generateYAMLConfigExt(templateYAML []byte, hosts []SubscriptionHost, user S
 			continue
 		}
 
-		proxy := buildMihomoProxyExt(host, user, isExtendedClient)
+		proxy := buildMihomoProxyWithDefaults(host, user, isExtendedClient, defaults)
 		if proxy == nil {
 			continue
 		}
@@ -200,7 +200,8 @@ func generateYAMLConfigExt(templateYAML []byte, hosts []SubscriptionHost, user S
 			}
 			payloadNode := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
 			for _, host := range hosts {
-				proxy := buildMihomoProxyExt(host, user, isExtendedClient)
+				defaults := resolveSingboxInboundDefaults(host)
+				proxy := buildMihomoProxyWithDefaults(host, user, isExtendedClient, defaults)
 				if proxy == nil {
 					continue
 				}
@@ -517,6 +518,10 @@ func buildMihomoProxy(host SubscriptionHost, user SubscriptionUser) map[string]i
 }
 
 func buildMihomoProxyExt(host SubscriptionHost, user SubscriptionUser, isExtendedClient bool) map[string]interface{} {
+	return buildMihomoProxyWithDefaults(host, user, isExtendedClient, resolveSingboxInboundDefaults(host))
+}
+
+func buildMihomoProxyWithDefaults(host SubscriptionHost, user SubscriptionUser, isExtendedClient bool, defaults singboxInboundDefaults) map[string]interface{} {
 	protocol := normalizedHostProtocol(host)
 	if protocol == "" {
 		return nil
@@ -595,9 +600,8 @@ func buildMihomoProxyExt(host SubscriptionHost, user SubscriptionUser, isExtende
 		}
 	}
 
-	mihomoSNI := resolveFinalServerName(host, extractMihomoNativeSNI(host.InboundRaw))
+	mihomoSNI := defaults.sni
 
-	defaults := resolveSingboxInboundDefaults(host)
 	if protocol == "vless" && defaults.flow != "" {
 		proxy["flow"] = defaults.flow
 	}

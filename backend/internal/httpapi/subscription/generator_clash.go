@@ -168,7 +168,7 @@ func buildClashProxy(host SubscriptionHost, user SubscriptionUser) map[string]in
 		}
 	}
 
-	clashSNI := resolveFinalServerName(host, defaults.sni)
+	clashSNI := defaults.sni
 
 	if security == "tls" || protocol == "trojan" {
 		proxy["tls"] = true

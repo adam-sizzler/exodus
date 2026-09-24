@@ -865,11 +865,15 @@ var commonIDStrings = func() []string {
 	return table
 }()
 
-func formatUserID(id int64) string {
+func FormatUserID(id int64) string {
 	if id > 0 && id <= 10000 {
 		return commonIDStrings[id]
 	}
 	return strconv.FormatInt(id, 10)
+}
+
+func formatUserID(id int64) string {
+	return FormatUserID(id)
 }
 
 func userIdentifier(user inboundUserCredentials) string {

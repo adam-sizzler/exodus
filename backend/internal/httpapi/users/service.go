@@ -23,13 +23,36 @@ func NewUserService(repo *UserRepository, cfg *config.BackendConfig) *UserServic
 	}
 }
 
+func buildUserSyncItem(action string, record userRecord, tags []string) monitor.UserSyncItem {
+	hy2Password := ""
+	if record.Hysteria2Password != nil {
+		hy2Password = *record.Hysteria2Password
+	}
+	identifier := ""
+	if record.ID > 0 {
+		identifier = monitor.FormatUserID(record.ID)
+	} else {
+		identifier = record.Username
+	}
+	return monitor.UserSyncItem{
+		Action:            action,
+		Identifier:        identifier,
+		Username:          record.Username,
+		UUID:              record.VlessUUID,
+		TrojanPassword:    record.TrojanPassword,
+		SSPassword:        record.SSPassword,
+		Hysteria2Password: hy2Password,
+		InboundTags:       tags,
+	}
+}
+
 func (s *UserService) EnableUser(ctx context.Context, identifier string) (userRecord, error) {
 	record, nodeUUIDs, err := s.repo.updateUserStatus(ctx, identifier, "ACTIVE")
 	if err != nil {
 		return userRecord{}, err
 	}
 	if len(nodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, nodeUUIDs...)
+		monitor.RequestSyncUser(buildUserSyncItem("add", record, nil), nodeUUIDs...)
 	}
 	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserEnabled, record, nil)
 	return record, nil
@@ -41,7 +64,7 @@ func (s *UserService) DisableUser(ctx context.Context, identifier string) (userR
 		return userRecord{}, err
 	}
 	if len(nodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, nodeUUIDs...)
+		monitor.RequestSyncUser(buildUserSyncItem("disable", record, nil), nodeUUIDs...)
 	}
 	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserDisabled, record, nil)
 	return record, nil
@@ -53,7 +76,7 @@ func (s *UserService) ResetUserTraffic(ctx context.Context, identifier string) (
 		return userRecord{}, err
 	}
 	if len(nodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, nodeUUIDs...)
+		monitor.RequestSyncUser(buildUserSyncItem("add", record, nil), nodeUUIDs...)
 	}
 	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserTrafficReset, record, nil)
 	if reactivated {
@@ -126,7 +149,7 @@ func (s *UserService) CreateUser(ctx context.Context, req createUserRequest) (us
 	}
 
 	if strings.EqualFold(normalizeUserStatus(req.Status), "ACTIVE") && len(internalSquadNodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, internalSquadNodeUUIDs...)
+		monitor.RequestSyncUser(buildUserSyncItem("add", record, nil), internalSquadNodeUUIDs...)
 	}
 	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserCreated, record, nil)
 	return record, nil
@@ -163,8 +186,16 @@ func (s *UserService) UpdateUser(ctx context.Context, req updateUserRequest) (us
 	}
 
 	deployNodeUUIDs := dedupeStrings(append(statusNodeUUIDs, internalSquadNodeUUIDs...))
-	if (internalSquadsChanged || statusDeployRequired) && len(deployNodeUUIDs) > 0 {
+	if internalSquadsChanged && len(deployNodeUUIDs) > 0 {
 		monitor.RequestNodeDeploy(true, deployNodeUUIDs...)
+	} else if statusDeployRequired && len(deployNodeUUIDs) > 0 {
+		action := "add"
+		if strings.EqualFold(updatedRecord.Status, "DISABLED") ||
+			strings.EqualFold(updatedRecord.Status, "EXPIRED") ||
+			strings.EqualFold(updatedRecord.Status, "LIMITED") {
+			action = "disable"
+		}
+		monitor.RequestSyncUser(buildUserSyncItem(action, updatedRecord, nil), deployNodeUUIDs...)
 	}
 	emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserModified, updatedRecord, nil)
 	if statusChanged := userStatusChangedNotification(record.Status, updatedRecord.Status); statusChanged != "" {
@@ -186,7 +217,7 @@ func (s *UserService) DeleteUser(ctx context.Context, userUUID string) error {
 	}
 
 	if len(internalSquadNodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, internalSquadNodeUUIDs...)
+		monitor.RequestSyncUser(buildUserSyncItem("delete", record, nil), internalSquadNodeUUIDs...)
 	}
 	if recordErr == nil {
 		emitUserNotification(ctx, s.repo, s.cfg, notifications.EventUserDeleted, record, nil)
@@ -206,7 +237,11 @@ func (s *UserService) BulkDeleteUsers(ctx context.Context, targets []string) err
 	}
 
 	if len(internalSquadNodeUUIDs) > 0 {
-		monitor.RequestNodeDeploy(true, internalSquadNodeUUIDs...)
+		syncItems := make([]monitor.UserSyncItem, 0, len(notificationRecords))
+		for _, rec := range notificationRecords {
+			syncItems = append(syncItems, buildUserSyncItem("delete", rec, nil))
+		}
+		monitor.RequestSyncUsers(syncItems, internalSquadNodeUUIDs...)
 	}
 	emitUsersNotificationFromRecords(ctx, s.repo, s.cfg, notifications.EventUserDeleted, targets, notificationRecords)
 	return nil

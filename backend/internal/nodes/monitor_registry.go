@@ -56,6 +56,26 @@ func RequestNodeDeployWithForce(restart bool, forceRestart bool, nodeUUIDs ...st
 	}
 }
 
+// RequestSyncUser sends a fast incremental user sync to target connected nodes.
+func RequestSyncUser(user UserSyncItem, nodeUUIDs ...string) {
+	globalMonitorMu.RLock()
+	nm := globalMonitor
+	globalMonitorMu.RUnlock()
+	if nm != nil {
+		nm.RequestSyncUser(user, nodeUUIDs...)
+	}
+}
+
+// RequestSyncUsers sends a batch of user sync items to target connected nodes.
+func RequestSyncUsers(users []UserSyncItem, nodeUUIDs ...string) {
+	globalMonitorMu.RLock()
+	nm := globalMonitor
+	globalMonitorMu.RUnlock()
+	if nm != nil {
+		nm.RequestSyncUsers(users, nodeUUIDs...)
+	}
+}
+
 // RequestNodePluginExecutor sends a node-plugin runtime command to connected nodes.
 func RequestNodePluginExecutor(command json.RawMessage, nodeUUIDs ...string) error {
 	globalMonitorMu.RLock()

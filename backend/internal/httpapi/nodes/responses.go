@@ -117,23 +117,24 @@ func buildNodeSystemFromCache(system *nodehotcache.NodeSystem) *nodeSystemRespon
 }
 
 func buildNodeSystem(infoRaw []byte, statsRaw []byte) *nodeSystemResponse {
-	if len(infoRaw) == 0 || len(statsRaw) == 0 {
+	if len(infoRaw) == 0 && len(statsRaw) == 0 {
 		return nil
 	}
 
 	var info nodeSystemInfoResponse
-	if err := json.Unmarshal(infoRaw, &info); err != nil {
-		return nil
-	}
-	var stats nodeSystemStatsResponse
-	if err := json.Unmarshal(statsRaw, &stats); err != nil {
-		return nil
-	}
-	if stats.LoadAvg == nil {
-		stats.LoadAvg = []float64{0, 0, 0}
+	if len(infoRaw) > 0 {
+		_ = json.Unmarshal(infoRaw, &info)
 	}
 	if info.NetworkInterfaces == nil {
 		info.NetworkInterfaces = []string{}
+	}
+
+	var stats nodeSystemStatsResponse
+	if len(statsRaw) > 0 {
+		_ = json.Unmarshal(statsRaw, &stats)
+	}
+	if stats.LoadAvg == nil {
+		stats.LoadAvg = []float64{0, 0, 0}
 	}
 
 	return &nodeSystemResponse{

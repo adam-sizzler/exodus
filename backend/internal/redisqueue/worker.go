@@ -183,15 +183,21 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 		_ = w.client.Del(delCtx, processingKey).Err()
 	}()
 
+	ttl := 15 * time.Minute
+	if w.usageTTL > ttl {
+		ttl = w.usageTTL
+	}
+
 	pipe := w.client.Pipeline()
 	pipe.RenameNX(ctx, redisKey, processingKey)
+	pipe.Expire(ctx, processingKey, ttl)
 	pipe.HGetAll(ctx, processingKey)
 	cmds, err := pipe.Exec(ctx)
 
 	var data map[string]string
-	if err == nil && len(cmds) == 2 {
+	if err == nil && len(cmds) == 3 {
 		if boolCmd, ok := cmds[0].(*redis.BoolCmd); ok && boolCmd.Val() {
-			if mapCmd, ok := cmds[1].(*redis.MapStringStringCmd); ok {
+			if mapCmd, ok := cmds[2].(*redis.MapStringStringCmd); ok {
 				data = mapCmd.Val()
 			}
 		}
@@ -251,60 +257,45 @@ func (w *Worker) handleRecordUserUsage(ctx context.Context, redisKey string) err
 	return nil
 }
 
+const nodeUserUsageHistoryUpsertQuery = `
+	INSERT INTO nodes_user_usage_history (
+		node_id,
+		user_id,
+		total_bytes,
+		created_at,
+		updated_at
+	)
+	SELECT
+		$1::bigint,
+		v.user_id,
+		v.total_bytes,
+		CURRENT_DATE,
+		now()
+	FROM (
+		SELECT unnest($2::bigint[]) AS user_id, unnest($3::bigint[]) AS total_bytes
+	) AS v
+	WHERE EXISTS (SELECT 1 FROM nodes WHERE id = $1::bigint)
+	  AND EXISTS (SELECT 1 FROM users WHERE id = v.user_id)
+	ON CONFLICT ON CONSTRAINT nodes_user_usage_history_pkey
+	DO UPDATE SET
+		total_bytes = nodes_user_usage_history.total_bytes + EXCLUDED.total_bytes,
+		updated_at = EXCLUDED.updated_at
+`
+
 func bulkUpsertNodeUserUsageHistory(ctx context.Context, dbConn db.DBTX, nodeID int64, entries []streamexport.UserUsageEntry) error {
 	if nodeID <= 0 || len(entries) == 0 {
 		return nil
 	}
 
-	var query strings.Builder
-	query.Grow(len(entries)*45 + 350)
-	args := make([]any, 0, len(entries)*3)
-	query.WriteString(`
-		INSERT INTO nodes_user_usage_history (
-			node_id,
-			user_id,
-			total_bytes,
-			created_at,
-			updated_at
-		)
-		SELECT
-			v.node_id,
-			v.user_id,
-			v.total_bytes,
-			CURRENT_DATE,
-			now()
-		FROM (VALUES `)
-
-	idx := 1
+	userIDs := make([]int64, len(entries))
+	totalBytes := make([]int64, len(entries))
 	for i, entry := range entries {
-		if i > 0 {
-			query.WriteString(", ")
-		}
-		writePlaceholder3(&query, idx)
-		args = append(args, nodeID, entry.UserID, entry.TotalBytes)
-		idx += 3
+		userIDs[i] = entry.UserID
+		totalBytes[i] = entry.TotalBytes
 	}
-	query.WriteString(`) AS v(node_id, user_id, total_bytes)
-		WHERE EXISTS (SELECT 1 FROM nodes WHERE id = v.node_id)
-		  AND EXISTS (SELECT 1 FROM users WHERE id = v.user_id)
-		ON CONFLICT ON CONSTRAINT nodes_user_usage_history_pkey
-		DO UPDATE SET
-			total_bytes = nodes_user_usage_history.total_bytes + EXCLUDED.total_bytes,
-			updated_at = EXCLUDED.updated_at
-	`)
 
-	_, err := dbConn.Exec(ctx, query.String(), args...)
+	_, err := dbConn.Exec(ctx, nodeUserUsageHistoryUpsertQuery, nodeID, userIDs, totalBytes)
 	return err
-}
-
-func writePlaceholder3(b *strings.Builder, idx int) {
-	b.WriteString("($")
-	b.WriteString(strconv.Itoa(idx))
-	b.WriteString("::bigint, $")
-	b.WriteString(strconv.Itoa(idx + 1))
-	b.WriteString("::bigint, $")
-	b.WriteString(strconv.Itoa(idx + 2))
-	b.WriteString("::bigint)")
 }
 
 func nodeUserUsageRedisKey(nodeID int64) string {

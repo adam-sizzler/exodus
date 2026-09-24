@@ -187,7 +187,7 @@ var defaultConfig = BackendConfig{
 	},
 	Notifications: NotificationsConfig{},
 	Scheduler: SchedulerConfig{
-		ServiceCleanUsageHistory:                 false,
+		ServiceCleanUsageHistory:                 true,
 		NotificationsEnabled:                     false,
 		BandwidthUsageNotificationsEnabled:       false,
 		BandwidthUsageNotificationsThreshold:     nil,
@@ -473,7 +473,7 @@ func applyEnvOverrides(cfg *BackendConfig) {
 		}
 	}
 
-	if value := envFirst("SERVICE_CLEAN_USAGE_HISTORY"); value != "" {
+	if value := envFirst("SERVICE_CLEAN_USAGE_HISTORY", "EXODUS_SERVICE_CLEAN_USAGE_HISTORY", "SCHEDULER_SERVICE_CLEAN_USAGE_HISTORY", "EXODUS_SCHEDULER_SERVICE_CLEAN_USAGE_HISTORY"); value != "" {
 		cfg.Scheduler.ServiceCleanUsageHistory = parseBoolEnv(value)
 	}
 	cfg.Notifications.TelegramEnabled = parseBoolEnv(envFirst("IS_TELEGRAM_NOTIFICATIONS_ENABLED"))

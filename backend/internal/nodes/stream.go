@@ -213,7 +213,7 @@ func (nm *NodeMonitor) updateNodeRuntimeFromStats(state *nodeState, stats []*pro
 		cachedSingboxVer string
 		cachedNodeVer    string
 	)
-	if needStaticInfo {
+	if needStaticInfo || len(systemInfo) > 0 {
 		cachedSystemInfo = systemInfo
 		cachedSingboxVer = singboxVersion
 		cachedNodeVer = nodeVersion

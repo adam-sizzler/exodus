@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"exodus-node/api"
 	"exodus-node/config"
@@ -19,6 +21,11 @@ type NodeServer struct {
 	Cfg        *config.NodeConfig
 	apiService *api.Service
 	asnService *AsnLmdbService
+
+	configLock  sync.Mutex
+	reloadMu    sync.Mutex
+	reloadTimer *time.Timer
+	reloadFirst time.Time
 }
 
 // NewNodeServer creates a new NodeServer instance.

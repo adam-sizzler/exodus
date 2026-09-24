@@ -30,21 +30,94 @@ func (s *NodeServer) ListUsers(ctx context.Context, req *proto.ListUsersRequest)
 }
 
 func (s *NodeServer) AddUsers(ctx context.Context, req *proto.AddUsersRequest) (*proto.OperationResponse, error) {
-	_ = ctx
-	_ = req
-	return nil, status.Error(codes.Unimplemented, statsOnlyMessage)
+	if req == nil {
+		return &proto.OperationResponse{
+			Status: &rpcstatus.Status{Code: int32(codes.InvalidArgument), Message: "request is nil"},
+		}, nil
+	}
+	items := make([]SyncUserItem, 0, len(req.Usernames))
+	for _, username := range req.Usernames {
+		tag := req.InboundTag
+		var tags []string
+		if tag != "" {
+			tags = []string{tag}
+		}
+		items = append(items, SyncUserItem{
+			Action:      "add",
+			Identifier:  username,
+			Username:    username,
+			InboundTags: tags,
+		})
+	}
+	payloadBytes, _ := json.Marshal(SyncUsersTaskPayload{Users: items})
+	st, err := s.HandleSyncUsers(ctx, "add_users", payloadBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &proto.OperationResponse{
+		Status:    st,
+		Usernames: req.Usernames,
+	}, nil
 }
 
 func (s *NodeServer) DeleteUsers(ctx context.Context, req *proto.DeleteUsersRequest) (*proto.OperationResponse, error) {
-	_ = ctx
-	_ = req
-	return nil, status.Error(codes.Unimplemented, statsOnlyMessage)
+	if req == nil {
+		return &proto.OperationResponse{
+			Status: &rpcstatus.Status{Code: int32(codes.InvalidArgument), Message: "request is nil"},
+		}, nil
+	}
+	items := make([]SyncUserItem, 0, len(req.Usernames))
+	for _, username := range req.Usernames {
+		tag := req.InboundTag
+		var tags []string
+		if tag != "" {
+			tags = []string{tag}
+		}
+		items = append(items, SyncUserItem{
+			Action:      "delete",
+			Identifier:  username,
+			Username:    username,
+			InboundTags: tags,
+		})
+	}
+	payloadBytes, _ := json.Marshal(SyncUsersTaskPayload{Users: items})
+	st, err := s.HandleSyncUsers(ctx, "delete_users", payloadBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &proto.OperationResponse{
+		Status:    st,
+		Usernames: req.Usernames,
+	}, nil
 }
 
 func (s *NodeServer) SetUserEnabled(ctx context.Context, req *proto.SetUserEnabledRequest) (*proto.OperationResponse, error) {
-	_ = ctx
-	_ = req
-	return nil, status.Error(codes.Unimplemented, statsOnlyMessage)
+	if req == nil {
+		return &proto.OperationResponse{
+			Status: &rpcstatus.Status{Code: int32(codes.InvalidArgument), Message: "request is nil"},
+		}, nil
+	}
+	action := "add"
+	if !req.Enabled {
+		action = "disable"
+	}
+	items := make([]SyncUserItem, 0, len(req.Usernames))
+	for _, username := range req.Usernames {
+		items = append(items, SyncUserItem{
+			Action:     action,
+			Identifier: username,
+			Username:   username,
+		})
+	}
+	payloadBytes, _ := json.Marshal(SyncUsersTaskPayload{Users: items})
+	st, err := s.HandleSyncUsers(ctx, action, payloadBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &proto.OperationResponse{
+		Status:    st,
+		Usernames: req.Usernames,
+	}, nil
 }
 
 func (s *NodeServer) SubmitTask(ctx context.Context, task *proto.NodeTask) (*rpcstatus.Status, error) {
@@ -139,6 +212,9 @@ func (s *NodeServer) SubmitTask(ctx context.Context, task *proto.NodeTask) (*rpc
 			Code:    int32(codes.OK),
 			Message: outputJSON,
 		}, nil
+
+	case "sync_users", "add_users", "delete_users":
+		return s.HandleSyncUsers(ctx, task.Operation, taskPayload)
 
 	default:
 		s.Cfg.LoggerFor("NodeService").Warn("Unsupported task operation", "task_id", task.TaskId, "operation", task.Operation)

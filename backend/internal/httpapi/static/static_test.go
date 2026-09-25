@@ -138,3 +138,56 @@ func TestServeStaticCustomBasePathUnknownRouteFallsBackToSPA(t *testing.T) {
 		t.Fatalf("expected base href in SPA fallback, got:\n%s", body)
 	}
 }
+
+func TestServeStaticCacheControlHeaders(t *testing.T) {
+	dir := t.TempDir()
+	indexContent := "<html><head></head><body>index</body></html>"
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(indexContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	assetsDir := filepath.Join(dir, "assets")
+	if err := os.MkdirAll(assetsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hashedJS := filepath.Join(assetsDir, "main-Bx912aBc.js")
+	if err := os.WriteFile(hashedJS, []byte("console.log('hi');"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plainFile := filepath.Join(dir, "site.webmanifest")
+	if err := os.WriteFile(plainFile, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Hashed asset gets immutable cache
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/assets/main-Bx912aBc.js", nil)
+	ServeStatic(rec, req, dir, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Fatalf("expected immutable cache control header, got %q", cc)
+	}
+
+	// 2. Unhashed file gets no-cache
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/site.webmanifest", nil)
+	ServeStatic(rec, req, dir, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("expected no-cache header, got %q", cc)
+	}
+
+	// 3. index.html gets no-cache
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	ServeStatic(rec, req, dir, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("expected no-cache header for index, got %q", cc)
+	}
+}

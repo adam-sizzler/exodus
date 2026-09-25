@@ -7,7 +7,18 @@ import (
 	"os"
 	urlpath "path"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
+	"time"
+)
+
+var (
+	indexCacheMu   sync.RWMutex
+	cachedIndexKey string
+	cachedIndexMod time.Time
+	cachedIndexVal []byte
+	hashedAssetRe  = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[a-z0-9]+$`)
 )
 
 var panelStaticPathPrefixes = []string{
@@ -31,18 +42,53 @@ func ServeAppConfigJS(w http.ResponseWriter, basePath string) {
 	)
 }
 
-func ServePanelIndex(w http.ResponseWriter, indexPath string, basePathWithSlash, basePath string) {
+func getOrRenderPanelIndex(indexPath string, basePathWithSlash, basePath string) ([]byte, error) {
+	info, err := os.Stat(indexPath)
+	if err != nil {
+		return nil, err
+	}
+
+	cacheKey := indexPath + "|" + basePathWithSlash
+	indexCacheMu.RLock()
+	if cachedIndexKey == cacheKey && cachedIndexMod.Equal(info.ModTime()) && len(cachedIndexVal) > 0 {
+		val := cachedIndexVal
+		indexCacheMu.RUnlock()
+		return val, nil
+	}
+	indexCacheMu.RUnlock()
+
+	indexCacheMu.Lock()
+	defer indexCacheMu.Unlock()
+	if cachedIndexKey == cacheKey && cachedIndexMod.Equal(info.ModTime()) && len(cachedIndexVal) > 0 {
+		return cachedIndexVal, nil
+	}
+
 	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rendered := RenderPanelIndex(string(indexBytes), basePathWithSlash, basePath)
+	renderedBytes := []byte(rendered)
+
+	cachedIndexKey = cacheKey
+	cachedIndexMod = info.ModTime()
+	cachedIndexVal = renderedBytes
+
+	return renderedBytes, nil
+}
+
+func ServePanelIndex(w http.ResponseWriter, indexPath string, basePathWithSlash, basePath string) {
+	pageBytes, err := getOrRenderPanelIndex(indexPath, basePathWithSlash, basePath)
 	if err != nil {
 		http.Error(w, "panel index not found", http.StatusNotFound)
 		return
 	}
 
-	page := RenderPanelIndex(string(indexBytes), basePathWithSlash, basePath)
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(page))
+	_, _ = w.Write(pageBytes)
 }
 
 func RenderPanelIndex(page string, basePathWithSlash, basePath string) string {
@@ -133,6 +179,11 @@ func ServeStatic(w http.ResponseWriter, r *http.Request, staticDir, basePath str
 
 	info, err := os.Stat(targetClean)
 	if err == nil && !info.IsDir() {
+		if isHashedAsset(relPath) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		http.ServeFile(w, r, targetClean)
 		return
 	}
@@ -147,6 +198,13 @@ func ServeStatic(w http.ResponseWriter, r *http.Request, staticDir, basePath str
 	}
 
 	ServePanelIndex(w, indexPath, basePathWithSlash, basePath)
+}
+
+func isHashedAsset(relPath string) bool {
+	if strings.HasPrefix(relPath, "assets/") || strings.HasPrefix(relPath, "splash_screens/") {
+		return true
+	}
+	return hashedAssetRe.MatchString(relPath)
 }
 
 func isPanelStaticAssetPath(relPath string) bool {

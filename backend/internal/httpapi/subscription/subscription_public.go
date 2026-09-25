@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"hash/crc32"
 	"maps"
 	"net/http"
 	"strings"
@@ -203,6 +205,14 @@ func handlePublicOutlineSubscription(w http.ResponseWriter, r *http.Request, db,
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
+
+	etag := fmt.Sprintf(`W/"%08x-%x"`, crc32.ChecksumIEEE(content), len(content))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && (match == etag || match == "*") {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	_, _ = w.Write(content)
 }
 
@@ -269,6 +279,14 @@ func handlePublicSubscription(w http.ResponseWriter, r *http.Request, db, backgr
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
+
+	etag := fmt.Sprintf(`W/"%08x-%x"`, crc32.ChecksumIEEE(content), len(content))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && (match == etag || match == "*") {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	_, _ = w.Write(content)
 }
 

@@ -46,6 +46,12 @@ var (
 	subTemplateTypeCache = make(map[string]cachedTemplate)
 	subTemplateNameCache = make(map[string]cachedNamedTemplate)
 	subTemplateUUIDCache = make(map[string]cachedNamedTemplate)
+
+	subUserLock  sync.RWMutex
+	subUserCache = make(map[string]cachedUserRecord)
+
+	subHostsLock  sync.RWMutex
+	subHostsCache = make(map[string]cachedHostsRecord)
 )
 
 type cachedSquadOverride struct {
@@ -64,12 +70,46 @@ type cachedNamedTemplate struct {
 	expiresAt    time.Time
 }
 
+type cachedUserRecord struct {
+	user      SubscriptionUser
+	expiresAt time.Time
+}
+
+type cachedHostsRecord struct {
+	hosts     []SubscriptionHost
+	expiresAt time.Time
+}
+
 const (
 	subSettingsCacheTTL    = 1 * time.Hour
 	squadOverridesCacheTTL = 1 * time.Hour
 	subNodeBaseTTL         = 30 * time.Second
 	subTemplateCacheTTL    = 5 * time.Minute
+	subUserCacheTTL        = 5 * time.Second
+	subHostsCacheTTL       = 5 * time.Second
 )
+
+// InvalidateSubscriptionUserCache clears user entries from subscription cache.
+func InvalidateSubscriptionUserCache(userUUID string) {
+	subUserLock.Lock()
+	if userUUID == "" {
+		subUserCache = make(map[string]cachedUserRecord)
+	} else {
+		for k, v := range subUserCache {
+			if v.user.UUID == userUUID || v.user.ShortUUID == userUUID {
+				delete(subUserCache, k)
+			}
+		}
+	}
+	subUserLock.Unlock()
+}
+
+// InvalidateSubscriptionHostsCache clears the hosts cache.
+func InvalidateSubscriptionHostsCache() {
+	subHostsLock.Lock()
+	subHostsCache = make(map[string]cachedHostsRecord)
+	subHostsLock.Unlock()
+}
 
 func init() {
 	subscriptionsettings.OnSettingsUpdated = InvalidateSubscriptionSettingsCache
@@ -316,6 +356,14 @@ func stringVal(p *string) string {
 func getSubscriptionUserByField(ctx context.Context, dbConn *pgxpool.Pool, field string, value any) (SubscriptionUser, error) {
 	var user SubscriptionUser
 
+	cacheKey := fmt.Sprintf("%s:%v", field, value)
+	subUserLock.RLock()
+	if item, ok := subUserCache[cacheKey]; ok && time.Now().Before(item.expiresAt) {
+		subUserLock.RUnlock()
+		return item.user, nil
+	}
+	subUserLock.RUnlock()
+
 	var where string
 	switch field {
 	case "id":
@@ -416,6 +464,21 @@ func getSubscriptionUserByField(ctx context.Context, dbConn *pgxpool.Pool, field
 	user.Hysteria2Password = stringVal(hysteria2Password)
 	user.AnytlsPassword = stringVal(anytlsPassword)
 
+	subUserLock.Lock()
+	if len(subUserCache) > 10000 {
+		subUserCache = make(map[string]cachedUserRecord)
+	}
+	now := time.Now()
+	exp := now.Add(subUserCacheTTL)
+	subUserCache[cacheKey] = cachedUserRecord{user: user, expiresAt: exp}
+	if user.ShortUUID != "" {
+		subUserCache["short_uuid:"+user.ShortUUID] = cachedUserRecord{user: user, expiresAt: exp}
+	}
+	if user.UUID != "" {
+		subUserCache["uuid:"+user.UUID] = cachedUserRecord{user: user, expiresAt: exp}
+	}
+	subUserLock.Unlock()
+
 	return user, nil
 }
 
@@ -424,6 +487,16 @@ func getHostsForUser(ctx context.Context, dbConn *pgxpool.Pool, user Subscriptio
 }
 
 func getHostsForUserWithOptions(ctx context.Context, dbConn *pgxpool.Pool, user SubscriptionUser, withDisabled, withHidden bool) ([]SubscriptionHost, error) {
+	hostsCacheKey := fmt.Sprintf("%d:%t:%t", user.ID, withDisabled, withHidden)
+	subHostsLock.RLock()
+	if item, ok := subHostsCache[hostsCacheKey]; ok && time.Now().Before(item.expiresAt) {
+		res := make([]SubscriptionHost, len(item.hosts))
+		copy(res, item.hosts)
+		subHostsLock.RUnlock()
+		return res, nil
+	}
+	subHostsLock.RUnlock()
+
 	whereClause := `ism.user_id = $1 AND (
 		(COALESCE(h.internal_squads_mode, 'EXCLUDE') = 'ALLOW_ONLY' AND ishl.host_uuid IS NOT NULL)
 		OR
@@ -474,7 +547,19 @@ func getHostsForUserWithOptions(ctx context.Context, dbConn *pgxpool.Pool, user 
 		return nil, err
 	}
 
-	return hosts, nil
+	subHostsLock.Lock()
+	if len(subHostsCache) > 5000 {
+		subHostsCache = make(map[string]cachedHostsRecord)
+	}
+	subHostsCache[hostsCacheKey] = cachedHostsRecord{
+		hosts:     hosts,
+		expiresAt: time.Now().Add(subHostsCacheTTL),
+	}
+	subHostsLock.Unlock()
+
+	res := make([]SubscriptionHost, len(hosts))
+	copy(res, hosts)
+	return res, nil
 }
 
 func scanSubscriptionHost(scanner shared.RowScanner) (SubscriptionHost, error) {

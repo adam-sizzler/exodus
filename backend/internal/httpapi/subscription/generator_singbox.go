@@ -53,6 +53,32 @@ func cloneOrderedMapValue(val interface{}) interface{} {
 	}
 }
 
+func cloneSingboxBaseConfig(src *orderedmap.OrderedMap) *orderedmap.OrderedMap {
+	if src == nil {
+		return orderedmap.New()
+	}
+	dst := orderedmap.New()
+	for _, key := range src.Keys() {
+		val, _ := src.Get(key)
+		if key == "outbounds" {
+			if items, ok := val.([]interface{}); ok {
+				cp := make([]interface{}, len(items))
+				for i, item := range items {
+					if om, ok := item.(*orderedmap.OrderedMap); ok {
+						cp[i] = cloneOrderedMap(om)
+					} else {
+						cp[i] = item
+					}
+				}
+				dst.Set(key, cp)
+				continue
+			}
+		}
+		dst.Set(key, val)
+	}
+	return dst
+}
+
 func getOrParseSingboxTemplate(templateJSON []byte) *orderedmap.OrderedMap {
 	if len(templateJSON) == 0 {
 		return orderedmap.New()
@@ -60,14 +86,14 @@ func getOrParseSingboxTemplate(templateJSON []byte) *orderedmap.OrderedMap {
 	key := string(templateJSON)
 	if val, ok := singboxTemplateCache.Load(key); ok {
 		cached := val.(*orderedmap.OrderedMap)
-		return cloneOrderedMap(cached)
+		return cloneSingboxBaseConfig(cached)
 	}
 	baseConfig := orderedmap.New()
 	if err := baseConfig.UnmarshalJSON(templateJSON); err != nil {
 		baseConfig = orderedmap.New()
 	}
-	singboxTemplateCache.Store(key, cloneOrderedMap(baseConfig))
-	return baseConfig
+	singboxTemplateCache.Store(key, baseConfig)
+	return cloneSingboxBaseConfig(baseConfig)
 }
 
 func generateSingboxConfig(templateJSON []byte, hosts []SubscriptionHost, user SubscriptionUser) (string, error) {

@@ -3,7 +3,9 @@ package jobqueue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -129,6 +131,9 @@ func EnqueueUpdateUserSubscription(_ context.Context, _ UpdateUserSubscriptionPa
 }
 
 func EnqueueAddSubscriptionRequestRecord(ctx context.Context, payload AddSubscriptionRequestRecordPayload) (bool, error) {
+	if os.Getenv("SERVICE_DISABLE_SRH_RECORDS") == "true" {
+		return true, nil
+	}
 	return enqueueSubscriptionJob(ctx, jobAddSubscriptionRecord, payload, JobOptions{
 		ID:       fmt.Sprintf("%d:AR", payload.UserID),
 		DedupeID: fmt.Sprintf("%d:AR", payload.UserID),
@@ -160,6 +165,9 @@ func enqueueSubscriptionJob(ctx context.Context, jobName string, payload any, op
 		return false, err
 	}
 	err = dispatcher.processor.Enqueue(ctx, subscriptionQueueName, jobName, rawPayload, options)
+	if errors.Is(err, ErrDuplicateJob) {
+		return true, nil
+	}
 	return err == nil, err
 }
 
@@ -184,17 +192,20 @@ func addSubscriptionRequestRecord(ctx context.Context, dbConn db.DBTX, client *r
 		VALUES ($1, $2, $3, $4, $5)
 	`, payload.UserID, srrType, payload.SRRRuleName, payload.RequestIP, payload.UserAgent)
 
-	batch.Queue(`
-		DELETE FROM user_subscription_request_history
-		WHERE user_id = $1
-		  AND id NOT IN (
-			  SELECT id
-			  FROM user_subscription_request_history
-			  WHERE user_id = $2
-			  ORDER BY request_at DESC, id DESC
-			  LIMIT 24
-		  )
-	`, payload.UserID, payload.UserID)
+	// Prune history probabilistically to avoid heavy subquery lock contention on high concurrency
+	if (payload.UserID+time.Now().UnixNano())%16 == 0 {
+		batch.Queue(`
+			DELETE FROM user_subscription_request_history
+			WHERE user_id = $1
+			  AND id NOT IN (
+				  SELECT id
+				  FROM user_subscription_request_history
+				  WHERE user_id = $2
+				  ORDER BY request_at DESC, id DESC
+				  LIMIT 24
+			  )
+		`, payload.UserID, payload.UserID)
+	}
 
 	br := dbConn.SendBatch(ctx, batch)
 	var batchErr error

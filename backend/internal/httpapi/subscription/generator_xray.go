@@ -629,6 +629,11 @@ func generateXrayJSONConfigExt(
 ) (string, error) {
 	configs := make([]map[string]interface{}, 0, len(hosts))
 
+	var defaultBaseConfig map[string]interface{}
+	if len(templateJSON) > 0 {
+		_ = json.Unmarshal(templateJSON, &defaultBaseConfig)
+	}
+
 	for _, host := range hosts {
 		if host.IsHidden {
 			continue
@@ -642,15 +647,25 @@ func generateXrayJSONConfigExt(
 		}
 
 		effectiveTemplate := templateJSON
+		isCustomTemplate := false
 		if !ignoreHostTemplate && host.XrayJSONTemplateUUID != nil && customTemplateLoader != nil {
 			if customTpl, err := customTemplateLoader(*host.XrayJSONTemplateUUID); err == nil && len(customTpl) > 0 {
 				effectiveTemplate = customTpl
+				isCustomTemplate = true
 			}
 		}
 
-		hostConfig := make(map[string]interface{})
-		if len(effectiveTemplate) > 0 {
+		var hostConfig map[string]interface{}
+		if !isCustomTemplate && defaultBaseConfig != nil {
+			hostConfig = make(map[string]interface{}, len(defaultBaseConfig)+2)
+			for k, v := range defaultBaseConfig {
+				hostConfig[k] = v
+			}
+		} else if len(effectiveTemplate) > 0 {
+			hostConfig = make(map[string]interface{})
 			_ = json.Unmarshal(effectiveTemplate, &hostConfig)
+		} else {
+			hostConfig = make(map[string]interface{}, 2)
 		}
 
 		outbound := buildXrayOutbound(host, user)
@@ -662,7 +677,10 @@ func generateXrayJSONConfigExt(
 		if existing, ok := hostConfig["outbounds"].([]interface{}); ok {
 			existingOutbounds = existing
 		}
-		hostConfig["outbounds"] = append([]interface{}{outbound}, existingOutbounds...)
+		newOutbounds := make([]interface{}, 0, len(existingOutbounds)+1)
+		newOutbounds = append(newOutbounds, outbound)
+		newOutbounds = append(newOutbounds, existingOutbounds...)
+		hostConfig["outbounds"] = newOutbounds
 
 		remark := host.Remark
 		if remark == "" {

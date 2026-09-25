@@ -146,15 +146,8 @@ func (s *RenderService) RenderUserSubscription(
 		return nil, "", nil, ErrUnavailableForLegalReasons
 	}
 
-	// 1. Respond with remarks (SRR respondWithRemarks)
+	// 1. Respond with remarks (SRR respondWithRemarks - Step 4 in Remnawave)
 	var earlyExitRemarks []string
-	// respondedWithRuleRemarks tracks whether the SRR rule itself asked for
-	// remarks (as opposed to disabled/expired/limited-status remarks below).
-	// Matches upstream: srrContext.respondWithRemarks triggers an
-	// unconditional early return in subscription.service.ts, before the
-	// HWID check ever runs — regardless of what isShowCustomRemarks ends up
-	// substituting it with. That early-return-before-HWID behavior must be
-	// preserved here too, not just the remarks-selection logic.
 	respondedWithRuleRemarks := matchedRuleMods != nil && len(matchedRuleMods.RespondWithRemarks) > 0
 	if respondedWithRuleRemarks {
 		if settings.Raw.IsShowCustomRemarks {
@@ -178,11 +171,65 @@ func (s *RenderService) RenderUserSubscription(
 		return nil, "", nil, ErrUserDisabled
 	}
 
-	// 2. Fetch hosts and apply excludeHostsByTags
+	subscriptionURL := resolveSubscriptionURL(ctx, s.db, user, settings)
+
+	// 2. HWID check (Step 5 in Remnawave - checked BEFORE querying database hosts)
+	var hwidExtraHeaders map[string]string
+	hwidSoftLimitHit := false
+	disableHwidCheck := matchedRuleMods != nil && matchedRuleMods.DisableHwidCheck
+
+	if !respondedWithRuleRemarks {
+		if settings.HwidSettings.Enabled && !disableHwidCheck {
+			result, err := checkHwidDeviceLimit(ctx, s.db, user, hwid, settings.HwidSettings)
+			if err != nil {
+				return nil, "", nil, ErrHwidCheckFailed
+			}
+
+			if !result.Allowed {
+				hwidSoftLimitHit = true
+				hwidExtraHeaders = map[string]string{"x-hwid-limit": "true"}
+
+				if result.MaxDeviceReached && settings.HwidSettings.MaxDevicesAnnounce != nil &&
+					*settings.HwidSettings.MaxDevicesAnnounce != "" {
+					hwidExtraHeaders["announce"] = formatTemplateValue(
+						"exEncodeBase64:"+*settings.HwidSettings.MaxDevicesAnnounce,
+						user, settings, subscriptionURL,
+					)
+				}
+				if result.HwidNotSupported {
+					hwidExtraHeaders["x-hwid-not-supported"] = "true"
+				}
+				if result.MaxDeviceReached {
+					hwidExtraHeaders["x-hwid-max-devices-reached"] = "true"
+				}
+
+				if settings.Raw.IsShowCustomRemarks {
+					if result.MaxDeviceReached && len(settings.CustomRemarks.HWIDMaxDevicesExceeded) > 0 {
+						earlyExitRemarks = settings.CustomRemarks.HWIDMaxDevicesExceeded
+					} else if result.HwidNotSupported && len(settings.CustomRemarks.HWIDNotSupported) > 0 {
+						earlyExitRemarks = settings.CustomRemarks.HWIDNotSupported
+					}
+				}
+			}
+		} else if hwid != nil {
+			_ = enqueueOrUpsertHwidUserDevice(ctx, s.db, user.ID, *hwid)
+		}
+	}
+
+	// 3. Auto-upgrade to XRAY_JSON if serveJsonAtBaseSubscription enabled (Step 6 in Remnawave)
+	ignoreServeJSON := matchedRuleMods != nil && matchedRuleMods.IgnoreServeJsonAtBaseSubscription
+	if reqType == defaultResponseType &&
+		settings.Raw.ServeJSONAtBaseSubscription &&
+		!ignoreServeJSON &&
+		isJSONSubscriptionFallbackSupported(userAgent) {
+		reqType = responseTypeXrayJSON
+	}
+
+	// 4. Fetch hosts from DB only if no early exit remarks (Step 7 in Remnawave)
 	var hosts []SubscriptionHost
 	if len(earlyExitRemarks) > 0 {
 		hosts = createFallbackRemarkHosts(earlyExitRemarks)
-	} else {
+	} else if !hwidSoftLimitHit {
 		withHidden := reqType == responseTypeXrayJSON || reqType == responseTypeMihomo || reqType == responseTypeStash
 		userHosts, err := getHostsForUserWithOptions(ctx, s.db, user, false, withHidden)
 		if err != nil {
@@ -222,83 +269,24 @@ func (s *RenderService) RenderUserSubscription(
 		} else {
 			hosts = userHosts
 		}
-	}
 
-	if len(settings.HostOverrides) > 0 && len(hosts) > 0 {
-		hosts = applyHostOverrides(hosts, settings.HostOverrides)
-	}
+		if len(settings.HostOverrides) > 0 && len(hosts) > 0 {
+			hosts = applyHostOverrides(hosts, settings.HostOverrides)
+		}
 
-	if settings.Raw.RandomizeHosts && len(hosts) > 0 {
-		rand.Shuffle(len(hosts), func(i, j int) {
-			hosts[i], hosts[j] = hosts[j], hosts[i]
-		})
-	}
+		if settings.Raw.RandomizeHosts && len(hosts) > 0 {
+			rand.Shuffle(len(hosts), func(i, j int) {
+				hosts[i], hosts[j] = hosts[j], hosts[i]
+			})
+		}
 
-	if len(hosts) > 0 {
-		hosts = applyShuffle(hosts)
-	}
-
-	subscriptionURL := resolveSubscriptionURL(ctx, s.db, user, settings)
-
-	// 3. HWID check (supports disableHwidCheck)
-	var hwidExtraHeaders map[string]string
-	hwidSoftLimitHit := false
-	disableHwidCheck := matchedRuleMods != nil && matchedRuleMods.DisableHwidCheck
-
-	// respondedWithRuleRemarks already means "return before this point" in
-	// upstream, so the whole HWID check (and the device-recording fallback
-	// below) is skipped for it too — not just the host/tag/override steps
-	// above.
-	if !respondedWithRuleRemarks {
-		if settings.HwidSettings.Enabled && !disableHwidCheck {
-			result, err := checkHwidDeviceLimit(ctx, s.db, user, hwid, settings.HwidSettings)
-			if err != nil {
-				return nil, "", nil, ErrHwidCheckFailed
-			}
-
-			if !result.Allowed {
-				hwidSoftLimitHit = true
-				hwidExtraHeaders = map[string]string{"x-hwid-limit": "true"}
-
-				if result.MaxDeviceReached && settings.HwidSettings.MaxDevicesAnnounce != nil &&
-					*settings.HwidSettings.MaxDevicesAnnounce != "" {
-					hwidExtraHeaders["announce"] = formatTemplateValue(
-						"exEncodeBase64:"+*settings.HwidSettings.MaxDevicesAnnounce,
-						user, settings, subscriptionURL,
-					)
-				}
-				if result.HwidNotSupported {
-					hwidExtraHeaders["x-hwid-not-supported"] = "true"
-				}
-				if result.MaxDeviceReached {
-					hwidExtraHeaders["x-hwid-max-devices-reached"] = "true"
-				}
-
-				hosts = nil
-				if settings.Raw.IsShowCustomRemarks {
-					if result.MaxDeviceReached && len(settings.CustomRemarks.HWIDMaxDevicesExceeded) > 0 {
-						hosts = createFallbackRemarkHosts(settings.CustomRemarks.HWIDMaxDevicesExceeded)
-					} else if result.HwidNotSupported && len(settings.CustomRemarks.HWIDNotSupported) > 0 {
-						hosts = createFallbackRemarkHosts(settings.CustomRemarks.HWIDNotSupported)
-					}
-				}
-			}
-		} else if hwid != nil {
-			_ = enqueueOrUpsertHwidUserDevice(ctx, s.db, user.ID, *hwid)
+		if len(hosts) > 0 {
+			hosts = applyShuffle(hosts)
 		}
 	}
 
 	if len(hosts) > 0 {
 		resolveHostRemarks(hosts, user, settings, subscriptionURL)
-	}
-
-	// 4. Auto-upgrade to XRAY_JSON if serveJsonAtBaseSubscription enabled
-	ignoreServeJSON := matchedRuleMods != nil && matchedRuleMods.IgnoreServeJsonAtBaseSubscription
-	if reqType == defaultResponseType &&
-		settings.Raw.ServeJSONAtBaseSubscription &&
-		!ignoreServeJSON &&
-		isJSONSubscriptionFallbackSupported(userAgent) {
-		reqType = responseTypeXrayJSON
 	}
 
 	updateSubscriptionRequest(ctx, s.backgroundDB, user.UUID, user.ID, userAgent, requestIP, reqType, matchedRuleName)

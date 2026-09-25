@@ -30,13 +30,17 @@ type SyncUserItem struct {
 	TrojanPassword    string   `json:"trojan_password,omitempty"`
 	SSPassword        string   `json:"ss_password,omitempty"`
 	Hysteria2Password string   `json:"hysteria2_password,omitempty"`
+	AnytlsPassword    string   `json:"anytls_password,omitempty"`
+	NaivePassword     string   `json:"naive_password,omitempty"`
 	Flow              string   `json:"flow,omitempty"`
 	InboundTags       []string `json:"inbound_tags,omitempty"`
 }
 
 // SyncUsersTaskPayload wraps multiple user synchronization items.
 type SyncUsersTaskPayload struct {
-	Users []SyncUserItem `json:"users"`
+	Users              []SyncUserItem `json:"users"`
+	HaproxyEnabled     *bool          `json:"haproxy_enabled,omitempty"`
+	HaproxyInboundTags []string       `json:"haproxy_inbound_tags,omitempty"`
 }
 
 // HandleSyncUsers handles dynamic user addition, updating, or removal directly in Sing-box config.
@@ -112,8 +116,10 @@ func (s *NodeServer) HandleSyncUsers(ctx context.Context, operation string, payl
 		}, nil
 	}
 
-	modified := patchSingboxConfigUsers(cfg, payload.Users)
-	if modified {
+	inboundMap := extractInboundTypes(cfg)
+
+	modifiedSB := patchSingboxConfigUsers(cfg, payload.Users)
+	if modifiedSB {
 		data, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
 			log.Error("Failed to marshal patched sing-box config", "error", err)
@@ -146,14 +152,37 @@ func (s *NodeServer) HandleSyncUsers(ctx context.Context, operation string, payl
 		}
 
 		log.Info("Patched sing-box config on disk with user changes", "users_count", len(payload.Users))
-		s.scheduleDebouncedCoreReload()
 	} else {
-		log.Debug("User changes already reflected in config, reload not scheduled")
+		log.Debug("User changes already reflected in sing-box config")
+	}
+
+	haEnabled, haTags := s.getHaproxyPluginState()
+	if payload.HaproxyEnabled != nil {
+		haEnabled = *payload.HaproxyEnabled
+		if len(payload.HaproxyInboundTags) > 0 {
+			haTags = payload.HaproxyInboundTags
+		}
+		s.setHaproxyPluginState(haEnabled, haTags)
+	}
+
+	modifiedHA, haErr := patchHaproxyUsersCSV(payload.Users, inboundMap, haEnabled, haTags)
+	if haErr != nil {
+		log.Warn("Failed to patch haproxy users.csv", "error", haErr)
+	} else if modifiedHA {
+		log.Info("Patched haproxy users.csv on disk with user changes", "users_count", len(payload.Users))
+	} else {
+		log.Debug("User changes already reflected in haproxy users.csv")
+	}
+
+	if modifiedSB || modifiedHA {
+		s.scheduleDebouncedReload(modifiedSB, modifiedHA)
+	} else {
+		log.Debug("User changes already reflected in config and haproxy, reload not scheduled")
 	}
 
 	return &rpcstatus.Status{
 		Code:    int32(codes.OK),
-		Message: fmt.Sprintf("success: synced %d user(s), debounced reload scheduled", len(payload.Users)),
+		Message: fmt.Sprintf("success: synced %d user(s), debounced reload scheduled (sb=%t, ha=%t)", len(payload.Users), modifiedSB, modifiedHA),
 	}, nil
 }
 
@@ -372,13 +401,21 @@ func buildUserObject(inboundType string, item SyncUserItem) any {
 		return m
 
 	case "naive":
+		pwd := item.NaivePassword
+		if pwd == "" {
+			pwd = item.TrojanPassword
+		}
 		m.Set("username", identifier)
-		m.Set("password", item.TrojanPassword)
+		m.Set("password", pwd)
 		return m
 
-	case "shadowtls":
+	case "anytls":
+		pwd := item.AnytlsPassword
+		if pwd == "" {
+			pwd = item.TrojanPassword
+		}
 		m.Set("name", identifier)
-		m.Set("password", item.TrojanPassword)
+		m.Set("password", pwd)
 		return m
 
 	default:
@@ -541,18 +578,48 @@ func setField(v any, key string, val any) any {
 	}
 }
 
-func (s *NodeServer) scheduleDebouncedCoreReload() {
+func extractInboundTypes(cfg *orderedmap.OrderedMap) map[string]string {
+	m := make(map[string]string)
+	if cfg == nil {
+		return m
+	}
+	raw, ok := cfg.Get("inbounds")
+	if !ok {
+		return m
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return m
+	}
+	for _, inb := range arr {
+		tag := getFieldString(inb, "tag")
+		inbType := normalizeInboundType(inb)
+		if tag != "" && inbType != "" {
+			m[tag] = inbType
+		}
+	}
+	return m
+}
+
+func (s *NodeServer) scheduleDebouncedReload(sbChanged, haChanged bool) {
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()
+
+	if sbChanged {
+		s.sbReloadPending = true
+	}
+	if haChanged {
+		s.haReloadPending = true
+	}
 
 	log := s.Cfg.LoggerFor("SingboxService")
 
 	if s.reloadTimer == nil {
 		s.reloadFirst = time.Now()
 		s.reloadTimer = time.AfterFunc(coreReloadDebounceDelay, func() {
-			s.executeCoreReload()
+			s.executeCoordinatedReload()
 		})
-		log.Info("Scheduled Sing-box Core reload (10s quiet window)")
+		log.Info("Scheduled coordinated reload (10s quiet window)", "singbox", s.sbReloadPending, "haproxy", s.haReloadPending)
 		return
 	}
 
@@ -564,27 +631,54 @@ func (s *NodeServer) scheduleDebouncedCoreReload() {
 			}
 		}
 		s.reloadTimer.Reset(coreReloadDebounceDelay)
-		log.Debug("Reset Sing-box Core reload timer (+10s window)")
+		log.Debug("Reset coordinated reload timer (+10s window)", "singbox", s.sbReloadPending, "haproxy", s.haReloadPending)
 	} else {
-		log.Debug("Sing-box Core reload max wait (30s) reached; timer will fire without extension")
+		log.Debug("Coordinated reload max wait (30s) reached; timer will fire without extension")
+	}
+}
+
+func (s *NodeServer) scheduleDebouncedCoreReload() {
+	s.scheduleDebouncedReload(true, false)
+}
+
+func (s *NodeServer) executeCoordinatedReload() {
+	s.reloadMu.Lock()
+	s.reloadTimer = nil
+	reloadHA := s.haReloadPending
+	reloadSB := s.sbReloadPending
+	s.haReloadPending = false
+	s.sbReloadPending = false
+	s.reloadMu.Unlock()
+
+	haproxyLog := s.Cfg.LoggerFor("HAProxyService")
+	singboxLog := s.Cfg.LoggerFor("SingboxService")
+
+	if reloadHA {
+		reloadResult := reloadHaproxyUsers()
+		switch {
+		case reloadResult.Reloaded:
+			haproxyLog.Info("HAProxy users cache reloaded after debounce", "socket", haproxyRuntimeSocketPath, "result", reloadResult.Output)
+		case reloadResult.Skipped:
+			haproxyLog.Debug("HAProxy users reload skipped", "socket", haproxyRuntimeSocketPath, "warning", reloadResult.Warning)
+		default:
+			haproxyLog.Warn("HAProxy users reload failed", "socket", haproxyRuntimeSocketPath, "warning", reloadResult.Warning)
+		}
+	}
+
+	if reloadSB {
+		singboxLog.Info("Debounce window expired: executing Sing-box Core reload/restart...")
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+
+		lifecycle := restartCoreProcessLifecycle(ctx, s.Cfg, s.apiService)
+		if lifecycle.failed() {
+			singboxLog.Error("Sing-box Core reload failed", "error", lifecycle.Error)
+		} else {
+			singboxLog.Info("Sing-box Core reloaded successfully with updated users", "process", lifecycle.ProcessAfter)
+		}
 	}
 }
 
 func (s *NodeServer) executeCoreReload() {
-	s.reloadMu.Lock()
-	s.reloadTimer = nil
-	s.reloadMu.Unlock()
-
-	log := s.Cfg.LoggerFor("SingboxService")
-	log.Info("Debounce window expired: executing Sing-box Core reload/restart...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	lifecycle := restartCoreProcessLifecycle(ctx, s.Cfg, s.apiService)
-	if lifecycle.failed() {
-		log.Error("Sing-box Core reload failed", "error", lifecycle.Error)
-	} else {
-		log.Info("Sing-box Core reloaded successfully with updated users", "process", lifecycle.ProcessAfter)
-	}
+	s.executeCoordinatedReload()
 }

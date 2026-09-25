@@ -26,6 +26,12 @@ type NodeServer struct {
 	reloadMu    sync.Mutex
 	reloadTimer *time.Timer
 	reloadFirst time.Time
+
+	haproxyMu          sync.RWMutex
+	haproxyEnabled     bool
+	haproxyInboundTags []string
+	sbReloadPending    bool
+	haReloadPending    bool
 }
 
 // NewNodeServer creates a new NodeServer instance.
@@ -58,6 +64,7 @@ func NewNodeServer(cfg *config.NodeConfig) (*NodeServer, error) {
 		apiService: apiService,
 		asnService: asnService,
 	}
+	nodeServer.initHaproxyPluginState()
 	cfg.LoggerFor("Supervisor").Debug("[OK] Supervisor (s6-overlay) initialized")
 	cfg.LoggerFor("NetworkStatsService").Info("Network stats polling started (interval: 1000ms, default: " + detectDefaultNetworkInterfaceForLogs() + ")")
 	cfg.LoggerFor("NftService").Info("[PLUGIN] Ingress Filter: available")

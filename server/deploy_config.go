@@ -39,8 +39,10 @@ type DeployInternalsPayload struct {
 }
 
 type DeployHashesPayload struct {
-	EmptyConfig string              `json:"emptyConfig"`
-	Inbounds    []DeployInboundHash `json:"inbounds"`
+	EmptyConfig      string              `json:"emptyConfig"`
+	Inbounds         []DeployInboundHash `json:"inbounds"`
+	HaproxyUsersHash string              `json:"haproxyUsersHash,omitempty"`
+	HaproxyCount     int                 `json:"haproxyCount,omitempty"`
 }
 
 type DeployInboundHash struct {
@@ -67,11 +69,12 @@ type DeployConfigTaskStats struct {
 }
 
 type DeployModulesPayload struct {
-	HaproxyEnabled bool                    `json:"haproxy_enabled"`
-	HaproxyUsers   []HaproxyUserEntry      `json:"haproxy_users"`
-	IngressFilter  NftIngressFilterPayload `json:"ingress_filter"`
-	EgressFilter   NftEgressFilterPayload  `json:"egress_filter"`
-	PreStart       PreStartPluginPayload   `json:"pre_start"`
+	HaproxyEnabled     bool                    `json:"haproxy_enabled"`
+	HaproxyInboundTags []string                `json:"haproxy_inbound_tags,omitempty"`
+	HaproxyUsers       []HaproxyUserEntry      `json:"haproxy_users"`
+	IngressFilter      NftIngressFilterPayload `json:"ingress_filter"`
+	EgressFilter       NftEgressFilterPayload  `json:"egress_filter"`
+	PreStart           PreStartPluginPayload   `json:"pre_start"`
 }
 
 type PreStartPluginPayload struct {
@@ -192,7 +195,8 @@ func (s *NodeServer) DeployConfig(ctx context.Context, task DeployConfigTaskPayl
 		log.Debug("Sing-box config unchanged, write skipped", "path", configPath)
 	}
 
-	haproxyUsersChanged, err := applyHaproxyModule(task.Modules)
+	s.setHaproxyPluginState(task.Modules.HaproxyEnabled, task.Modules.HaproxyInboundTags)
+	haproxyUsersChanged, err := applyHaproxyModule(task.Modules, task.getHashes())
 	if err != nil {
 		return DeploySummary{}, err
 	}
@@ -577,14 +581,14 @@ func djb2Dual(str string) (uint32, uint32) {
 }
 
 type HashedSet struct {
-	seen     map[string]struct{}
+	seen     map[uint64]struct{}
 	hashHigh uint32
 	hashLow  uint32
 }
 
 func NewHashedSet() *HashedSet {
 	return &HashedSet{
-		seen: make(map[string]struct{}),
+		seen: make(map[uint64]struct{}),
 	}
 }
 
@@ -592,9 +596,40 @@ func (h *HashedSet) Add(str string) {
 	if str == "" {
 		return
 	}
-	if _, ok := h.seen[str]; !ok {
-		h.seen[str] = struct{}{}
-		high, low := djb2Dual(str)
+	high, low := djb2Dual(str)
+	key := (uint64(high) << 32) | uint64(low)
+	if _, ok := h.seen[key]; !ok {
+		h.seen[key] = struct{}{}
+		h.hashHigh ^= high
+		h.hashLow ^= low
+	}
+}
+
+func (h *HashedSet) AddParts(part1 string, sep byte, part2 []byte) {
+	if part1 == "" && len(part2) == 0 {
+		return
+	}
+	var high uint32 = 5381
+	var low uint32 = 5387
+	for i := 0; i < len(part1); i++ {
+		c := uint32(part1[i])
+		high = (high << 5) + high + c
+		low = (low << 6) + low + c*37
+	}
+	if sep != 0 {
+		c := uint32(sep)
+		high = (high << 5) + high + c
+		low = (low << 6) + low + c*37
+	}
+	for i := 0; i < len(part2); i++ {
+		c := uint32(part2[i])
+		high = (high << 5) + high + c
+		low = (low << 6) + low + c*37
+	}
+
+	key := (uint64(high) << 32) | uint64(low)
+	if _, ok := h.seen[key]; !ok {
+		h.seen[key] = struct{}{}
 		h.hashHigh ^= high
 		h.hashLow ^= low
 	}

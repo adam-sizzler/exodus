@@ -113,6 +113,68 @@ func BenchmarkBuildHaproxyUsersContent(b *testing.B) {
 	}
 }
 
+func BenchmarkComputeHaproxyCSVHash(b *testing.B) {
+	users := make([]HaproxyUserEntry, 500)
+	for i := 0; i < 500; i++ {
+		users[i] = HaproxyUserEntry{
+			Username:       fmt.Sprintf("user_%04d", i),
+			VLESSUUID:      fmt.Sprintf("b8c160ee-89b5-4147-9755-a0808efb%04d", i),
+			TrojanPassword: fmt.Sprintf("trojan_pass_%04d", i),
+		}
+	}
+	content := []byte(buildHaproxyUsersContent(users))
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = computeHaproxyCSVHash(content)
+	}
+}
+
+func BenchmarkPatchHaproxyUsersCSV(b *testing.B) {
+	tmpDir := b.TempDir()
+	origPath := haproxyUsersFilePath
+	haproxyUsersFilePath = filepath.Join(tmpDir, "users.csv")
+	defer func() {
+		haproxyUsersFilePath = origPath
+	}()
+
+	inboundMap := map[string]string{
+		"trojan-stable": "trojan",
+		"anytls-in":     "anytls",
+	}
+	haproxyInboundTags := []string{"trojan-stable", "anytls-in"}
+
+	// Seed 200 users
+	seedUsers := make([]SyncUserItem, 200)
+	for i := 0; i < 200; i++ {
+		seedUsers[i] = SyncUserItem{
+			Action:         "add",
+			Identifier:     fmt.Sprintf("user_%04d", i),
+			Username:       fmt.Sprintf("user_%04d", i),
+			TrojanPassword: fmt.Sprintf("pass_%04d", i),
+			InboundTags:    []string{"trojan-stable"},
+		}
+	}
+	_, _ = patchHaproxyUsersCSV(seedUsers, inboundMap, true, haproxyInboundTags)
+
+	updateItem := []SyncUserItem{
+		{
+			Action:         "add",
+			Identifier:     "user_0050",
+			Username:       "user_0050",
+			AnytlsPassword: "new_anytls_pass",
+			InboundTags:    []string{"anytls-in"},
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = patchHaproxyUsersCSV(updateItem, inboundMap, true, haproxyInboundTags)
+	}
+}
+
 func BenchmarkNormalizeNftIPs(b *testing.B) {
 	rawIPs := make([]string, 200)
 	for i := 0; i < 200; i++ {

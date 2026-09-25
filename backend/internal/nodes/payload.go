@@ -23,8 +23,10 @@ type deployInternalsBlock struct {
 }
 
 type deployHashesBlock struct {
-	EmptyConfig string              `json:"emptyConfig"`
-	Inbounds    []deployInboundHash `json:"inbounds"`
+	EmptyConfig      string              `json:"emptyConfig"`
+	Inbounds         []deployInboundHash `json:"inbounds"`
+	HaproxyUsersHash string              `json:"haproxyUsersHash,omitempty"`
+	HaproxyCount     int                 `json:"haproxyCount,omitempty"`
 }
 
 type deployInboundHash struct {
@@ -34,8 +36,9 @@ type deployInboundHash struct {
 }
 
 type deployModulesTaskBlock struct {
-	HaproxyEnabled bool                     `json:"haproxy_enabled"`
-	HaproxyUsers   []deployHaproxyUserItem  `json:"haproxy_users,omitempty"`
+	HaproxyEnabled     bool                     `json:"haproxy_enabled"`
+	HaproxyInboundTags []string                 `json:"haproxy_inbound_tags,omitempty"`
+	HaproxyUsers       []deployHaproxyUserItem  `json:"haproxy_users,omitempty"`
 	IngressFilter  deployIngressFilterBlock `json:"ingress_filter"`
 	EgressFilter   deployEgressFilterBlock  `json:"egress_filter"`
 	PreStart       deployPreStartBlock      `json:"pre_start"`

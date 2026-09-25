@@ -28,6 +28,14 @@ func buildUserSyncItem(action string, record userRecord, tags []string) monitor.
 	if record.Hysteria2Password != nil {
 		hy2Password = *record.Hysteria2Password
 	}
+	naivePassword := ""
+	if record.NaivePassword != nil {
+		naivePassword = *record.NaivePassword
+	}
+	anytlsPassword := ""
+	if record.AnytlsPassword != nil {
+		anytlsPassword = *record.AnytlsPassword
+	}
 	identifier := ""
 	if record.ID > 0 {
 		identifier = monitor.FormatUserID(record.ID)
@@ -42,6 +50,8 @@ func buildUserSyncItem(action string, record userRecord, tags []string) monitor.
 		TrojanPassword:    record.TrojanPassword,
 		SSPassword:        record.SSPassword,
 		Hysteria2Password: hy2Password,
+		AnytlsPassword:    anytlsPassword,
+		NaivePassword:     naivePassword,
 		InboundTags:       tags,
 	}
 }

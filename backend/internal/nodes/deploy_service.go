@@ -188,7 +188,13 @@ func (nm *NodeMonitor) deployNodeTarget(
 			nm.cfg.Logger.Warn("Failed to load node users for HAPROXY payload", "node", target.name, "node_uuid", target.uuid, "error", usersErr)
 		} else {
 			modules.HaproxyEnabled = haproxyEnabled
+			modules.HaproxyInboundTags = haproxyInboundTags
 			modules.HaproxyUsers = haproxyUsers
+			if haproxyEnabled && internals != nil {
+				haHash, haCount := computeHaproxyUsersHash(haproxyUsers)
+				internals.Hashes.HaproxyUsersHash = haHash
+				internals.Hashes.HaproxyCount = haCount
+			}
 		}
 	}
 

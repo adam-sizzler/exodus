@@ -21,6 +21,8 @@ type UserSyncItem struct {
 	TrojanPassword    string   `json:"trojan_password,omitempty"`
 	SSPassword        string   `json:"ss_password,omitempty"`
 	Hysteria2Password string   `json:"hysteria2_password,omitempty"`
+	AnytlsPassword    string   `json:"anytls_password,omitempty"`
+	NaivePassword     string   `json:"naive_password,omitempty"`
 	Flow              string   `json:"flow,omitempty"`
 	InboundTags       []string `json:"inbound_tags,omitempty"`
 }

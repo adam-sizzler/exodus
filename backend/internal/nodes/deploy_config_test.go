@@ -250,3 +250,50 @@ func TestRenderNodeConfigFromPrepared(t *testing.T) {
 		t.Fatalf("expected 1 inbound hash for ss-in, got %v", internals2.Hashes.Inbounds)
 	}
 }
+
+func TestRenderNodeConfigPreservesBlockOrder(t *testing.T) {
+	base := orderedmap.New()
+	base.Set("log", map[string]any{"level": "info"})
+	base.Set("dns", map[string]any{"servers": []any{}})
+	base.Set("inbounds", []any{})
+	base.Set("outbounds", []any{})
+	base.Set("route", map[string]any{"rules": []any{}})
+	base.Set("experimental", map[string]any{"v2ray_api": map[string]any{}})
+
+	prep := &preparedProfileData{
+		profileUUID: "profile-order",
+		baseParsed:  base,
+		inbounds: []preparedInbound{
+			{
+				tag:          "trojan-in",
+				normTag:      "trojan-in",
+				inboundType:  "trojan",
+				rawWithUsers: map[string]any{"tag": "trojan-in", "type": "trojan"},
+				rawEmpty:     map[string]any{"tag": "trojan-in", "type": "trojan"},
+			},
+		},
+	}
+
+	nm := &NodeMonitor{}
+	cfgJSON, _, _, _, err := nm.renderNodeConfigFromPrepared("node-order", prep, map[string]struct{}{"trojan-in": {}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	resultMap := orderedmap.New()
+	if err := json.Unmarshal(cfgJSON, resultMap); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+
+	expectedKeys := []string{"log", "dns", "inbounds", "outbounds", "route", "experimental"}
+	actualKeys := resultMap.Keys()
+	if len(actualKeys) != len(expectedKeys) {
+		t.Fatalf("expected %d keys, got %d: %v", len(expectedKeys), len(actualKeys), actualKeys)
+	}
+	for i, want := range expectedKeys {
+		if actualKeys[i] != want {
+			t.Fatalf("key at index %d: expected %q, got %q (full order: %v)", i, want, actualKeys[i], actualKeys)
+		}
+	}
+}
+

@@ -689,19 +689,23 @@ func (nm *NodeMonitor) renderNodeConfigFromPrepared(
 	}
 
 	nodeParsed := orderedmap.New()
-	baseMap := prep.baseWithoutInbounds
-	if baseMap == nil {
-		baseMap = prep.baseParsed
+	sourceMap := prep.baseParsed
+	if sourceMap == nil {
+		sourceMap = prep.baseWithoutInbounds
 	}
-	if baseMap != nil {
-		for _, key := range baseMap.Keys() {
+	inboundsAdded := false
+	if sourceMap != nil {
+		for _, key := range sourceMap.Keys() {
 			if key == "inbounds" {
-				continue
-			}
-			if val, ok := baseMap.Get(key); ok {
+				nodeParsed.Set("inbounds", filteredInbounds)
+				inboundsAdded = true
+			} else if val, ok := sourceMap.Get(key); ok {
 				nodeParsed.Set(key, val)
 			}
 		}
+	}
+	if !inboundsAdded {
+		nodeParsed.Set("inbounds", filteredInbounds)
 	}
 
 	tagsKey := strings.Join(sortedTagKeys(activeTags), ",")
@@ -715,9 +719,9 @@ func (nm *NodeMonitor) renderNodeConfigFromPrepared(
 			emptyConfigHash = sha256Hex(emptyJSON)
 			prep.emptyConfigCache.Store(tagsKey, emptyConfigHash)
 		}
+		nodeParsed.Set("inbounds", filteredInbounds)
 	}
 
-	nodeParsed.Set("inbounds", filteredInbounds)
 	finalConfig, err := json.Marshal(nodeParsed)
 	if err != nil {
 		return nil, nil, "", 0, fmt.Errorf("marshal deploy config: %w", err)

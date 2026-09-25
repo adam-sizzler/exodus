@@ -14,9 +14,9 @@ func djb2Dual(str string) (uint32, uint32) {
 	return high, low
 }
 
-// HashedSet maintains unique string items and their 64-bit composite hash.
+// HashedSet maintains unique items and their 64-bit composite hash.
 type HashedSet struct {
-	seen     map[string]struct{}
+	seen     map[uint64]struct{}
 	hashHigh uint32
 	hashLow  uint32
 }
@@ -24,7 +24,7 @@ type HashedSet struct {
 // NewHashedSet allocates a new HashedSet.
 func NewHashedSet() *HashedSet {
 	return &HashedSet{
-		seen: make(map[string]struct{}),
+		seen: make(map[uint64]struct{}),
 	}
 }
 
@@ -33,9 +33,41 @@ func (h *HashedSet) Add(str string) {
 	if str == "" {
 		return
 	}
-	if _, ok := h.seen[str]; !ok {
-		h.seen[str] = struct{}{}
-		high, low := djb2Dual(str)
+	high, low := djb2Dual(str)
+	key := (uint64(high) << 32) | uint64(low)
+	if _, ok := h.seen[key]; !ok {
+		h.seen[key] = struct{}{}
+		h.hashHigh ^= high
+		h.hashLow ^= low
+	}
+}
+
+// AddParts adds an item composed of parts without allocating a concatenated string in heap.
+func (h *HashedSet) AddParts(part1 string, sep byte, part2 []byte) {
+	if part1 == "" && len(part2) == 0 {
+		return
+	}
+	var high uint32 = 5381
+	var low uint32 = 5387
+	for i := 0; i < len(part1); i++ {
+		c := uint32(part1[i])
+		high = (high << 5) + high + c
+		low = (low << 6) + low + c*37
+	}
+	if sep != 0 {
+		c := uint32(sep)
+		high = (high << 5) + high + c
+		low = (low << 6) + low + c*37
+	}
+	for i := 0; i < len(part2); i++ {
+		c := uint32(part2[i])
+		high = (high << 5) + high + c
+		low = (low << 6) + low + c*37
+	}
+
+	key := (uint64(high) << 32) | uint64(low)
+	if _, ok := h.seen[key]; !ok {
+		h.seen[key] = struct{}{}
 		h.hashHigh ^= high
 		h.hashLow ^= low
 	}

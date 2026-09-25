@@ -114,11 +114,6 @@ func panelRequestHandler(panelBasePath, panelBasePathNoTrailing, uiDir string, s
 		if cleanPath != "." && cleanPath != "" {
 			targetPath := filepath.Join(uiDir, cleanPath)
 			if info, err := os.Stat(targetPath); err == nil && !info.IsDir() {
-				if static.IsHashedAsset(cleanPath) {
-					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-				} else {
-					w.Header().Set("Cache-Control", "no-cache")
-				}
 				staticReq := r.Clone(r.Context())
 				staticReq.URL.Path = "/" + cleanPath
 				staticReq.URL.RawPath = ""
@@ -156,4 +151,3 @@ func registerPprofHandlers(mux *http.ServeMux, basePath string, cfg *config.Back
 		cfg.Logger.Warn("Profiling endpoints enabled (/debug/pprof/) via EXODUS_ENABLE_PPROF=true")
 	}
 }
-

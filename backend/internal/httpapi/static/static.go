@@ -179,7 +179,7 @@ func ServeStatic(w http.ResponseWriter, r *http.Request, staticDir, basePath str
 
 	info, err := os.Stat(targetClean)
 	if err == nil && !info.IsDir() {
-		if isHashedAsset(relPath) {
+		if IsHashedAsset(relPath) {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			w.Header().Set("Cache-Control", "no-cache")
@@ -200,7 +200,7 @@ func ServeStatic(w http.ResponseWriter, r *http.Request, staticDir, basePath str
 	ServePanelIndex(w, indexPath, basePathWithSlash, basePath)
 }
 
-func isHashedAsset(relPath string) bool {
+func IsHashedAsset(relPath string) bool {
 	if strings.HasPrefix(relPath, "assets/") || strings.HasPrefix(relPath, "splash_screens/") {
 		return true
 	}
